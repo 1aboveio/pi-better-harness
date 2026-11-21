@@ -7,13 +7,13 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createBackgroundTools } from '../src/runtime/background-tools.ts';
 import { acquireMutationStore } from '../src/runtime/mutation-store.ts';
 import { RuntimeResultSupervision } from '../src/runtime/result-supervision.ts';
-test('fixed Background adapter fences new admissions, accepts exact replay and recovers interrupted receipts', { timeout: 30000 }, async () => {
+test('fixed Background adapter fences new admissions, accepts exact replay and recovers interrupted receipts', { timeout: 30000 }, async t => {
     const root = realpathSync(mkdtempSync('/tmp/bg-admit-')), previous = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = root;
     const directory = join(root, 'background-tool-admission');
     mkdirSync(directory, { mode: 0o700 });
     const load = (name: string) => import(`../src/runtime/domain/background-service/${name}.domain.mjs`);
-    const [{ registerTools }, { backgroundDigest }, { readProcessStartTokenFresh }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
+    const [{ registerTools }, { backgroundDigest }, { readAdmissionStartToken }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
     const supervision = new RuntimeResultSupervision(root, 'instance');
     const ports: Map<string, any> = (globalThis as any)[Symbol.for('pi-better-server:result-supervision-ports-v1')] ??= new Map();
     ports.set(root, { status() { supervision.reconcile(); return { hostId: supervision.hostId, epoch: supervision.epoch, reason: supervision.reason }; } });
@@ -22,7 +22,7 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     let draining = false, service: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
     const invoke = async (tool: string, params: any, key: string = randomUUID(), mutate?: (record: any) => void) => {
         const id = randomUUID(), secret = randomBytes(32).toString('hex'), path = join(directory, `${id}.json`);
-        const record = { version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: 'instance', key, tool, params, parametersDigest: backgroundDigest(definitions.get(tool)?.parameters ?? {}), owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, branchIds: [], projectTrusted: true, pid: process.pid, start: readProcessStartTokenFresh(process.pid) };
+        const record = { version: 2, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: 'instance', key, tool, params, parametersDigest: backgroundDigest(definitions.get(tool)?.parameters ?? {}), owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, branchIds: [], projectTrusted: true, pid: process.pid, start: readAdmissionStartToken(process.pid) };
         mutate?.(record);
         writeFileSync(path, JSON.stringify(record), { mode: 0o600 });
         try {
@@ -35,10 +35,20 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     try {
         const childLog = join(root, 'child.log');
         writeFileSync(childLog, 'one\ntwo\nchild-log-proof');
-        const child = {id:'bgs_0123456789abcdef0123',readOnly:true,parentAgentId:'worker',parentRecipient:{sessionId:'native',workspace:root,branchId:'branch'},
+        const child = {id:'bgs_0123456789abcdef0123',durable:true,readOnly:true,parentAgentId:'worker',parentRecipient:{sessionId:'native',workspace:root,branchId:'branch'},
           status:'running',logPaths:{stdout:childLog,stderr:childLog,events:childLog}};
+        const pointer = { id: 'bgs_00000000000000000001', durable: true, callbackPending: true, terminal: true, status: 'failed' };
+        const completed = { id: pointer.id, durable: true, terminal: true, status: 'failed', waits: [], name: 'finished while disconnected' };
         service = await createBackgroundTools(root, 'instance', () => draining, async scope => ({status:'ready',scopeRevision:'fixture',
-          rows:scope.cwd===root && scope.sessionId==='native' ? [{meta:child}] : []}));
+          rows:scope.cwd===root && scope.sessionId==='native'
+            ? (scope.id === pointer.id ? [completed] : [child, pointer]).map(meta => ({meta})) : []}));
+        await t.test('poll returns displayable tasks and resolves previously active terminals by ID', async () => {
+            const onBranch = (record: any) => { record.branchIds = ['branch']; };
+            const initial = await invoke('__background_poll', {}, 'initial-poll', onBranch);
+            assert.deepEqual(initial.tasks, [child]);
+            const restored = await invoke('__background_poll', { knownActiveIds: [pointer.id] }, 'restore-poll', onBranch);
+            assert.deepEqual(restored.tasks, [child, completed]);
+        });
         const childLogResult = await invoke('__background_log', {id:child.id,lines:1}, 'child-log', r => r.branchIds=['branch']);
         assert.equal(childLogResult.stdout,'child-log-proof');
         await assert.rejects(invoke('__background_log', {id:child.id}, 'wrong-branch'), /outside the captured scope/);

@@ -99,8 +99,8 @@ export function mergeJobOptions(shared, job) {
         allow_nested: job.allow_nested ?? shared?.allow_nested,
         // Native session id selected for this JOB only. A shared value would make
         // every job contend for the same conversation writer, so it is not inherited.
-        session_id: typeof job.session_id === "string" ? job.session_id : undefined,
-        session_name: typeof job.session_name === "string" ? job.session_name : undefined,
+        session_id: typeof job.session_id === "string" ? normalizeSessionSelector(job.session_id) : undefined,
+        session_name: typeof job.session_name === "string" ? normalizeSessionSelector(job.session_name) : undefined,
         // Harness timing; an explicit null means "not set", so it falls through to shared.
         deadline_minutes: job.deadline_minutes ?? shared?.deadline_minutes,
         grace_minutes: job.grace_minutes ?? shared?.grace_minutes,
@@ -111,6 +111,11 @@ export function mergeJobOptions(shared, job) {
         // shared.agent with job.role would invent an ambiguous run.
         ...catalogSelector(shared, job),
     };
+}
+
+/** Keep nonblank selectors exact. Only a blank string is equivalent to omission. */
+export function normalizeSessionSelector(value) {
+    return typeof value === "string" && value.trim() === "" ? undefined : value;
 }
 
 function catalogText(value) {
@@ -157,9 +162,11 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
         if (typeof job.prompt !== "string" || job.prompt.trim() === "") {
             throw new Error(`job ${i + 1} is missing a non-empty prompt.`);
         }
-        if (job.session_id !== undefined && job.session_name !== undefined) throw new Error(`job ${i + 1}: pass either session_id or session_name, not both.`);
-        if (job.session_name !== undefined && (typeof job.session_name !== "string" || job.session_name.trim() === "")) throw new Error(`job ${i + 1} session_name must be a non-empty name.`);
-        if (job.session_id !== undefined && (typeof job.session_id !== "string" || job.session_id.trim() === "")) {
+        const sessionId = normalizeSessionSelector(job.session_id);
+        const sessionName = normalizeSessionSelector(job.session_name);
+        if (sessionId !== undefined && sessionName !== undefined) throw new Error(`job ${i + 1}: pass either session_id or session_name, not both.`);
+        if (sessionName !== undefined && typeof sessionName !== "string") throw new Error(`job ${i + 1} session_name must be a non-empty name.`);
+        if (sessionId !== undefined && typeof sessionId !== "string") {
             throw new Error(`job ${i + 1} session_id must be a non-empty native session id.`);
         }
         if (seenPrompts.has(job.prompt)) {

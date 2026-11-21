@@ -119,7 +119,7 @@ export interface WorkLedgerSessionBinding {
 }
 
 export const WORK_LEDGER_PROMPT_GUIDELINES = [
-  "When Long-term work ledger is on, use update_todo with ledger for a durable high-level outcome and stable items. It is the same interface as Todo, not a separate execution plan or public tool.",
+  "When Project work ledger is on, use update_todo with ledger for a durable high-level outcome and stable items. It is the same interface as Todo, not a separate execution plan or public tool.",
   "Only use update_todo ledger attach when the user explicitly names an existing ledger or asks to continue it. Never infer association from the working directory, project files, or a similar outcome, and never attach while starting unrelated work.",
   "Read the ledger with get_todo {ledger:{action:'read'}} before updating it, then send its current revision. Never silently retry a stale revision or overwrite newer progress. Use get_todo {ledger:{action:'list'}} to discover records.",
   "In an update_todo ledger update, send only the items that changed. Omitted items and fields keep their stored progress.",

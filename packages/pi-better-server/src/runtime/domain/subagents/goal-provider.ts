@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { workObservation, onWorkObservation } from "./work-observation.ts";
+import { activateWorkObservation, hasWorkObservationContext, workObservation, onWorkObservation } from "./work-observation.ts";
 import {
     belongsToOrigin,
     effectiveStatus,
@@ -39,6 +39,24 @@ function parkActivity(meta: Parameters<typeof effectiveStatus>[0]): Record<strin
     };
 }
 
+function observedActivity(observed: any, ctx?: ExtensionContext) {
+    if (observed?.status !== "ready") throw new Error(observed?.reason ?? "Subagent activity is unverified");
+    return {
+        providerId: "subagents", label: "Subagents", nextDeadline: observed.nextDeadline ?? null,
+        items: observed.rows.filter((row: any) => !ctx || (
+            belongsToOrigin(row.meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() }) &&
+            (!row.meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === row.meta.callbackOrigin.branchId))
+        )).map((row: any) => {
+            const status = row.assignment.state;
+            const active = status === "running" || status === "waiting";
+            return { id: row.meta.id, label: row.meta.name, status, active, terminal: !active,
+                attention: !active && status !== "completed", unhealthy: row.meta.status === "orphaned",
+                startedAt: row.meta.startedAt, endedAt: row.meta.endedAt,
+                details: { assignment: row.assignment, sourceRevision: row.sourceRevision } };
+        }),
+    };
+}
+
 export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
     const emitProvider = (): void => {
         pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
@@ -46,24 +64,16 @@ export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
             label: "Subagents",
             scope: "session",
             activityVersion: 1,
-            getActivity: (ctx?: ExtensionContext) => {
+            getActivity: (ctx?: ExtensionContext, options?: { cachedOnly?: boolean }) => {
                 const observed = workObservation();
+                if (!observed && options?.cachedOnly) {
+                    return { providerId: "subagents", coverage: "unverified", items: [], nextDeadline: null };
+                }
+                if (!observed && hasWorkObservationContext()) {
+                    return activateWorkObservation().then(() => observedActivity(workObservation(), ctx));
+                }
                 if (observed) {
-                    if (observed.status !== "ready") throw new Error(observed.reason ?? "Subagent activity is unverified");
-                    return {
-                        providerId: "subagents", label: "Subagents", nextDeadline: observed.nextDeadline ?? null,
-                        items: observed.rows.filter((row: any) => !ctx || (
-                            belongsToOrigin(row.meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() }) &&
-                            (!row.meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === row.meta.callbackOrigin.branchId))
-                        )).map((row: any) => {
-                            const status = row.assignment.state;
-                            const active = status === "running" || status === "waiting";
-                            return { id: row.meta.id, label: row.meta.name, status, active, terminal: !active,
-                                attention: !active && status !== "completed", unhealthy: row.meta.status === "orphaned",
-                                startedAt: row.meta.startedAt, endedAt: row.meta.endedAt,
-                                details: { assignment: row.assignment, sourceRevision: row.sourceRevision } };
-                        }),
-                    };
+                    return observedActivity(observed, ctx);
                 }
                 let sessionId: string | undefined;
                 try {

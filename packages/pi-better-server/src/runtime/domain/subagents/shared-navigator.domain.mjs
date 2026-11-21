@@ -369,7 +369,7 @@ const BACK_TO_MAIN = "← main (Esc)";
 const BACK_TARGET = "back-to-main";
 function highlightPointerTarget(theme, line, width) {
     const colors = theme;
-    return colors?.bg?.("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))))
+    return colors?.bg?.("selectedBg", line + " ".repeat(Math.max(0, width - piVisibleWidth(line))))
         ?? themeFgFromTheme(theme)("accent", line);
 }
 function createPointerNavigation(targetAt, activate) {
@@ -698,16 +698,16 @@ function formatMainListRow(row, selected, fg, width) {
     const status = fg(indicator.color, indicator.glyph);
     const elapsed = singleLine(row.elapsed || "-");
     const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
-    const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
+    const elapsedWidth = Math.min(Math.max(piVisibleWidth(elapsed), 4), 12);
     const statusWidth = 2;
-    const leftPrefixWidth = visibleWidth(prefix) + statusWidth + 1;
+    const leftPrefixWidth = piVisibleWidth(prefix) + statusWidth + 1;
     const maxNameWidth = Math.max(8, Math.floor(available * 0.36));
     const nameWidth = Math.max(8, Math.min(44, maxNameWidth, available - leftPrefixWidth - elapsedWidth - 10));
     const rightWidth = Math.max(8, available - leftPrefixWidth - nameWidth - 1);
     const summaryWidth = Math.max(1, rightWidth - elapsedWidth - 1);
     const left = `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)}`;
     const right = `${dim(fitRight(rowSummary(row), summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
-    const gap = Math.max(1, available - visibleWidth(left) - visibleWidth(right));
+    const gap = Math.max(1, available - piVisibleWidth(left) - piVisibleWidth(right));
     return `${left}${" ".repeat(gap)}${right}`;
 }
 function statusGlyph(row) {
@@ -809,16 +809,16 @@ function rowSummary(row) {
 }
 function fit(value, width) {
     const str = singleLine(value);
-    const visible = visibleWidth(str);
-    if (visible >= width)
-        return truncateVisible(str, width);
+    const visible = piVisibleWidth(str);
+    if (visible > width)
+        return piTruncateToWidth(str, width);
     return str + " ".repeat(width - visible);
 }
 function fitRight(value, width) {
     const str = singleLine(value);
-    const visible = visibleWidth(str);
-    if (visible >= width)
-        return truncateVisible(str, width);
+    const visible = piVisibleWidth(str);
+    if (visible > width)
+        return piTruncateToWidth(str, width);
     return " ".repeat(width - visible) + str;
 }
 function singleLine(value) {
@@ -901,29 +901,49 @@ function installNavigatorEditor(ui, deps) {
 function wrapEditor(inner, deps) {
     if (inner && typeof inner.render === "function")
         state().editorComponent = inner;
+    const methods = new Map();
+    const replacements = new Map();
     const proxy = new Proxy(inner, {
         get(target, prop) {
+            const value = Reflect.get(target, prop);
+            if (typeof value !== "function" || replacements.get(prop) === value)
+                return value;
+            const cached = methods.get(prop);
+            if (cached && cached.original === value)
+                return cached.exposed;
+            // Capture the method before another editor decorator replaces it.
+            // A decorator can retain this wrapper and call it as its delegate.
+            let exposed = value.bind(target);
             if (prop === "handleInput") {
-                return (data) => {
+                exposed = (data) => {
                     if (target.getText?.() === "" && handleMainListInput(data, deps)) {
                         return;
                     }
-                    target.handleInput(data);
+                    value.call(target, data);
                 };
             }
-            if (prop === "render" && typeof target.render === "function") {
-                return (...args) => {
+            if (prop === "render") {
+                exposed = (...args) => {
                     const s = state();
                     if (s.editorFocusTarget === proxy)
                         s.editorRenders = (s.editorRenders ?? 0) + 1;
-                    return target.render(...args);
+                    return value.apply(target, args);
                 };
             }
-            const value = Reflect.get(target, prop);
-            return typeof value === "function" ? value.bind(target) : value;
+            methods.set(prop, { original: value, exposed });
+            return exposed;
         },
         set(target, prop, value) {
-            return Reflect.set(target, prop, value);
+            const cached = methods.get(prop);
+            const restoring = cached !== undefined && value === cached.exposed;
+            if (!Reflect.set(target, prop, restoring ? cached.original : value))
+                return false;
+            // Preserve replacement identity so the installing decorator can undo it.
+            if (!restoring && typeof value === "function")
+                replacements.set(prop, value);
+            else
+                replacements.delete(prop);
+            return true;
         },
     });
     // Pi mounts and focuses whatever the factory returns; an extension that
@@ -933,6 +953,10 @@ function wrapEditor(inner, deps) {
 }
 function handleMainListInput(data, deps) {
     const s = state();
+    if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+        for (const provider of s.providers.values())
+            provider.onOpen?.();
+    }
     const rows = listRows();
     if (rows.length === 0) {
         // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
@@ -1054,6 +1078,8 @@ function openNavigator() {
     const deps = s.deps;
     if (!ctx || !deps || !isNavigatorUiAvailable(ctx))
         return;
+    for (const provider of s.providers.values())
+        provider.onOpen?.();
     const rows = listRows();
     if (rows.length === 0)
         return;
@@ -1131,6 +1157,8 @@ function openNavigator() {
     catch { /* keep foreground usable */ }
 }
 function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, initialDetailId) {
+    let editorRendersSeen = state().editorRenders ?? 0;
+    let sawLiveEditor = liveEditorMounted(tui) === true;
     // The overlay only ever shows one row's detail; the rail below it is the list.
     const overlayState = { rows: initialRows, selected: 0 };
     let logTailRows = DEFAULT_LOG_TAIL_ROWS;
@@ -1290,19 +1318,24 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
         closeArmTimer.unref?.();
         requestRender();
     }
-    let editorRendersSeen;
     /**
-     * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
-     * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
-     * its own non-container component still renders ours, so the wrapper also counts as live while it
-     * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+     * Close when a replacement editor takes over while the sheet is open (#332).
+     * A wrapper inside another extension's editor still counts as live if it rendered since
+     * the last overlay frame. Pi renders the editor before it composites overlays.
      */
     function closeIfEditorReplaced() {
-        const rendersBefore = editorRendersSeen;
         const renders = state().editorRenders ?? 0;
+        const rendered = renders !== editorRendersSeen;
         editorRendersSeen = renders;
-        state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
-        if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore)
+        state().editorRenderedLastFrame = rendered;
+        if (closed)
+            return;
+        const mounted = liveEditorMounted(tui);
+        if (rendered || mounted === true) {
+            sawLiveEditor = true;
+            return;
+        }
+        if (mounted !== false || !sawLiveEditor)
             return;
         // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
         queueMicrotask(() => {
@@ -1833,10 +1866,10 @@ function fill(glyph, label, width) {
     return prefix + glyph.repeat(w - visibleWidth(prefix));
 }
 function safeTruncate(line, width, truncate) {
-    if (visibleWidth(line) <= width)
+    if (piVisibleWidth(line) <= width)
         return line;
     const cut = truncate(line, width);
-    return visibleWidth(cut) > width ? truncateVisible(cut, width) : cut;
+    return piVisibleWidth(cut) > width ? piTruncateToWidth(cut, width) : cut;
 }
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))", "g");
 const FORMATTING_PREFIX_RE = new RegExp(`^(?:${ANSI_RE.source}|<\\/?[a-zA-Z][\\w-]*>|</>)`);

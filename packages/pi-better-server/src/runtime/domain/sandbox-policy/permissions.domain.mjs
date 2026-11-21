@@ -1,6 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-sandbox/permissions.ts. Do not edit directly.
 /** Permission values are intent; launch backends must validate support before enforcement. */
-import { defaultSubagentTools, packageLabel, parseSubagentTools } from "./shared-task-tools.domain.mjs";
+import { defaultSubagentTools, parseSubagentTools } from "./shared-task-tools.domain.mjs";
 /**
  * Return fresh profiles so changing one column never changes another.
  * All sandbox switches default to Off. Subagents retain Outside project = Write
@@ -71,11 +71,6 @@ export function describeLoosening(previous, next) {
             changes.push(`${label}: processAccess off → read`);
     }
     // A trusted tool runs outside the file rules: ticking one loosens the profile.
-    for (const tool of next.subagentTools.trusted) {
-        if (!previous.subagentTools.trusted.some((t) => t.name === tool.name && t.package === tool.package)) {
-            changes.push(`Subagents: trusted tool ${tool.name} (${packageLabel(tool.package)}) runs outside the file rules`);
-        }
-    }
     return changes;
 }
 /** Strict decoding: malformed policy must not silently broaden permissions. */

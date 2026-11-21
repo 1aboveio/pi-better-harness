@@ -47,11 +47,14 @@ export function observeBackgroundTaskStall(meta: BackgroundTaskMeta, now = Date.
   });
 }
 
+export function formatProgressDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${(seconds % 60).toString().padStart(2, "0")}s`;
+}
+
 /** Silence is an observation, not proof that the process is hung. */
-export function formatBackgroundTaskStall(observation: StallObservation): string | undefined {
+export function formatBackgroundTaskStall(observation: Pick<StallObservation, "state" | "ageMs">): string | undefined {
   if (observation.state !== "quiet" && observation.state !== "stalled") return undefined;
-  const seconds = Math.max(0, Math.round((observation.ageMs ?? 0) / 1000));
-  const duration = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${(seconds % 60).toString().padStart(2, "0")}s`;
   const label = observation.state === "stalled" ? "suspected stall" : "quiet";
-  return `${label}; no observed progress for ${duration}`;
+  return `${label}; no observed progress for ${formatProgressDuration(observation.ageMs ?? 0)}`;
 }

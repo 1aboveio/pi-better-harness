@@ -1,5 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/adapter-contract.ts. Do not edit directly.
-import { getObservedWaitHost } from "./observed-waits.domain.mjs";
+import { getObservedWaitHost } from "./observed-wait-client.domain.mjs";
 import { inspectMeta } from "./registry.domain.mjs";
 /** Optional-peer contract, mirrored by pi-better-sandbox/background-admission.ts. */
 export const BACKGROUND_ADAPTER_REQUEST = "pi-better-background-tasks:adapter-request";

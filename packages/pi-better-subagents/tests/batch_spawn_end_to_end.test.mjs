@@ -983,6 +983,23 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.equal(meta.sandbox, undefined);
     });
 
+    it("starts new single and batch conversations when both optional session selectors are blank", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+        const blank = { session_id: "", session_name: " \t " };
+        const single = await tools.subagent_spawn.execute("blank-single", { prompt: "solo", tools: "read", ...blank }, null, null, ctx);
+        const batch = await tools.subagent_spawn_batch.execute("blank-batch", {
+            shared: { model: "test/model", tools: "read" }, jobs: [{ prompt: "batch", ...blank }],
+        }, null, null, ctx);
+        assert.match(single.content[0].text, /id=sa_[a-z0-9_]+/);
+        assert.equal(batch.structuredContent.launched.length, 1);
+        assert.equal(batch.structuredContent.launched[0].continuedFrom, undefined);
+        assert.equal(registry.readMeta(batch.structuredContent.launched[0].id).model, "test/model");
+        await assert.rejects(tools.subagent_spawn.execute("ambiguous-single", {
+            prompt: "ambiguous", session_id: "saved-id", session_name: "saved name",
+        }, null, null, ctx), /Pass either session_id or session_name/);
+    });
+
     it("parses model@effort and records the resolved effort for the navigator", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();

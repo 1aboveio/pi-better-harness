@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/index.ts. Do not edit directly.
+import { shouldRestoreWorkObservation } from "./shared-work-client.mjs";
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.domain.mjs";
 import { captureLaunchContext } from "./launch-context.domain.mjs";
 /**
@@ -25,39 +26,36 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.domain.mjs";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.domain.mjs";
+import { workObservation, workObservationStarted, workObservationFailure, configureWorkObservation, activateWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.domain.mjs";
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, observeNavigatorLaunch, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
 import { spawnDetached } from "./spawn.domain.mjs";
-import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
 import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./finalization.domain.mjs";
 import { completeOwnedExit } from "./owned-exit.domain.mjs";
 import { selectSessionByName } from "./session-selection.domain.mjs";
 import { isWithinWorkspace } from "./workspace-scope.domain.mjs";
-import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
+import { BUILTIN_TOOLS } from "./extensions.domain.mjs";
+import { ORDINARY_TOOL_PROVIDERS, activeChildProviders, ordinaryChildConfig, addEditablePatch, loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
 import { createSubagentSettingsPage } from "./settings-page.domain.mjs";
 import { deliverSubagentPrompt, effectiveSubagentSettings, subagentSettingsTool } from "./effective-settings.domain.mjs";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.domain.mjs";
 import { continuationTimingParams, decideTiming, describeTiming, DEFAULT_TIMING_MINUTES, emptyProgress, foldProgress, formatTimingLimits, isTimingMinutes, isProgressRelevantLine, resolveRunTiming, steerText, stuckAlertText, TIMING_ENV, timingParameterSchemas, toolWaitAlertText, validatedTimingMinutes, } from "./timing.domain.mjs";
 import { readAppendedLines } from "./log-cursor.domain.mjs";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode } from "./delegation.domain.mjs";
-import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
-import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.domain.mjs";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.domain.mjs";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.domain.mjs";
 import { TASK_BUILTINS } from "./shared-task-sandbox.domain.mjs";
-import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
+import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
 import { announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
-import { resolveSubagentWorkspace } from "./git-workspace.domain.mjs";
 import { dirname, isAbsolute, join } from "node:path";
 import { baseDir, taskWorkspaceDir, sessionsDir, runDir, recordTaskRuntimeProvenance, recordLaunchAttempt, clearLaunchAttempt, logPathFor, promptPathFor, nextRunId, writeMeta, readMeta, listMetas, listActiveMetasForParent, listMetasForOrigin, listMetasForParent, onMetaChanged, effectiveStatus, ownedByThisParent as ownedByFrontend, navigatorVisibleRuns, dismissRun, } from "./registry.domain.mjs";
 import { captureProcessIdentity, extractChildEventFactsFromLog, loadHealthThresholdsFromConfig, isAbandonedByParent, needsMonitoring, observeRunHealth, realProcessProbe, reconcileRun, resetChildEventLogCursor, } from "./health.domain.mjs";
-import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
+import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, normalizeSessionSelector, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
 import { formatCapacityRejectMessage, getSharedCapacityGate, } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.domain.mjs";
 import { cancelCallbackBatch, getCallbackBatcher, packCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
@@ -840,6 +838,7 @@ let healthTicker;
 let managedHealthClose;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
 let healthPi;
+let recoverWorkerWaitsAfterExit;
 /**
  * Deliver a durable, deduped coordinator follow-up for orphaned/lost (#65).
  *
@@ -1307,6 +1306,7 @@ function reconcileHealth(ids) {
                         sendMessage: () => enqueueCompletionCallback(pi, meta.id),
                     });
                     if (observed.finalization?.applied) {
+                        void recoverWorkerWaitsAfterExit?.().catch(() => undefined);
                         syncHealthTicker();
                         continue;
                     }
@@ -1579,7 +1579,7 @@ const pendingNavigatorDismissals = new Set();
 function navigatorRunningCount() {
     const snapshot = workObservation();
     return (snapshot?.rows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt && ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
-        (!snapshot || snapshot.status !== "ready" ? 1 : 0);
+        (workObservationStarted() && snapshot?.status !== "ready" ? 1 : 0);
 }
 /**
  * The visible run set. The durable origin index limits reads to this session;
@@ -1697,7 +1697,7 @@ function subagentWorkRows(now) {
             primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: formatNavigatorHealthFacts(health), sortStartedAt: meta.startedAt,
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
-    if (!snapshot || snapshot.status !== "ready")
+    if (workObservationStarted() && snapshot?.status !== "ready")
         rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
             status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", readOnly: true, elapsed: "", primary: "Task status unconfirmed · enter for details", sortStartedAt: now });
     return rows;
@@ -1890,6 +1890,7 @@ function ensureSubagentProvider() {
         id: "subagents",
         label: "Subagents",
         priority: 10,
+        onOpen: () => { void activateWorkObservation(); },
         visibleCount: () => navigatorRunningCount(),
         // The last worker becoming terminal must not hide its retained result.
         showSection: (rows) => rows.length > 0,
@@ -2036,13 +2037,14 @@ function resolvePiBinary() {
  * first-party finalizer (finalization.ts) so tests can exercise the durable
  * path without importing the pi package.
  */
-function finalizeRun(pi, ctx, id, code) {
+function finalizeRun(pi, ctx, id, code, recoveredWriterExit = false) {
     progressCache.delete(id);
     directlySupervisedRunIds.delete(id);
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
-    finalizeRunCore(id, code, {
+    const result = finalizeRunCore(id, code, {
+        recoveredWriterExit,
         renderWidget,
         notify: (message, level) => {
             try {
@@ -2052,6 +2054,11 @@ function finalizeRun(pi, ctx, id, code) {
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
+    if (recoveredWriterExit && result.applied) {
+        // The old exit callback is gone. Finish its durable wait handoff after
+        // recovery, including the independent writer and lease proof checks.
+        void recoverWorkerWaitsAfterExit?.().catch(() => undefined);
+    }
     syncHealthTicker();
 }
 /**
@@ -2088,7 +2095,7 @@ function finalizeInterruptedRunFromLog(pi, meta, now) {
         return false;
     // Exit code is unknown after the observer is gone; the lifecycle authority
     // classifies from the coherent stream instead of inventing one.
-    finalizeRun(pi, uiCtx, meta.id, null);
+    finalizeRun(pi, uiCtx, meta.id, null, true);
     return true;
 }
 /**
@@ -2305,15 +2312,17 @@ function latestConversationAttempt(sessionId, metas) {
  * missing session is the only error added here. Nothing is ever recreated.
  */
 function requestedSessionId(job, cwd) {
-    if (job.session_id !== undefined && job.session_name !== undefined) {
+    const sessionId = normalizeSessionSelector(job.session_id);
+    const sessionName = normalizeSessionSelector(job.session_name);
+    if (sessionId !== undefined && sessionName !== undefined) {
         throw new Error("Pass either session_id or session_name, not both.");
     }
-    if (job.session_name !== undefined) {
-        if (typeof job.session_name !== "string")
+    if (sessionName !== undefined) {
+        if (typeof sessionName !== "string")
             throw new Error("session_name must be a non-empty name.");
-        return selectSessionByName(listMetas(), job.session_name, (workspace) => isWithinWorkspace(workspace, cwd));
+        return selectSessionByName(listMetas(), sessionName, (workspace) => isWithinWorkspace(workspace, cwd));
     }
-    return job.session_id;
+    return sessionId;
 }
 function continuationPlanFor(sessionId, origin) {
     const others = listMetas();
@@ -2720,6 +2729,7 @@ export default function (pi, managed) {
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
+    recoverWorkerWaitsAfterExit = reconcileWorkerWaits;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
     observeSandboxPermissions(pi);
@@ -2737,6 +2747,7 @@ export default function (pi, managed) {
                 ctx = captureLaunchContext(ctx);
                 catalogHostFrom(ctx);
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
+                void activateWorkObservation();
                 return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params));
             } });
     };
@@ -2833,6 +2844,9 @@ export default function (pi, managed) {
      * this call, and a manual continuation passes neither.
      */
     internal) {
+        const { resolveChildClosure, resolveChildLaunch, configSnapshot } = await import("./child-dependencies.mjs");
+        const { resolveSubagentWorkspace } = await import("./git-workspace.domain.mjs");
+        const { PREFLIGHT_ENV } = await import("./child-preflight.mjs");
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
         // before any attempt directory or capacity effect exists. A continuation
@@ -3001,8 +3015,7 @@ export default function (pi, managed) {
                 allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
                     .filter(Boolean).join(",");
             }
-            // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
-            // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+            // Exclusions apply to the worker selection before provider admission (ADR 0027).
             const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
             // Supervised worker operations. This only decides which names the
             // child's loadout carries: clean children, explicit tool lists,
@@ -3049,13 +3062,11 @@ export default function (pi, managed) {
             if (bridgeEnabled) {
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
             }
-            if (sandboxEnabled && !clean) {
+            if (!clean) {
                 const names = allow.split(",").filter(Boolean);
-                // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
-                if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write"))
-                    names.push(APPLY_PATCH);
-                if (requestedTools === undefined)
-                    names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+                // Derive the editable loadout before applying the resource policy.
+                if (!resume)
+                    addEditablePatch(names, requestedExcludes);
                 allow = [...new Set(names)].join(",");
             }
             if (sandboxEnabled && requestedTools === undefined && processAccess === "read") {
@@ -3085,12 +3096,13 @@ export default function (pi, managed) {
                 const path = resolveExtensionPath(spec);
                 return path ? workerPath(path) : path;
             };
+            const normalProviders = ordinaryChildConfig(cfg, managed?.activeProviders?.() ?? activeChildProviders(pi));
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess,
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
+                toolExtensions: normalProviders.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3112,7 +3124,7 @@ export default function (pi, managed) {
                     ? new ContinuationError(`Cannot continue ${resume.prior.id}: its frozen launch requires tool(s) this parent can no longer provide: ${detail}. ` +
                         `Launch a new run instead of continuing this conversation. ${processPolicy}`)
                     : new Error(`Requested tool(s) are not available in the task sandbox: ${detail}. ` +
-                        `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`);
+                        `Check the child tool provider and the Subagents resource permissions; nothing was launched.`);
             }
             if (toolSelection) {
                 if (plannedTools.length > 0 && toolSelection.tools.length === 0) {
@@ -3120,26 +3132,39 @@ export default function (pi, managed) {
                 }
                 allow = toolSelection.tools.join(",");
             }
+            // Older recipes were frozen before isolated workers gained Harness providers
+            // and inherited workers began loading mappings explicitly.
+            const legacyToolLoading = resume !== undefined && !resume.recipe.toolLoadingVersion;
+            let extensionConfig = cfg;
+            if (!sandboxEnabled && !legacyToolLoading)
+                extensionConfig = normalProviders;
+            if (legacyToolLoading && cfg.inheritExtensions)
+                extensionConfig = { ...cfg, toolExtensions: {} };
             const dependencyOptions = {
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
                     return slash > 0 && ctx.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1))?.api === "pi-virtual";
-                })(), config: cfg, resolvePath: workerResolvePath,
+                })(), config: extensionConfig, resolvePath: workerResolvePath,
                 configPaths: [configPath(), workerPath(join(selfDir(), "config.json"))],
             };
             // Bridge tools are supplied by the worker bridge extension, not by a
             // configured toolExtensions mapping: keep them out of extension
             // resolution so `unmapped` stays an accurate operator warning and the
             // frozen launch recipe never depends on bridge availability.
-            const extensionAllowlist = () => (bridgeEnabled
-                ? allow.split(",").filter((name) => !bridgePlan.tools.includes(name)).join(",")
-                : allow);
+            const extensionAllowlist = () => allow.split(",")
+                .filter(name => !requestedExcludes.has(name) && !bridgeToolNames.has(name)).join(",");
             const { resolution, fullResolution } = await resolveChildLaunch({ ...dependencyOptions, resolution: resolveExtensions({
                     // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
                     // are task builtins that the mandatory guard installs and activates itself.
                     tools: sandboxEnabled ? allow.split(",").filter((name) => SDK_BUILTIN_TOOLS.includes(name)).join(",") : extensionAllowlist(),
-                    model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                    model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
                 }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
+            if (!sandboxEnabled && resolution.mode === "isolated" &&
+                fullResolution.specs.every((spec) => Object.values(ORDINARY_TOOL_PROVIDERS).includes(spec))) {
+                const missingTools = resolution.unmapped.filter((name) => requiredToolNames.has(name));
+                if (missingTools.length)
+                    throw new Error(`No provider for required child tools: ${missingTools.join(", ")}. Configure toolExtensions or change the requested tools.`);
+            }
             const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? workerResolvePath(spec));
             const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
                 .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
@@ -3159,7 +3184,7 @@ export default function (pi, managed) {
                 const reference = model === resume.recipe.model ? resolution : await resolveChildClosure({
                     ...dependencyOptions, model: resume.recipe.model, virtual: false, resolution: resolveExtensions({
                         tools: sandboxEnabled ? allow.split(",").filter((name) => SDK_BUILTIN_TOOLS.includes(name)).join(",") : extensionAllowlist(),
-                        model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                        model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
                     })
                 });
                 const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? workerResolvePath(spec)).args, ...codemodeArgs,
@@ -3367,6 +3392,7 @@ export default function (pi, managed) {
             }
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
+                ...(!legacyToolLoading ? { toolLoadingVersion: 1 } : {}),
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
@@ -3525,6 +3551,7 @@ export default function (pi, managed) {
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
+                const { abortUncommittedLaunch } = await import("./launch-abort.domain.mjs");
                 await abortUncommittedLaunch(id, {
                     child: spawned, lease,
                     artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
@@ -3744,11 +3771,7 @@ export default function (pi, managed) {
         }
         catch { /* a host that refuses the adapter leaves parking unavailable */ }
         try {
-            const reconciliation = reconcileParkedWaits(service, {
-                resume: (park) => orchestration.resume(park),
-                notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
-                notify: notifyOwnedWait,
-            });
+            const reconciliation = reconcileWorkerWaits();
             if (managed) {
                 void reconciliation.catch(() => undefined);
                 return;
@@ -3760,6 +3783,17 @@ export default function (pi, managed) {
             }
         }
         catch { /* reconciliation retries on the next session start */ }
+    }
+    async function reconcileWorkerWaits() {
+        const service = workerOperations.service;
+        if (!service)
+            return;
+        const orchestration = ensureResumeOrchestration();
+        await reconcileParkedWaits(service, {
+            resume: (park) => orchestration.resume(park),
+            notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
+            notify: notifyOwnedWait,
+        });
     }
     // ---- subagent_spawn -------------------------------------------------
     //
@@ -4030,8 +4064,10 @@ export default function (pi, managed) {
                 throw new Error(blankSelector);
             let catalogSnapshot;
             let catalogHost;
-            const needsCatalog = p.jobs.some((job) => job.session_id === undefined && job.session_name === undefined
-                && hasCatalogSelector(mergeJobOptions(p.shared, job)));
+            const needsCatalog = p.jobs.some((job) => {
+                const merged = mergeJobOptions(p.shared, job);
+                return merged.session_id === undefined && merged.session_name === undefined && hasCatalogSelector(merged);
+            });
             if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
@@ -4088,7 +4124,7 @@ export default function (pi, managed) {
                 const job = p.jobs[i];
                 let name = names[i];
                 const merged = mergeJobOptions(p.shared, job);
-                const isContinuation = job.session_id !== undefined || job.session_name !== undefined;
+                const isContinuation = merged.session_id !== undefined || merged.session_name !== undefined;
                 // A continuation keeps its own frozen model and effort. shared.model
                 // is a default for NEW conversations, so only a per-job value is an
                 // explicit escalation of the saved recipe.
@@ -4104,7 +4140,7 @@ export default function (pi, managed) {
                     }
                 }
                 try {
-                    const sessionId = requestedSessionId(job, ctx.cwd);
+                    const sessionId = requestedSessionId(merged, ctx.cwd);
                     // A saved conversation is never re-resolved against the catalog.
                     if (sessionId === undefined && catalogSnapshot && catalogHost && hasCatalogSelector(merged)) {
                         const explicitName = typeof job.name === "string" && job.name.trim() !== "" ? job.name : undefined;
@@ -4323,6 +4359,30 @@ export default function (pi, managed) {
         pi.events?.emit("harness-settings:register", contribution);
         pi.events?.emit("harness-settings:register", agentsContribution);
     };
+    const unsubscribeToolLoading = pi.events?.on?.("pi-better-subagents:default-tool-loading", (request) => {
+        const query = request;
+        if (typeof query?.reply !== "function")
+            return;
+        const config = ordinaryChildConfig(loadConfig(), activeChildProviders(pi));
+        const names = normalizeTools(config.defaultTools ?? SAFE_DEFAULT_TOOLS).split(",").filter(Boolean);
+        addEditablePatch(names, new Set());
+        const rows = [...new Set(names)].map(name => {
+            if (name === "codemode") {
+                const supported = "createCodemodeExtension" in PiCodingAgent && typeof PiCodingAgent.createCodemodeExtension === "function";
+                return { name, provider: supported ? "Harness" : "SDK unavailable" };
+            }
+            if (BUILTIN_TOOLS.includes(name))
+                return { name, provider: "Pi" };
+            const spec = config.toolExtensions?.[name];
+            const sources = typeof spec === "string" ? [spec] : spec ?? [];
+            const providers = sources.map(source => {
+                const label = source === ORDINARY_TOOL_PROVIDERS[name] ? "Harness" : source;
+                return resolveExtensionPath(source) ? label : `${label} (missing)`;
+            });
+            return { name, provider: providers.join(", ") || (config.inheritExtensions ? "Session extensions" : "No provider mapped") };
+        });
+        query.reply(rows);
+    });
     const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
     const unsubscribeOutcomeWorkflow = pi.events?.on?.("pi-better-workflow:changed", () => recoverAssignmentOutcomes(pi));
     registerSettings();
@@ -4488,7 +4548,15 @@ export default function (pi, managed) {
     // Capture a UI-bearing context and, if runs from a prior session are still
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
-    pi.on("session_start", async (_event, ctx) => {
+    let restoreObservation;
+    let offFirstAssignment;
+    const cancelDeferredObservation = () => {
+        if (restoreObservation)
+            clearImmediate(restoreObservation);
+        offFirstAssignment?.();
+        offFirstAssignment = undefined;
+    };
+    pi.on("session_start", async (event, ctx) => {
         // A session begins in this process again (reload, restart, or a session
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
@@ -4513,11 +4581,31 @@ export default function (pi, managed) {
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         pendingRecipientRecovery.clear();
         observedRecipientRows.clear();
-        if (!managed && activeCallbackOrigin)
-            await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
+        cancelDeferredObservation();
+        if (!managed && activeCallbackOrigin) {
+            configureWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
                 refreshBackgroundWorkNavigator(ctx);
                 observeRecipientNotifications(pi);
             });
+            if (!event?.reason) {
+                // Older hosts use completion of their untyped start callback as the readiness signal.
+                await activateWorkObservation();
+            }
+            else if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
+                restoreObservation = setImmediate(() => { void activateWorkObservation(); });
+            }
+            else {
+                // Another extension can assign work to this recipient before it calls a tool.
+                const origin = activeCallbackOrigin;
+                offFirstAssignment = onMetaChanged(meta => {
+                    if (!meta || !belongsToOrigin(meta, origin))
+                        return;
+                    offFirstAssignment?.();
+                    offFirstAssignment = undefined;
+                    void activateWorkObservation();
+                });
+            }
+        }
         if (!managed) {
             recoverCompletionCallbacks(pi);
             observeRecipientNotifications(pi);
@@ -4572,6 +4660,7 @@ export default function (pi, managed) {
             await startWorkerOperations();
     });
     pi.on("session_before_switch", () => {
+        cancelDeferredObservation();
         closeCatalogHost();
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
@@ -4586,6 +4675,7 @@ export default function (pi, managed) {
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
         closeCatalogHost();
+        cancelDeferredObservation();
         stopWorkObservation();
         pendingNavigatorDismissals.clear();
         if (outcomeTicker)
@@ -4595,6 +4685,8 @@ export default function (pi, managed) {
         closeOutcomeHost(outcomeHost);
         if (typeof unsubscribeOutcomeWorkflow === "function")
             unsubscribeOutcomeWorkflow();
+        if (typeof unsubscribeToolLoading === "function")
+            unsubscribeToolLoading();
         if (typeof unsubscribeSettingsRequest === "function")
             unsubscribeSettingsRequest();
         // #625: subagent children are detached process groups that outlive this

@@ -67,6 +67,7 @@ import {
 } from "./waits.ts";
 import {
     claimOutbox as writeOutboxClaim,
+    hasDeliveredWaitDependency as readDeliveredWaitDependency,
     listDispatchableOutboxRecipients as readDispatchableOutboxRecipients,
     listOutbox as readOutbox,
     markOutboxDelivered as writeOutboxDelivery,
@@ -317,6 +318,7 @@ export interface Store {
     // ---- outbox ----
 
     listOutbox(filter?: OutboxFilter): OutboxEventRecord[];
+    hasDeliveredWaitDependency(operationId: string, terminalRevision: number, recipient: OwnerIdentity): boolean;
     /** Lightweight dispatch candidates; evidence is read only after a claim succeeds. */
     listDispatchableOutboxRecipients(): Array<{ recipient: OwnerIdentity; count: number }>;
     /** Claim pending deliveries for a `ready`/`resuming` generation. */
@@ -557,6 +559,10 @@ export function openStore(options: StoreOptions): Store {
         listOutbox(filter = {}) {
             alive();
             return readOutbox(ctx, filter);
+        },
+        hasDeliveredWaitDependency(operationId, terminalRevision, recipient) {
+            alive();
+            return readDeliveredWaitDependency(ctx, operationId, terminalRevision, recipient);
         },
         listDispatchableOutboxRecipients() {
             alive();

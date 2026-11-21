@@ -30,6 +30,7 @@ import {
 import type { LocalSupervisor, SupervisorStartOptions } from "./supervisor/index.js";
 import { createLocalSupervisor, supervisorTaskIdForToken } from "./supervisor/index.js";
 import { advertiseBackgroundAdapter, BACKGROUND_ADAPTER_REQUEST } from "./adapter-contract.js";
+import { readBackgroundReviewInterval, saveBackgroundReviewInterval } from "./review-settings.js";
 import { readProcessStartToken } from "./process-identity.js";
 import { openStore } from "./shared-operation-coordinator/index.js";
 import { registerTools } from "./tools.js";
@@ -51,6 +52,10 @@ const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()!();
 });
+
+// These RPC journeys advance the coordinator explicitly. A delayed OS notification
+// for creation of the fixture's runs directory would measure an unrelated inventory.
+const manualSourceWatch = () => Object.assign(new EventEmitter(), { ready: Promise.resolve(), close() {} });
 
 function workspace(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `observed-waits-${name}-`));
@@ -105,13 +110,14 @@ function startHost(options: {
   supervisor?: LocalSupervisor;
   notifyParent?: (notification: ParentNotification) => void;
   ctx?: ExtensionContext;
+  now?: () => number;
 }): { host: ObservedWaitHost; pi: ExtensionAPI; notifications: ParentNotification[] } {
   const harness = options.harness ?? createHarness();
   const notifications: ParentNotification[] = [];
   const host = createObservedWaitHost(harness.pi, {
     storePath: options.storePath ?? join(options.root, "operations.sqlite"),
     supervisorDirectory: join(options.root, "supervisor"),
-    pollMs: 0,
+    pollMs: 0, now: options.now,
     ...(options.supervisor ? { supervisor: options.supervisor } : {}),
     notifyParent: options.notifyParent ?? ((notification) => { notifications.push(notification); }),
   });
@@ -228,6 +234,89 @@ describe("parent durable launches", () => {
       expect(notifications).toHaveLength(1);
     },
   );
+
+  it("receipts each continuous period of silence separately", async () => {
+    const root = workspace("stall-receipts"), ctx = createCtx(root);
+    let now = Date.now();
+    const { host } = startHost({ root, ctx, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "process", params: { shell: false, callback: true,
+      argv: nodeCommand("const fs=require('node:fs');const t=setInterval(()=>{if(fs.existsSync('resume')){clearInterval(t);console.log('new output');setTimeout(()=>{},20000)}},50)") } });
+    const origin = { cwd: root, sessionId: ctx.sessionManager.getSessionId() };
+    const checkpoint = join(root, "supervisor", "tasks", launch.id, "progress.json");
+    const progressTime = () => JSON.parse(readFileSync(checkpoint, "utf8")).observedAt as number;
+    const alert = () => host.pendingStallAlert(origin, launch.id, []);
+    try {
+      await until(host, () => existsSync(checkpoint));
+      const firstTime = progressTime();
+      now = firstTime + 360_000;
+      const first = alert();
+      expect(first).toBeDefined();
+      first!.delivery.delivered();
+      expect(alert()).toBeUndefined();
+      writeFileSync(join(root, "resume"), "go");
+      await until(host, () => progressTime() > firstTime);
+      now = progressTime();
+      expect(alert()).toBeUndefined();
+      now += 360_000;
+      const second = alert();
+      expect(second).toBeDefined();
+      expect(second!.delivery.receiptId).not.toBe(first!.delivery.receiptId);
+      expect(second!.notification.event.content).toContain("new output");
+    } finally { await host.stopDurableTask(origin, launch.id); }
+  });
+
+  it("reviews an unchanged watch using the configured interval and the full elapsed time", async () => {
+    const root = workspace("wait-review"), ctx = createCtx(root);
+    const settings = { agentDir: () => root };
+    expect(readBackgroundReviewInterval(settings)).toBe(10);
+    saveBackgroundReviewInterval(2, settings);
+    expect(() => saveBackgroundReviewInterval(0, settings)).toThrow();
+    const interval = readBackgroundReviewInterval(settings) * 60_000;
+    expect(interval).toBe(120_000);
+    let now = Date.now();
+    let { host } = startHost({ root, ctx, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "watch", params: {
+      shell: false, callback: true, interval_seconds: 1,
+      argv: nodeCommand("console.log(require('node:fs').existsSync('changed') ? 'changed' : 'same result')"),
+      success_when: { type: "stdout_contains", value: "finished" },
+    } });
+    const origin = { cwd: root, sessionId: ctx.sessionManager.getSessionId() };
+    const checkpoint = join(root, "supervisor", "tasks", launch.id, "progress.json");
+    const progressTime = () => JSON.parse(readFileSync(checkpoint, "utf8")).observedAt as number;
+    const wait = host.waitForParent(ctx, [launch.id], "Check delivery evidence");
+    const review = () => host.backgroundWaitReview(origin, launch.id, [wait], interval);
+    try {
+      await until(host, () => existsSync(checkpoint) && Boolean(JSON.parse(readFileSync(checkpoint, "utf8")).fingerprint));
+      const dueAt = review()!.dueAt;
+      const initialProgress = progressTime();
+      now = dueAt - 1;
+      expect(review()?.alert).toBeUndefined();
+      now = dueAt;
+      const first = review()!.alert!;
+      expect(first.notification.event.content).toMatch(/Task has run for 2m\d{2}s\. No observed progress for 2m\d{2}s/);
+      expect(first.notification.event.content).toContain("Check delivery evidence");
+      expect(first.notification.event.content).toContain("Latest check:");
+      expect(first.notification.event.content).toContain("same result");
+      expect(review()?.alert?.delivery.receiptId).toBe(first.delivery.receiptId);
+      first.delivery.delivered();
+      host.close();
+      ({ host } = startHost({ root, ctx, now: () => now }));
+      expect(review()).toEqual({ dueAt: now + interval });
+
+      now += interval;
+      const second = review()!.alert!;
+      expect(second.delivery.receiptId).not.toBe(first.delivery.receiptId);
+      expect(second.notification.event.content).toMatch(/Task has run for 4m\d{2}s/);
+      writeFileSync(join(root, "changed"), "new observation");
+      await until(host, () => progressTime() > initialProgress);
+      now = progressTime();
+      expect(review()).toEqual({ dueAt: now + interval });
+      await host.stopDurableTask(origin, launch.id);
+      expect(review()).toBeUndefined();
+    } finally {
+      await host.stopDurableTask(origin, launch.id);
+    }
+  });
 
   it("retries reconciliation after coordinator write contention", async () => {
     const root = workspace("store-busy");
@@ -438,6 +527,47 @@ describe("parent durable launches", () => {
     const status = host.statusForParent(ctx, launch.id);
     expect(status.status).toBe("succeeded");
     expect(status.matchedCondition).toEqual({ type: "stdout_contains", value: "ready" });
+  });
+
+  it.each(["launch.json", "claim.json"])("keeps a wait pending when %s is temporarily unreadable for a claimed runner", async (record) => {
+    const root = workspace("unreadable-launch");
+    const ctx = createCtx(root);
+    const directory = join(root, "supervisor");
+    const supervisor = createLocalSupervisor({ directory });
+    let now = Date.now();
+    const { host } = startHost({ root, ctx, supervisor, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "process", params: { shell: false, callback: false,
+      argv: nodeCommand("const fs = require('node:fs'); const timer = setInterval(() => { if (fs.existsSync('finish')) clearInterval(timer); }, 25);") } });
+    cleanups.push(async () => { await supervisor.stop(launch.id); });
+    expect(supervisor.inspect(launch.id)?.claim?.alive).toBe(true);
+
+    const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+    const originalRead = fs.readFileSync;
+    const recordPath = join(directory, "tasks", launch.id, record);
+    const unavailable = vi.spyOn(fs, "readFileSync").mockImplementation(((path, options) => {
+      if (path === recordPath) throw Object.assign(new Error("fixture descriptor limit"), { code: "EMFILE" });
+      return originalRead(path, options);
+    }) as typeof fs.readFileSync);
+    syncBuiltinESMExports();
+    now += 31_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    let wait;
+    try {
+      wait = host.waitForParent(ctx, [launch.id], "inspect the exit result");
+      expect(wait.phase).toBe("waiting");
+      expect(wait.dependencies[0]?.terminalRevision).toBe(0);
+    } finally {
+      clock.mockRestore();
+      unavailable.mockRestore();
+      syncBuiltinESMExports();
+    }
+
+    expect(supervisor.inspect(launch.id)?.claim?.alive).toBe(true);
+    writeFileSync(join(root, "finish"), "go");
+    await until(host, () => host.statusForParent(ctx, launch.id).terminalOutcome === "succeeded");
+    const ready = host.listWaitsForParent(ctx).find((entry) => entry.waitId === wait.waitId);
+    expect(ready?.phase).toBe("ready");
+    expect(ready?.dependencies[0]).toMatchObject({ terminalOutcome: "succeeded", terminalRevision: 1 });
   });
 
   it("records a lost operation as lost, never as success", async () => {
@@ -1393,7 +1523,7 @@ describe("Subagents request/reply surface", () => {
     const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
     mkdirSync(join(root, "runs", "attempt-rpc"), { recursive: true });
     writeFileSync(join(root, "runs", "attempt-rpc", "meta.json"), JSON.stringify({ id: "attempt-rpc", sessionId: "conv-rpc", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-rpc", workspace: root } }));
-    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
     cleanups.push(() => model.close());
     await model.reconcile();
     const inventories = model.metrics.inventories;
@@ -1533,7 +1663,7 @@ describe("Subagents request/reply surface", () => {
     const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
     mkdirSync(join(root, "runs", "attempt-resume"), { recursive: true });
     writeFileSync(join(root, "runs", "attempt-resume", "meta.json"), JSON.stringify({ id: "attempt-resume", sessionId: "conv-resume", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-resume", workspace: root } }));
-    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
     cleanups.push(() => model.close());
     await model.reconcile();
     const inventories = model.metrics.inventories;
@@ -2361,6 +2491,85 @@ describe("callback origin and delivery receipt", () => {
       note: "handoff after close is not duplicated",
     });
     expect(ack.phase).toBe("consumed");
+  });
+
+  it("does not replay a delivered wait as a standalone completion after consumption", async () => {
+    const root = workspace("consumed-wait-dedup");
+    const notifier = deferredNotifier();
+    const harness = createHarness();
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+      notifyParent: notifier.notify,
+    };
+    let host = createObservedWaitHost(harness.pi, options);
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "dedup-owner", "dedup-branch");
+    host.start(ctx);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: true },
+      ctx,
+    });
+    const wait = host.waitForParent(ctx, [launch.id], "wait owns completion");
+    await host.stopForParent(ctx, launch.id);
+    await until(host, () => notifier.calls.length === 1);
+    expect(notifier.calls[0]?.notification.waitId).toBe(wait.waitId);
+    notifier.deliver(notifier.calls[0]!);
+
+    const ready = host.listWaitsForParent(ctx, { pendingOnly: true }).find((entry) => entry.waitId === wait.waitId)!;
+    host.statusForParent(ctx, launch.id);
+    expect(host.acknowledgeForParent(ctx, {
+      waitId: ready.waitId,
+      generation: ready.generation,
+      terminalRevisions: revisions(ready),
+      disposition: "continue",
+      note: "read and consumed",
+    }).phase).toBe("consumed");
+    host.statusForParent(ctx, launch.id);
+    await host.reconcileNow();
+    host.close();
+    host = createObservedWaitHost(harness.pi, options);
+    host.start(ctx);
+    await host.reconcileNow();
+    const store = openStore({ path: options.storePath });
+    try {
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 1, launch.owner)).toBe(true);
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 2, launch.owner)).toBe(false);
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 1, { ...launch.owner, branchId: "other" })).toBe(false);
+      expect(store.listPendingParentCallbacks({ workspace: root, sessionId: ctx.sessionManager.getSessionId() })).toHaveLength(0);
+    } finally { store.close(); }
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("still delivers a standalone completion after an undelivered wait is cancelled", async () => {
+    const root = workspace("cancelled-wait-delivery");
+    const notifier = deferredNotifier();
+    const host = createObservedWaitHost(createHarness().pi, {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+      notifyParent: notifier.notify,
+    });
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "cancel-owner", "cancel-branch");
+    host.start(ctx);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => process.exit(0), 400)"), shell: false, callback: true },
+      ctx,
+    });
+    const wait = host.waitForParent(ctx, [launch.id], "temporary wait");
+    await until(host, () => notifier.calls.length === 1);
+    expect(notifier.calls[0]?.notification.waitId).toBe(wait.waitId);
+    expect(host.cancelWaitForParent(ctx, wait.waitId, wait.generation, "not needed").phase).toBe("cancelled");
+    host.statusForParent(ctx, launch.id);
+    await until(host, () => notifier.calls.length === 2);
+    expect(notifier.calls[1]?.notification.waitId).toBeUndefined();
+    notifier.deliver(notifier.calls[1]!);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(2);
   });
 
   it("does not let a standalone callback receipt receipt a later wait", async () => {

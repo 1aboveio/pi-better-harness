@@ -10,6 +10,8 @@ let context;
 let connecting;
 let collecting;
 let collectingClient;
+let collectionRetry;
+let collectionFailures = 0;
 let dirty = false;
 let retry;
 let backoff = 100;
@@ -25,6 +27,8 @@ export function onWorkObservation(notify) {
     return () => { observationListeners.delete(notify); };
 }
 export function workObservation() { return snapshot; }
+export function hasWorkObservationContext() { return context !== undefined; }
+export function workObservationStarted() { return Boolean(connecting || client || retry || snapshot); }
 export function workObservationFailure() { return snapshot?.reason ?? failure; }
 function degraded(error) {
     failure = String(error);
@@ -46,6 +50,9 @@ function reconnectLater(current) {
 }
 // Every page is bounded; a conversation anchor fences collection across filtered queries.
 async function collect(candidate, current) {
+    if (collectionRetry)
+        clearTimeout(collectionRetry);
+    collectionRetry = undefined;
     dirty = true;
     if (collecting && collectingClient === candidate)
         return collecting;
@@ -117,6 +124,7 @@ async function collect(candidate, current) {
                     snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
                         observedAtLocal: Date.now(),
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
+                    collectionFailures = 0;
                     completed = true;
                     refresh();
                 }
@@ -125,8 +133,21 @@ async function collect(candidate, current) {
                         return;
                     if (attempt === 1 || candidate.closed) {
                         degraded(error);
-                        if (candidate.closed)
+                        if (current !== generation || candidate !== client || candidate.closed)
                             return;
+                        // Retry the outstanding notification after transient transport or
+                        // consistency failures, even when the terminal source sends no more events.
+                        const message = error instanceof Error ? error.message : String(error);
+                        if (!dirty && /^(?:runtime-(?:timeout|overloaded|unhealthy)|resync_required):/.test(message) && collectionFailures < 3) {
+                            const wait = 100 * 2 ** collectionFailures++;
+                            collectionRetry = setTimeout(() => {
+                                collectionRetry = undefined;
+                                if (current === generation && candidate === client && !candidate.closed)
+                                    void collect(candidate, current).catch(error => { if (current === generation && candidate === client)
+                                        degraded(error); });
+                            }, wait);
+                            collectionRetry.unref?.();
+                        }
                         // A notification received during these page reads is
                         // still owed a coherent collection. Drain only that
                         // demand through the outer loop; do not start a poller.
@@ -177,6 +198,7 @@ async function connectObservation(current) {
     candidate.onChange(() => {
         if (current !== generation || candidate !== client)
             return;
+        collectionFailures = 0;
         if (candidate.closed) {
             details.clear();
             pendingDetails.clear();
@@ -209,15 +231,19 @@ async function connectObservation(current) {
         retry = undefined;
     }
 }
-export async function startWorkObservation(agentDir, origin, changed) {
+export function configureWorkObservation(agentDir, origin, changed) {
     stopWorkObservation();
-    const current = generation;
     context = { agentDir, origin };
     refresh = () => {
         changed();
         for (const notify of observationListeners)
             notify();
     };
+}
+export async function activateWorkObservation() {
+    if (!context)
+        return;
+    const current = generation;
     try {
         await ensureObservation();
     }
@@ -227,6 +253,10 @@ export async function startWorkObservation(agentDir, origin, changed) {
             reconnectLater(current);
         }
     }
+}
+export async function startWorkObservation(agentDir, origin, changed) {
+    configureWorkObservation(agentDir, origin, changed);
+    await activateWorkObservation();
 }
 async function ensureObservation() {
     if (connecting)
@@ -265,6 +295,10 @@ export async function observedList(scope) { return query(scope); }
 export function stopWorkObservation() {
     generation++;
     context = undefined;
+    if (collectionRetry)
+        clearTimeout(collectionRetry);
+    collectionRetry = undefined;
+    collectionFailures = 0;
     connectionAbort.abort();
     connectionAbort = new AbortController();
     if (retry)

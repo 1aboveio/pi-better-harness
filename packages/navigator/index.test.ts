@@ -57,6 +57,88 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  for (const decorateBeforeNavigator of [true, false]) {
+    it(`composes editor method decorators (decorated first: ${decorateBeforeNavigator})`, () => {
+      const inputs: string[] = [];
+      const inner = {
+        getText: () => "",
+        handleInput(data: string) { inputs.push(data); },
+        render(width: number) { return [`editor ${width}`]; },
+      };
+      function decorate(editor: typeof inner) {
+        const originalRender = editor.render;
+        const originalInput = editor.handleInput;
+        const render = (width: number) => [...originalRender.call(editor, width), "frame"];
+        const input = (data: string) => originalInput.call(editor, `decorated ${data}`);
+        editor.render = render;
+        editor.handleInput = input;
+        return () => {
+          assert.equal(editor.render, render);
+          assert.equal(editor.handleInput, input);
+          editor.render = originalRender;
+          editor.handleInput = originalInput;
+        };
+      }
+      const ui = { factory: () => inner, setStatus() {}, setWidget() {},
+        getEditorComponent() { return this.factory; },
+        setEditorComponent(factory: () => typeof inner) { this.factory = factory; },
+      };
+      const ctx = { mode: "tui", hasUI: true, ui } as any;
+      const restoreEarly = decorateBeforeNavigator ? decorate(inner) : undefined;
+      try {
+        ensureBackgroundWorkNavigator(ctx, {
+          createDefaultEditor: () => inner, isOpenTrigger: () => false, matchKey: () => false, truncate: truncateToWidth,
+        });
+        const wrapped = ui.factory();
+        const restoreLate = decorateBeforeNavigator ? undefined : decorate(wrapped);
+        assert.deepEqual(wrapped.render(80), ["editor 80", "frame"]);
+        wrapped.handleInput("key");
+        assert.deepEqual(inputs, ["decorated key"]);
+        restoreLate?.();
+        restoreEarly?.();
+        assert.deepEqual(wrapped.render(80), ["editor 80"]);
+        wrapped.handleInput("plain");
+        assert.deepEqual(inputs, ["decorated key", "plain"]);
+      } finally {
+        disposeBackgroundWorkNavigator(ctx);
+      }
+    });
+  }
+
+  it("fits literal task names into the terminal columns measured by Pi", () => {
+    const tasks = provider("background-tasks", "Background Tasks", 20, 100, () => {});
+    const names = ["Plain", "A/B prompta mózga r1 </parameter> <parameter=purpose> compare v1 and v2", "任务 👩‍💻 </>"];
+    const unregister = registerBackgroundWorkProvider({ ...tasks, listRows: now =>
+      names.map((name, index) => ({ ...tasks.listRows(now)[0]!, id: `task-${index}`, name,
+        elapsed: "6m 00s", status: "succeeded", statusTone: "success", facts: ["remote command exited with code 0"],
+      })) });
+    let widget: unknown;
+    const theme = { fg: (_color: string, value: string) => `\x1b[32m${value}\x1b[39m` };
+    const ctx = { mode: "tui", hasUI: true, ui: { factory: undefined as any, setStatus() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      setWidget(key: string, value: unknown) { if (key === MAIN_LIST_WIDGET_KEY) widget = value; },
+    } } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: () => false, matchKey: () => false, truncate: truncateToWidth,
+      });
+      for (const width of [166, 48, 24]) {
+        const lines = renderWidget(widget, width, theme);
+        assert.ok(lines.some(line => line.includes("Plain")));
+        assert.ok(lines.every(line => visibleWidth(line) <= width), `rendered widths at ${width}: ${lines.map(visibleWidth)}`);
+        if (width === 166) {
+          assert.ok(lines.some(line => line.includes("</parameter>")));
+          assert.ok(lines.some(line => line.includes("任务 👩‍💻 </>")));
+        }
+      }
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("renders agent groups and their tasks without blank rows in the work tree", () => {
     const previousView = getNavigatorView();
     setNavigatorView("tree");
@@ -554,7 +636,7 @@ describe("shared background work navigator", () => {
   it("renders failed rows with Pi-supported theme colors", () => {
     const seenColors: string[] = [];
     const widgets: unknown[] = [];
-    const allowed = new Set(["accent", "success", "error", "warning", "dim"]);
+    const colorCodes: Record<string, number> = { accent: 36, success: 32, error: 31, warning: 33, dim: 90 };
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
       label: "Background Tasks",
@@ -599,8 +681,9 @@ describe("shared background work navigator", () => {
       theme: {
         fg(color: string, value: string) {
           seenColors.push(color);
-          if (!allowed.has(color)) throw new Error(`Unknown theme color: ${color}`);
-          return `<${color}>${value}</>`;
+          const code = colorCodes[color];
+          if (code === undefined) throw new Error(`Unknown theme color: ${color}`);
+          return `\x1b[${code}m${value}\x1b[39m`;
         },
       },
       setStatus() {},
@@ -626,8 +709,8 @@ describe("shared background work navigator", () => {
       assert.doesNotMatch(renderedWidget, /background work/);
       assert.match(renderedWidget, /failed/);
       assert.match(renderedWidget, /lost/);
-      assert.match(renderedWidget, /<dim>\s+failed, inspect log<\/>/);
-      assert.match(renderedWidget, /^<warning>background tasks<\/>$/m, "compact rail should keep the provider lane title visible");
+      assert.match(renderedWidget, /\x1b\[90m\s+failed, inspect log\x1b\[39m/);
+      assert.match(renderedWidget, /^\x1b\[33mbackground tasks\x1b\[39m$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(renderedWidget, /^main$/m, "background work is not grouped under a confusing main lane");
 
       const editor = ui.factory({}, {}, {});
@@ -636,7 +719,7 @@ describe("shared background work navigator", () => {
 
       seenColors.length = 0;
       const detail = component.render(100).join("\n");
-      assert.match(detail, /status\s+<error>failed<\/>/);
+      assert.match(detail, /status\s+\x1b\[31mfailed\x1b\[39m/);
       assert.match(detail, /command exited 1/);
       assert.ok(seenColors.includes("error"), "failed statuses use Pi's error color");
       assert.equal(seenColors.includes("danger"), false, "danger is not a Pi theme color");
@@ -665,7 +748,7 @@ describe("shared background work navigator", () => {
     const widgets: unknown[] = [];
     const ui = {
       factory: undefined as any,
-      theme: { fg: (color: string, value: string) => `<${color}>${value}</>` },
+      theme: { fg: (color: string, value: string) => color === "accent" ? `\x1b[36m${value}\x1b[39m` : value },
       setStatus() {},
       setWidget(_key: string, value: unknown) { widgets.push(value); },
       getEditorComponent() { return this.factory; },
@@ -686,12 +769,10 @@ describe("shared background work navigator", () => {
       const second = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
       const third = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
 
-      assert.match(first, /<accent>●<\/>\s+reviewer/);
-      assert.match(second, /<accent>●<\/>\s+reviewer/);
-      assert.match(third, /<accent>●<\/>\s+reviewer/);
+      assert.match(first, /\x1b\[36m●\x1b\[39m\s+reviewer/);
       assert.equal(first, second);
       assert.equal(second, third);
-      assert.doesNotMatch(`${first}\n${second}\n${third}`, /<[a-z]+>[•·◌]<\/>\s+reviewer|◌/);
+      assert.doesNotMatch(first, /\x1b\[36m[•·◌]\x1b\[39m\s+reviewer|◌/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -2309,6 +2390,89 @@ describe("shared background work navigator", () => {
       assert.equal(mounted.length, 0, "the overlay closes instead of covering the replacement editor");
       assert.deepEqual(unfocusTargets, [], "focus is never handed to a replaced wrapper");
       assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
+
+      ui.setEditorComponent(inner);
+      editorSlot.handleInput("left");
+      editorSlot.handleInput("down");
+      assert.equal(mounted.length, 1);
+      ui.setEditorComponent(undefined);
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 0, "the overlay closes even when the replacement precedes its first frame");
+      assert.deepEqual(unfocusTargets, [], "focus stays with the replacement editor");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps a pointer-opened detail when an extension replaced the editor before it opened", async () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      listRows: () => ["alpha", "beta"].map((id, i) => ({
+        providerId: "background-tasks", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "process", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+    });
+    const mounted: any[] = [];
+    const widgets: unknown[] = [];
+    let editorSlot: any;
+    const tui = {
+      requestRender() {},
+      isComponentMounted(component: unknown) { return component === editorSlot; },
+    };
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, widget: unknown) { widgets.push(widget); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) {
+        this.factory = factory;
+        editorSlot = factory ? factory(tui, {}, {}) : { render: () => ["default editor"], handleInput() {} };
+      },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory(tui, this.theme, {}, () => { mounted.splice(mounted.indexOf(component), 1); });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus() {} });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    /** One pi-tui frame: the base (editor included) renders first, then the overlays. */
+    const frame = () => { editorSlot?.render?.(100); for (const overlay of [...mounted]) overlay.render(100); };
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", render: () => ["our editor"], handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      editorSlot = ui.factory(tui, {}, {});
+
+      // Another extension installs its own editor instead of composing ours, so pi-tui mounts that
+      // one and never renders our wrapper again. The rail keeps working through the pointer.
+      ui.setEditorComponent(() => ({ render: () => ["foreign editor"], handleInput() {} }));
+      frame(); frame();
+
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      const lines = widget.render(100);
+      const y = lines.findIndex((line: string) => line.includes("alpha"));
+      assert.ok(y > 0, "the rail still renders a clickable row");
+      widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 100 });
+      widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 100 });
+      assert.equal(mounted.length, 1, "the click opens the detail");
+
+      // A repaint (the pointer hovering a row or the back control) must not dismiss the sheet that
+      // opened without a live editor wrapper: it still owns the keyboard through Pi's overlay focus.
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "a repaint keeps the sheet open");
+      mounted[0].handleMouse({ type: "move", button: "none", x: 5, y: 1, width: 100 });
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "hovering the back control keeps the sheet open");
+      mounted[0].handleInput("escape");
+      assert.equal(mounted.length, 0, "Esc still closes it");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

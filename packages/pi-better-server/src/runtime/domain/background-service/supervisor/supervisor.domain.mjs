@@ -464,13 +464,19 @@ class Supervisor {
     }
     applyReconciliation(launch, options) {
         return withStateFence(this.directory, launch.taskId, () => {
-            const result = readTerminalRecord(this.directory, launch.taskId).value;
+            const { value: result, error: resultError } = readTerminalRecord(this.directory, launch.taskId);
+            if (resultError)
+                throw new Error(`Unreadable supervisor result record for ${launch.taskId}: ${resultError}`);
             if (result)
                 return { status: result.status, terminal: true, result };
-            const existingLost = readLostRecord(this.directory, launch.taskId).value;
+            const { value: existingLost, error: lostError } = readLostRecord(this.directory, launch.taskId);
+            if (lostError)
+                throw new Error(`Unreadable supervisor loss record for ${launch.taskId}: ${lostError}`);
             if (existingLost)
                 return { status: "lost", terminal: true, lost: existingLost };
-            const claim = readClaimRecord(this.directory, launch.taskId).value;
+            const { value: claim, error: claimError } = readClaimRecord(this.directory, launch.taskId);
+            if (claimError)
+                throw new Error(`Unreadable supervisor claim record for ${launch.taskId}: ${claimError}`);
             if (claim) {
                 if (identityAlive(claim.pid, claim.pidStartTime, claim.claimedAt, this.readToken)) {
                     return { status: "running", terminal: false };

@@ -4,6 +4,64 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.50.1] - 2026-11-22
+
+### Changed
+
+- Clarify the labels and descriptions in `/harness-settings` so the display, tools, and project work ledger are easier to distinguish. (#868)
+
+### Fixed
+
+- Summarize Rush Todo stages from every issue in the saved plan, including folded rows. Show an in-progress dot alongside a blocker when other issues are still moving through that stage. (#870)
+
+## [pi-better-harness@0.50.0] - 2026-11-20
+
+### Changed
+
+- Start a fresh Pi session and submit ordinary prompts while the shared runtime is offline. Opening the work navigator or using a work tool starts the connection. Resumed sessions with pending work still receive results automatically. (#858, #859, #860)
+- The sandbox page shows which worker tools load and which resources they may use. Selecting a tool makes it available under the applicable resource rules. (#855)
+- Bundle Subagents 0.36.0, Background Tasks 0.19.0, Goal 0.15.0, Sandbox 0.15.0 and SSH 0.1.6. Background Tasks and Subagents carry the Server 0.6.0 runtime.
+
+## [pi-better-server@0.6.0] - 2026-11-20
+
+### Changed
+
+- Track changes to assignments, runner state and watched files incrementally. Restore log checkpoints after restart and share catalog parsing across authorized consumers. (#814, #816, #817, #820, #823, #826)
+- Keep handshakes responsive during Subagent recovery and avoid false read-worker watchdog failures after system sleep. Negotiate Background host identity across time zones and isolate unreadable terminal records during history reads. (#852, #853, #856, #857)
+
+## [pi-better-subagents@0.36.0] - 2026-11-20
+
+### Changed
+
+- Register tools at Pi startup and connect on first use. Restore pending result delivery when a session resumes. (#859, #860)
+- Load selected worker tools under the sandbox resource policy, support installed worker bootstrap, and clean up assignment-owned tasks when an assignment ends. (#840, #846, #855)
+
+## [pi-better-background-tasks@0.19.0] - 2026-11-20
+
+### Changed
+
+- Defer supervisor loading and work observation until needed in a new session. Restore subscriptions for sessions with pending work. (#859, #860)
+- Keep history available when an old task record is unreadable and validate host identity during mixed-version upgrades on non-UTC machines. (#856, #857)
+
+## [pi-better-sandbox@0.15.0] - 2026-11-20
+
+### Changed
+
+- Show tool loading separately from resource permissions in `/sandbox`. Loaded worker tools follow the active file, process and network policy without a second tool selection. (#855)
+- Honor an explicit sandbox Off setting and report the effective process policy. Support process identity queries for confined macOS workers. (#835, #848)
+
+## [pi-better-goal@0.15.0] - 2026-11-20
+
+### Changed
+
+- Observe scoped activity changes and deadlines. Idle Goal reads use cached observations so an ordinary prompt can complete while the shared runtime is unavailable. An explicit activity query still requests verified state. (#827, #860)
+
+## [pi-better-ssh@0.1.6] - 2026-11-20
+
+### Documentation
+
+- Update standalone setup instructions for selecting SSH tools in a subagent role or spawn request and granting network access in `/sandbox`. (#855)
+
 ## [pi-better-harness@0.49.0] - 2026-11-16
 
 ### Added

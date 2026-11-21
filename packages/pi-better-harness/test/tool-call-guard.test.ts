@@ -55,7 +55,7 @@ test("the block reason names the wait and the replacement call", () => {
   assert.match(reason, /waits on a pull request's checks/);
   assert.match(reason, /bg_task_spawn/);
   assert.match(reason, /wait_for_operations/);
-  assert.match(reason, /Tool call guard to Off/);
+  assert.match(reason, /Foreground wait guard to Off/);
 });
 
 interface Registered { handler: (event: unknown) => unknown }

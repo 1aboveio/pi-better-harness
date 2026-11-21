@@ -1,9 +1,9 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/runtime.ts. Do not edit directly.
-import { createHash } from "node:crypto";
+import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fingerprint.domain.mjs";
 import { readFileSync, statSync } from "node:fs";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.domain.mjs";
 import { evaluateCondition, validateCondition } from "./conditions.domain.mjs";
-import { parseStepGateFailure, processExists, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.domain.mjs";
+import { commandExecution, parseStepGateFailure, processExists, resolveWindowsLaunchShell, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.domain.mjs";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.domain.mjs";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.domain.mjs";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.domain.mjs";
@@ -14,12 +14,12 @@ import { markFailureAttentionDelivered } from "./shared-failure-observations.dom
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { formatCallbackFacts } from "./output.domain.mjs";
 import { observeTaskStallAttention } from "./stall-attention.domain.mjs";
-import { isTerminalStatus } from "./types.domain.mjs";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.domain.mjs";
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 /** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
 export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+export { FIRST_WATCH_CHECK_WAIT_MS } from "./types.domain.mjs";
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /** Each cached extension factory owns its scheduling and suspension state. */
@@ -224,6 +224,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         // launch cwd is passed so a relative alias resolves where the task will run.
         assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
         const commandLimits = backgroundExecutionLimits(sandboxPlan);
+        const resolvedWindowsShell = params.ssh ? undefined : resolveWindowsLaunchShell(pi);
         const id = nextTaskId();
         admission?.prepared?.(id);
         const logPath = logPathFor(id);
@@ -239,7 +240,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
                 remote: params.remote,
             }, dependencies.remoteRunner)
             : undefined;
-        const operatorSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+        const operatorSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
         const commandSpec = withStepGate(operatorSpec, id, stepGated);
         const sandboxNotices = [];
         const launchSpec = remoteTask
@@ -536,6 +537,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
         assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
         const commandLimits = backgroundExecutionLimits(sandboxPlan);
+        const resolvedWindowsShell = params.ssh || params.shell === false ? undefined : resolveWindowsLaunchShell(pi);
         const id = nextTaskId();
         admission?.prepared?.(id);
         const now = Date.now();
@@ -550,11 +552,12 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
                 remote: params.remote,
             }, dependencies.remoteRunner)
             : undefined;
-        const commandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+        const commandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
         const sandboxNotices = [];
         const launchSpec = remoteTask
             ? commandSpec
             : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line), "bg_task_watch");
+        const invocation = resolvedWindowsShell ? commandExecution(launchSpec) : undefined;
         const meta = withCommandPolicy({
             id,
             name: params.name,
@@ -572,7 +575,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
             shell: commandSpec.shell,
             cwd,
             env: params.env,
-            launchArgv: launchArgvOf(commandSpec, launchSpec),
+            launchArgv: invocation ? [invocation.execPath, ...invocation.execArgs] : launchArgvOf(commandSpec, launchSpec),
             sandbox: sandboxProvenance(sandboxPlan, !!remoteTask),
             maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
             spawnPid: process.pid,
@@ -1418,71 +1421,6 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         catch {
             return result.stdout.slice(0, 4000);
         }
-    }
-    /** Version tag of the watch outcome fingerprint. A value from another version is adopted, never compared. */
-    const WATCH_FINGERPRINT_VERSION = "v1";
-    /** OSC and CSI control sequences are display markup, not content. */
-    const TERMINAL_ESCAPE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
-    /**
-     * Text as the terminal would settle it. Redraw frames and control sequences are
-     * display churn: repainting the same visible line is not a new observation.
-     */
-    function settledTerminalText(text) {
-        return text
-            .replace(TERMINAL_ESCAPE, "")
-            .split("\n")
-            .map((line) => {
-            // A CR immediately before LF ends the line; any other CR overwrites it in place.
-            const body = line.endsWith("\r") ? line.slice(0, -1) : line;
-            return (body.split("\r").at(-1) ?? "").replace(/[ \t]+$/, "");
-        })
-            .join("\n")
-            .replace(/\n+$/, "");
-    }
-    /** Objects compare by content regardless of key order, so reordered keys are not progress. */
-    function canonicalJsonText(value) {
-        if (Array.isArray(value))
-            return `[${value.map(canonicalJsonText).join(",")}]`;
-        if (value && typeof value === "object") {
-            const record = value;
-            const entries = Object.keys(record).sort()
-                .map((key) => `${JSON.stringify(key)}:${canonicalJsonText(record[key])}`);
-            return `{${entries.join(",")}}`;
-        }
-        return JSON.stringify(value) ?? "null";
-    }
-    /** stdout compares as JSON content when it parses, and as settled text otherwise. */
-    function canonicalWatchStdout(stdout) {
-        const settled = settledTerminalText(stdout);
-        try {
-            return `json:${canonicalJsonText(JSON.parse(settled))}`;
-        }
-        catch {
-            return `text:${settled}`;
-        }
-    }
-    /**
-     * What a poll observed, independent of when it ran. Exit status, signal, error,
-     * stdout content, and stderr content are included; poll metadata (start time,
-     * end time, duration, check count) is deliberately not, so it can never hide a
-     * watch that reports the same outcome forever. Watch stdout may carry its own
-     * timestamps: projecting meaningful fields is the caller's job, not this
-     * fingerprint's guess.
-     */
-    function watchOutcomeFingerprint(result) {
-        // A runner may report why the check itself could not run; that is part of the
-        // observed outcome, not poll metadata.
-        const reported = result.error;
-        const error = typeof reported === "string" ? settledTerminalText(reported) : null;
-        const payload = JSON.stringify([
-            result.exitCode,
-            result.signal ?? null,
-            result.timedOut === true,
-            error,
-            canonicalWatchStdout(result.stdout),
-            settledTerminalText(result.stderr),
-        ]);
-        return `${WATCH_FINGERPRINT_VERSION}:${createHash("sha256").update(payload).digest("hex")}`;
     }
     /**
      * A watch's state clock advances only when its observed outcome changes. The

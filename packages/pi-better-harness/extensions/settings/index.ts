@@ -24,7 +24,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
       const readSettings = (): ReturnType<typeof getCallbackSettings> => {
         try { return getCallbackSettings(ctx); }
         catch (error) {
-          const message = `Callback default unavailable; using Wait until idle: ${error instanceof Error ? error.message : String(error)}`;
+          const message = `Callback default unavailable. Using When idle. ${error instanceof Error ? error.message : String(error)}`;
           if (!reported.has(message)) { ctx.ui.notify(message, "error"); reported.add(message); }
           return { mode: "hold", source: "default" };
         }

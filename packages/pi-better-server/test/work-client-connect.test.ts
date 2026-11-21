@@ -1,8 +1,9 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer, type Socket} from 'node:net';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {EventEmitter} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
 import { claimDaemonOwner, inspectDaemonOwner } from '../src/daemon-owner.ts';
 import { runtimeStatus, waitForRuntimeOwner } from '../src/runtime/client.ts';
@@ -95,4 +96,50 @@ test('connection observes a replacement while owner recovery is still pending', 
   recoverySignal=signal;await f.listen();await recoveryPending;
  }});
  assert.equal(client.closed,false);assert.equal(recoverySignal?.aborted,true);finish();client.close();
+});
+
+function registerAgent(t: TestContext, directory: string) {
+  const root = realpathSync(directory);
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  });
+  writeFileSync(join(root, 'server-registration-v1.json'), JSON.stringify({ version: 1, agentDir: root, serverDir: root }));
+  return root;
+}
+
+test('Background client chooses the start token advertised by the daemon', async t => {
+  const savedTZ = process.env.TZ;
+  process.env.TZ = 'Asia/Shanghai';
+  t.after(() => {
+    if (savedTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = savedTZ;
+  });
+  const records: Array<{ version: number; start: string }> = [];
+  let capabilities = ['runtime-background-execution-v1'];
+  const f = await fixture(t, (socket, message) => {
+    if (message.type === 'runtime_background_tool') {
+      records.push(JSON.parse(readFileSync(join(f.root, 'background-tool-admission', message.authority.id + '.json'), 'utf8')));
+    }
+    const data = message.type === 'hello' ? { instanceId: 'test', capabilities } : { instanceId: 'test', seq: 1, status: 'ready', rows: [] };
+    socket.write(JSON.stringify({ id: message.id, success: true, data }) + '\n');
+  });
+  await f.listen();
+  const root = registerAgent(t, f.root);
+  const load = (file: string) => import(new URL('../../pi-better-background-tasks/src/' + file, import.meta.url).href);
+  const { requestBackgroundTool } = await load('managed-client.ts');
+  const { closeBackgroundObservation } = await load('work-observation.ts');
+  const { readAdmissionStartToken, readProcessStartTokenFresh } = await load('process-identity.ts');
+  const pi = { events: new EventEmitter() };
+  const ctx = { cwd: root, sessionManager: { getSessionId: () => 'native', getBranch: () => [] }, isProjectTrusted: () => true };
+  try {
+    await requestBackgroundTool(pi, ctx, 'legacy', '__background_poll', {});
+    capabilities = [...capabilities, 'runtime-background-admission-v2'];
+    await requestBackgroundTool(pi, ctx, 'updated', '__background_poll', {});
+    assert.deepEqual(records.map(r => [r.version, r.start]), [
+      [1, readProcessStartTokenFresh(process.pid)], [2, readAdmissionStartToken(process.pid)],
+    ]);
+  } finally { closeBackgroundObservation(pi); }
 });

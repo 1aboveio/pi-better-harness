@@ -1,20 +1,34 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/index.ts. Do not edit directly.
+import { shouldRestoreWorkObservation } from "./shared-work-client.mjs";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.domain.mjs";
 import { registerBackgroundTasksGoalProvider } from "./goal-provider.domain.mjs";
 import { createBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
-import { createBackgroundTaskRuntime } from "./runtime.domain.mjs";
 import { createManagedBackgroundFrontend } from "./managed-frontend.domain.mjs";
 import { observeForegroundSandboxPolicy } from "./sandbox.domain.mjs";
 import { registerTools } from "./tools.domain.mjs";
 import { deliverBackgroundTasksPrompt } from "./prompt.domain.mjs";
 import { closeBackgroundObservation } from "./work-observation.domain.mjs";
+import { readBackgroundReviewInterval, saveBackgroundReviewInterval } from "./review-settings.domain.mjs";
 export default function backgroundTasksExtension(pi) {
     // The frontend owns native UI/delivery only. Mechanical tools run in the
-    // fixed server service; this runtime supplies registration metadata only.
-    const runtime = createBackgroundTaskRuntime();
+    // fixed server service. Register their native definitions before the first turn.
     const { host: observedWaits, proxy, ui } = createManagedBackgroundFrontend(pi);
-    const navigator = createBackgroundTasksNavigator(runtime, ui);
+    const navigator = createBackgroundTasksNavigator(undefined, ui);
     initializeNavigatorPanels(pi);
+    const intervalLabel = (minutes) => `${minutes} minute${minutes === 1 ? "" : "s"}`;
+    const reviewSetting = {
+        id: "background-review-interval",
+        label: "Background wait review interval",
+        values: [1, 5, 10, 15, 30, 60].map(intervalLabel),
+        get: () => intervalLabel(readBackgroundReviewInterval()),
+        change(value) {
+            saveBackgroundReviewInterval(Number.parseInt(value, 10));
+            void observedWaits.reconcileNow().catch(() => undefined);
+        },
+    };
+    const registerReviewSetting = () => pi.events.emit("harness-settings:register", reviewSetting);
+    let stopReviewSettings = pi.events.on("harness-settings:request", registerReviewSetting);
+    registerReviewSetting();
     // Sections on a host that renders them; text only where it renders none.
     // Returning a prompt on modern pi would set forceSystemPrompt, and the request
     // would then carry a snapshot, so sections published after it never arrive.
@@ -26,7 +40,8 @@ export default function backgroundTasksExtension(pi) {
     observeForegroundSandboxPolicy(pi);
     // Registered before registerTools(pi), so this runs before running tasks are resumed.
     pi.on("session_start", async (_event, ctx) => {
-        runtime.resumeScheduledWork();
+        stopReviewSettings ??= pi.events.on("harness-settings:request", registerReviewSetting);
+        registerReviewSetting();
         registerBackgroundTasksGoalProvider(pi);
         navigator.ensureBackgroundTasksNavigator(ctx);
     });
@@ -36,17 +51,18 @@ export default function backgroundTasksExtension(pi) {
         navigator.clearBackgroundTasksNavigatorSession();
     });
     pi.on("session_shutdown", async (_event, ctx) => {
+        stopReviewSettings?.();
+        stopReviewSettings = undefined;
         closeBackgroundObservation(pi);
         // /reload, session replacement, and quit load a fresh instance; stop this one's timers (#324).
         observedWaits.close();
-        runtime.suspendScheduledWork();
         navigator.clearBackgroundTasksNavigatorSession();
     });
-    registerTools(proxy, runtime, navigator.refreshBackgroundTasksNavigator, { resumeLocal: false });
+    registerTools(proxy, undefined, navigator.refreshBackgroundTasksNavigator, { resumeLocal: false });
     // Registered after registerTools so the callback batcher has its session
     // context before a reconciled delivery can enqueue a parent notification.
-    pi.on("session_start", async (_event, ctx) => {
-        observedWaits.start(ctx);
+    pi.on("session_start", (event, ctx) => {
+        observedWaits.start(ctx, shouldRestoreWorkObservation(event, ctx.sessionManager));
     });
     // A fork or branch navigation does not restart the session, but it changes
     // which continuation may receive a queued callback. Update the host snapshot

@@ -10,6 +10,8 @@ let context: { agentDir: string; origin: { cwd: string; sessionId?: string } } |
 let connecting: Promise<void> | undefined;
 let collecting: Promise<void> | undefined;
 let collectingClient: WorkClient | undefined;
+let collectionRetry: ReturnType<typeof setTimeout> | undefined;
+let collectionFailures = 0;
 let dirty = false;
 let retry: ReturnType<typeof setTimeout> | undefined;
 let backoff = 100;
@@ -26,6 +28,8 @@ export function onWorkObservation(notify: () => void) {
 }
 
 export function workObservation() { return snapshot; }
+export function hasWorkObservationContext() { return context !== undefined; }
+export function workObservationStarted() { return Boolean(connecting || client || retry || snapshot); }
 export function workObservationFailure() { return snapshot?.reason ?? failure; }
 
 function degraded(error: unknown) {
@@ -46,6 +50,7 @@ function reconnectLater(current: number) {
 
 // Every page is bounded; a conversation anchor fences collection across filtered queries.
 async function collect(candidate: WorkClient, current: number) {
+    if (collectionRetry) clearTimeout(collectionRetry); collectionRetry = undefined;
     dirty = true;
     if (collecting && collectingClient === candidate) return collecting;
     collectingClient = candidate;
@@ -102,12 +107,25 @@ async function collect(candidate: WorkClient, current: number) {
                     snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
                         observedAtLocal: Date.now(),
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
+                    collectionFailures = 0;
                     completed = true; refresh();
                 } catch (error) {
                     if (current !== generation || candidate !== client) return;
                     if (attempt === 1 || candidate.closed) {
                         degraded(error);
-                        if (candidate.closed) return;
+                        if (current !== generation || candidate !== client || candidate.closed) return;
+                        // Retry the outstanding notification after transient transport or
+                        // consistency failures, even when the terminal source sends no more events.
+                        const message = error instanceof Error ? error.message : String(error);
+                        if (!dirty && /^(?:runtime-(?:timeout|overloaded|unhealthy)|resync_required):/.test(message) && collectionFailures < 3) {
+                            const wait = 100 * 2 ** collectionFailures++;
+                            collectionRetry = setTimeout(() => {
+                                collectionRetry = undefined;
+                                if (current === generation && candidate === client && !candidate.closed)
+                                    void collect(candidate, current).catch(error => { if (current === generation && candidate === client) degraded(error); });
+                            }, wait);
+                            collectionRetry.unref?.();
+                        }
                         // A notification received during these page reads is
                         // still owed a coherent collection. Drain only that
                         // demand through the outer loop; do not start a poller.
@@ -149,6 +167,7 @@ async function connectObservation(current: number) {
     client = candidate;
     candidate.onChange(() => {
         if (current !== generation || candidate !== client) return;
+        collectionFailures = 0;
         if (candidate.closed) {
             details.clear(); pendingDetails.clear();
             degraded(candidate.snapshot?.reason ?? "runtime-unavailable: disconnected; resync required");
@@ -167,15 +186,24 @@ async function connectObservation(current: number) {
     if (current === generation) { backoff = 100; if (retry) clearTimeout(retry); retry = undefined; }
 }
 
-export async function startWorkObservation(agentDir: string, origin: { cwd: string; sessionId?: string }, changed: () => void) {
+export function configureWorkObservation(agentDir: string, origin: { cwd: string; sessionId?: string }, changed: () => void) {
     stopWorkObservation();
-    const current = generation;
     context = { agentDir, origin }; refresh = () => {
         changed();
         for (const notify of observationListeners) notify();
     };
+}
+
+export async function activateWorkObservation() {
+    if (!context) return;
+    const current = generation;
     try { await ensureObservation(); }
     catch (error) { if (current === generation) { degraded(error); reconnectLater(current); } }
+}
+
+export async function startWorkObservation(agentDir: string, origin: { cwd: string; sessionId?: string }, changed: () => void) {
+    configureWorkObservation(agentDir, origin, changed);
+    await activateWorkObservation();
 }
 
 async function ensureObservation() {
@@ -210,6 +238,8 @@ export async function observedList(scope: object) { return query(scope); }
 
 export function stopWorkObservation() {
     generation++; context = undefined;
+    if (collectionRetry) clearTimeout(collectionRetry); collectionRetry = undefined;
+    collectionFailures = 0;
     connectionAbort.abort(); connectionAbort = new AbortController();
     if (retry) clearTimeout(retry); retry = undefined;
     client?.close(); client = undefined; snapshot = undefined;

@@ -35,7 +35,17 @@ export async function startContinuationModel(artifacts: string) {
     const answer = followup ? `FOLLOWUP:${prompt}` : "INITIAL ANSWER";
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     const send = (delta: unknown, finish_reason: string | null = null) => response.write(`data: ${JSON.stringify({ id: "offline-continuation", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    send({ role: "assistant", content: answer }); send({}, "stop"); response.end("data: [DONE]\n\n");
+    const toolRequest = join(artifacts, `tool-call-${key}.json`);
+    if (!followup && existsSync(toolRequest)) {
+      const call = JSON.parse(readFileSync(toolRequest, "utf8"));
+      send({ role: "assistant", tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function",
+        function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] });
+      send({}, "tool_calls");
+    } else {
+      send({ role: "assistant", content: answer });
+      send({}, "stop");
+    }
+    response.end("data: [DONE]\n\n");
     } catch {
       if (!response.destroyed) response.writeHead(400).end("Invalid offline model request");
     }

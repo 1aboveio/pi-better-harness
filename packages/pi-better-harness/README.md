@@ -20,9 +20,9 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 
 ## Outcome & Todo
 
-In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
-defaults to **On**, and **Outcome & Todo hooks** (`outcome-todo`) defaults to
-**Off**. **Long-term work ledger** (`outcome-todo-ledger`) is a third independent
+In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
+defaults to **On**, and **Outcome and Todo tools** (`outcome-todo`) defaults to
+**Off**. **Project work ledger** (`outcome-todo-ledger`) is a third independent
 control and defaults to **Off**. Saved outcomes and checklists display even when
 hooks are off; missing state creates no placeholder, state, or settings. Turning
 display off does not disable hooks. Saved v1 `enabled` remains the hooks
@@ -66,7 +66,7 @@ Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
-The separate **Long-term work ledger** setting enables a durable project-scoped
+The separate **Project work ledger** setting enables a durable project-scoped
 record of the overall outcome, boundaries, and high-level items. It stays off by
 default; turning it off removes ledger views and hints without deleting records.
 The same `update_todo` / `get_todo` interface carries optional ledger payloads and
@@ -150,14 +150,14 @@ need interactive confirmation. Full policy: [pi-better-sandbox](https://github.c
 
 ## Minimal Tool Output
 
-The bundled harness provides **Tool output: Normal / Minimal** in
+The bundled harness provides **Tool output** with **Normal** and **Compact** in
 `/harness-settings`. `/tool-output minimal`, `/tool-output normal`, and
 `/tool-output` (toggle) remain compatibility shortcuts to the same preference.
 Minimal mode folds each tool call into a single-line header, including running
 calls. The tool-specific icon and tool name share a state color: accent while
 running, muted when completed, and error-colored when failed. In fullscreen Pi, a soft highlight travels through the entire visible running tool name and its
 inline command/path details; details stay dim between highlight passes. Scrollback terminals keep static state colors.
-Choose **Tool animation: Off** in `/harness-settings` for static running headers.
+Choose **Tool progress animation** set to **Off** in `/harness-settings` for static running headers.
 Running and failed calls retain text labels so state never depends on color or
 motion alone. Tool rows are indented two columns past
 the assistant text padding. Long
@@ -211,12 +211,12 @@ pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 
 The bundled harness provides `/harness-settings`, using Pi's native settings
 list. It opens the settings screens of loaded Sandbox, Subagents, and Goal
-packages without duplicating their configuration, plus the **Agents** shortcut
+packages without duplicating their configuration, plus the **Agent catalog** shortcut
 to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
-**View** selects `flatten` (the default) or `tree`. Flatten keeps the Subagents
+**Navigator layout** selects **Flat list** (the default) or **Tree**. Flatten keeps the Subagents
 and Background Tasks groups and includes tasks launched by subagents. Tree puts
 Main and subagents at the same level, with each agent's background tasks indented
 beneath it. Switching applies immediately and saves `piBetterHarness.navigatorView`.
@@ -224,19 +224,19 @@ Worker-owned tasks expose status and logs; their execution remains managed by th
 owning agent. Older worker tasks appear when a retained assignment wait proves
 their parent, so unrelated sessions are never inferred from a reused conversation.
 
-**Sticky navigator** controls the shared navigator used by Goal, Outcome & Todo,
+**Pin work panels** controls the shared navigator used by Goal, Outcome & Todo,
 Subagents, and Background Tasks. **On** (the default) keeps it above the input;
 **Off** places it in the conversation so it scrolls with chat. Changes apply
 immediately and save under `piBetterHarness.navigator` for future sessions.
 Package controls and detail views remain available in either mode. Standalone
 packages use the same shared navigator and saved preference.
 
-The hub includes **Tool output** and **Tool animation** when the bundled renderer
+The hub includes **Tool output** and **Tool progress animation** when the bundled renderer
 extension is loaded. Changes apply immediately and save the default for future
 sessions. The animation preference is stored in `piBetterHarness.toolAnimation`;
 normal output and expanded tool details are never animated.
-The hub also owns **Completions while busy**, shared by Subagents and Background
-Tasks. Choose **Wait until idle** (the default) or **Steer active run**. Changes
+The hub also owns **Completion delivery**, shared by Subagents and Background
+Tasks. Choose **When idle** (the default) or **During run**. Changes
 apply immediately and autosave to the current session branch, including across
 reloads. Press **Ctrl+S** to save the current choice as your default for future
 Pi sessions; changing a session afterward does not change that saved default.

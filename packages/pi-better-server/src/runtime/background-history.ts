@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, stat } from "node:fs/promises";
 import { watch, statSync, type FSWatcher } from "node:fs";
 import { dirname, join } from "node:path";
-import { setImmediate as yieldTurn } from "node:timers/promises";
+import { setImmediate as yieldTurn, setTimeout as delay } from "node:timers/promises";
 import type { WorkScope } from "./read-model.ts";
 import { workPage } from "./work-budget.ts";
 // @ts-expect-error Generated canonical cursor and scope functions.
@@ -157,8 +157,8 @@ export class BackgroundHistory {
       for (const id of this.applying) this.dirty.add(id);
       for (const id of this.applyingLegacy) this.dirtyLegacy.add(id);
       if (!this.closed) {
-        this.status = error === this.ownerBusy ? "rebuilding" : "degraded";
-        this.reason = error === this.ownerBusy ? undefined : String(error);
+        this.status = error === this.sourceChanged ? "rebuilding" : "degraded";
+        this.reason = error === this.sourceChanged ? undefined : String(error);
       }
     }).finally(() => {
       this.applying = [];
@@ -183,10 +183,15 @@ export class BackgroundHistory {
       this.startRefresh(version);
     }
     const resource = `list:${sessionScopeKey({ all: scope.backgroundAll, origin: { cwd: scope.cwd, sessionId: scope.sessionId }, processId: scope.processId })}:${[...(scope.statuses ?? [])].sort().join(",")}`;
-    const clauses = ["unreadable = 0", "dismissed = 0"], args: any[] = [];
-    if (!scope.backgroundAll) clauses.push("known = 1");
-    if (!scope.backgroundAll) { clauses.push("workspace = ? AND session = ?"); args.push(scope.cwd, scope.sessionId ?? ""); }
-    if (!scope.backgroundAll && !scope.sessionId) { clauses.push("spawn_pid = ?"); args.push(scope.processId ?? -1); }
+    const ownerClauses: string[] = [], ownerArgs: any[] = [];
+    if (!scope.backgroundAll) {
+      ownerClauses.push("workspace = ? AND session = ?");
+      ownerArgs.push(scope.cwd, scope.sessionId ?? "");
+      if (!scope.sessionId) { ownerClauses.push("spawn_pid = ?"); ownerArgs.push(scope.processId ?? -1); }
+    }
+    const ownerWhere = ownerClauses.join(" AND ");
+    const clauses = ["unreadable = 0", "dismissed = 0"], args = [...ownerArgs];
+    if (ownerWhere) clauses.push("known = 1", ownerWhere);
     if (scope.statuses?.length) { clauses.push(`(state IN (${scope.statuses.map(() => "?").join(",")})${scope.statuses.includes("running") ? " OR active = 1" : ""})`); args.push(...scope.statuses); }
     if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
     const where = clauses.join(" AND ");
@@ -214,20 +219,22 @@ export class BackgroundHistory {
     const revisions = this.db.prepare(`SELECT sum(content) AS content, sum(failure) AS failure FROM background_history_revisions
       WHERE workspace = ? AND session = ? AND state IN (${revisionStates.map(() => "?").join(",")})`)
       .get(scope.backgroundAll ? "" : scope.cwd, scope.backgroundAll ? "" : scope.sessionId || `process:${scope.processId ?? -1}`, ...revisionStates);
-    const diagnostics = this.db.prepare("SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown FROM background_history WHERE dismissed = 0").get();
+    const diagnosticScope = ownerWhere ? ` AND (known = 0 OR (${ownerWhere}))` : "";
+    const diagnostics = this.db.prepare(`SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown
+      FROM background_history WHERE dismissed = 0${diagnosticScope}`).get(...ownerArgs);
     return { records: records.slice(0, scope.limit ?? 10).map((meta: any) => ({ id: meta.id, found: true, readable: true, meta })),
       page: { total: Number(aggregate.n), before, nextCursor: page.nextCursor, resource,
         contentRevision: digest([aggregate.n, revisions.content, diagnostics.unreadable, diagnostics.unknown]), failureRevision: digest(revisions.failure),
         unreadable: Number(diagnostics.unreadable ?? 0), unknown: scope.backgroundAll ? 0 : Number(diagnostics.unknown ?? 0) } };
   }
 
-  private readonly ownerBusy = new Error("Derived history slice deferred to its observation owner");
+  private readonly sourceChanged = new Error("Background history source replaced during refresh");
   private async refresh(version: string) {
-    const writableSlice = () => {
-      if (this.source()?.observationActive) throw this.ownerBusy;
-    };
-    writableSlice();
     const generation = this.generation;
+    const ownerBusy = () => {
+      if (generation !== this.generation) throw this.sourceChanged;
+      return !this.closed && this.source()?.observationActive;
+    };
     const baseline = !this.imported;
     const legacy = this.legacyOwed || baseline;
     this.legacyOwed = false;
@@ -272,8 +279,8 @@ export class BackgroundHistory {
     const source = this.source();
     let last = "";
     if (source) for (;;) {
+      while (ownerBusy()) await delay(10);
       if (this.closed) return;
-      writableSlice();
       this.metrics.operationQueries += baseline ? 1 : dirty.length;
       const operations = baseline ? source.prepare(`SELECT * FROM operations WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor'
         AND operation_id > ? ORDER BY operation_id LIMIT 128`).all(last)
@@ -292,7 +299,7 @@ export class BackgroundHistory {
           // absence would make every exact repair demand another history build.
           meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id, branchId: op.owner_branch_id ?? null }, logPath: meta.logPaths?.stdout ?? "" };
         }
-        if (meta) save(key, meta, signature, "", false, context);
+        if (meta) save(key, meta, signature, "", meta.unreadable === true, context);
         else if (previous.get(key)?.signature === signature) seen.add(key);
       }
       last = operations.at(-1).operation_id;
@@ -310,7 +317,8 @@ export class BackgroundHistory {
       this.metrics.inputStats += 3;
       const signature = await identity(join(path, "meta.json"));
       const failure = digest([await identity(join(path, "failures.jsonl")), await identity(join(path, "failures.jsonl.observed"))]);
-      writableSlice();
+      while (ownerBusy()) await delay(10);
+      if (this.closed) return;
       if (previous.get(key)?.signature === signature) { seen.add(key); updateFailure(key, failure); }
       else {
         this.metrics.metadataReads++;
@@ -319,8 +327,8 @@ export class BackgroundHistory {
       }
       if (++batch % 128 === 0) await yieldTurn();
     }
+    while (ownerBusy()) await delay(10);
     if (this.closed) return;
-    writableSlice();
     const removals = baseline ? this.db.prepare("SELECT key FROM background_history").all()
       : [...(legacy ? this.db.prepare("SELECT key FROM background_history WHERE key LIKE 'l:%'").all() : []),
         ...dirty.map(id => ({ key: `d:${id}` })), ...dirtyLegacy.map(id => ({ key: `l:${id}` }))];

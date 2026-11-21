@@ -28,7 +28,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         const cwd = options.cwd ?? workspace, sessionId = options.sessionId ?? "owner-session";
         const child = fork(new URL("../../pi-better-server/test/support/subagent-launch-sdk.mjs", import.meta.url), [], {
             execPath: process.execPath, execArgv: ["--import", "tsx"],
-            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, failHealthNotify: options.failHealthNotify, policy }) },
+            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, loadUserExtensions: options.loadUserExtensions, failHealthNotify: options.failHealthNotify, policy }) },
             stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
         observeFixtureChild(child);
@@ -82,7 +82,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
                 child.send({ id, tool, key: `${key}-${actorId}-${id}`, params, policy }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } });
             });
         };
-        for (const tool of ["subagent_spawn", "subagent_spawn_batch", "subagent_result", "subagent_stop", "subagent_settings"]) {
+        for (const tool of ["subagent_spawn", "subagent_spawn_batch", "subagent_list", "subagent_result", "subagent_stop", "subagent_settings"]) {
             tools.set(tool, { execute: (key, params) => execute(tool, key, params) });
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.

@@ -3,15 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { requestBackgroundTool } from "./managed-client.domain.mjs";
 import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
-import { registerObservedWaitClient } from "./observed-waits.domain.mjs";
+import { registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
     let rows = [], legacyRows = [], details = new Map(), logs = new Map();
+    let pendingAttention = new Set();
     const retainedTasks = new Map();
     const cachedTask = (id) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope;
+    let observing = false;
     const scopeOf = (context) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map();
     const adoptContext = (context) => {
@@ -23,6 +25,7 @@ export function createManagedBackgroundFrontend(pi) {
             logs.clear();
             retainedTasks.clear();
             generation++;
+            pendingAttention.clear();
         }
         ctx = context;
         adoptedScope = scopeOf(context);
@@ -64,6 +67,38 @@ export function createManagedBackgroundFrontend(pi) {
         for (const listener of listeners)
             listener({ workspace: ctx?.cwd, sessionId: ctx?.sessionManager.getSessionId() });
     };
+    let handoffRetry;
+    let attentionRetry;
+    let retryAt = Infinity;
+    const scheduleHandoffPoll = (delayMs) => {
+        if (!ctx || retryAt <= Date.now() + delayMs)
+            return;
+        clearTimeout(handoffRetry);
+        retryAt = Date.now() + delayMs;
+        // Poll again before attempting delivery: the task or its recipient may have changed.
+        handoffRetry = setTimeout(() => {
+            handoffRetry = undefined;
+            retryAt = Infinity;
+            if (ctx)
+                void reconcile().catch(() => undefined);
+        }, delayMs);
+        handoffRetry.unref();
+    };
+    const waitForAttentionIdle = () => {
+        if (attentionRetry)
+            return;
+        attentionRetry = setTimeout(() => {
+            attentionRetry = undefined;
+            if (!ctx || !pendingAttention.size)
+                return;
+            if (!ctx.isIdle()) {
+                waitForAttentionIdle();
+                return;
+            }
+            void reconcile().catch(() => undefined);
+        }, 1000);
+        attentionRetry.unref();
+    };
     const reconcile = () => {
         if (!ctx)
             return Promise.resolve();
@@ -74,16 +109,20 @@ export function createManagedBackgroundFrontend(pi) {
         dirty = false;
         const captured = ctx, version = generation;
         refresh = (async () => {
+            const rechecking = pendingAttention.size && captured.isIdle() ? pendingAttention : undefined;
             trace('poll-start');
             const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
             trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
             if (version !== generation)
                 return;
+            if (Number.isFinite(snapshot.retryAfterMs))
+                scheduleHandoffPoll(snapshot.retryAfterMs);
             if (snapshot.recoveryPending === true)
                 dirty = true;
             // A rebuilding snapshot is not evidence that visible tasks vanished.
             if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
-                rows = snapshot.tasks ?? [];
+                // Older servers include compact callback pointers in the task list.
+                rows = (snapshot.tasks ?? []).filter((task) => !task.callbackPending);
                 // Detail remains inspectable while Navigator retains a terminal row.
                 for (const task of rows) {
                     retainedTasks.delete(task.id);
@@ -94,9 +133,19 @@ export function createManagedBackgroundFrontend(pi) {
                 legacyRows = snapshot.legacyRows ?? [];
             }
             notify();
+            const deferredAttention = new Set();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
                     continue;
+                const n = item.notification;
+                const type = n.event?.customType;
+                if ((type === 'background-task-stall' || type === 'background-wait-review')
+                    && (!rechecking?.has(item.receiptId) || !captured.isIdle())) {
+                    // Keep the candidate here while busy. Pi's followUp queue cannot
+                    // revalidate it when the current turn eventually ends.
+                    deferredAttention.add(item.receiptId);
+                    continue;
+                }
                 queued.add(item.token);
                 const facts = { taskId: item.notification.taskId, receiptId: item.receiptId };
                 const receipt = (delivered, reason) => {
@@ -114,10 +163,15 @@ export function createManagedBackgroundFrontend(pi) {
                     receipt(true);
                     continue;
                 }
-                const n = item.notification;
                 trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
                 if (n.urgent) {
-                    void getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId, getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active', onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
+                    const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
+                        getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
+                        onDelivered: () => receipt(true), onSuppressed: reason => receipt(false, reason) });
+                    const retry = () => { queued.delete(item.token); if (version === generation)
+                        scheduleHandoffPoll(1000); };
+                    void Promise.resolve(handoff).then(ok => { if (!ok)
+                        retry(); }, retry);
                     continue;
                 }
                 getCallbackBatcher(pi).enqueue({ ...n.event, source: 'background-task', id: n.taskId, label: n.taskId, status: n.waitId ? `${n.status}; wait ${n.waitId} ready` : n.status,
@@ -125,17 +179,60 @@ export function createManagedBackgroundFrontend(pi) {
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
                     onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
             }
-        })().catch(error => { trace('poll-error', { error: String(error).slice(0, 256) }); throw error; })
+            pendingAttention = deferredAttention;
+            if (pendingAttention.size) {
+                if (captured.isIdle())
+                    dirty = true;
+                else
+                    waitForAttentionIdle();
+            }
+        })().catch(error => {
+            trace('poll-error', { error: String(error).slice(0, 256) });
+            if (version === generation && pendingAttention.size)
+                waitForAttentionIdle();
+            throw error;
+        })
             .finally(() => { refresh = undefined; if (dirty && ctx)
             void reconcile().catch(() => undefined); });
         return refresh;
     };
+    const activate = () => {
+        if (observing || !ctx)
+            return;
+        observing = true;
+        const version = generation;
+        void reconcile().catch(() => { if (generation === version)
+            observing = false; });
+    };
     const host = {
         async reconcileNow() { await reconcile(); while (refresh)
             await refresh; },
-        start(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
+        start(context, restore = true) {
+            adoptContext(context);
+            generation++;
+            observing = false;
+            if (restore)
+                activate();
+        },
         noteParentContext(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() {
+            clearTimeout(handoffRetry);
+            clearTimeout(attentionRetry);
+            handoffRetry = attentionRetry = undefined;
+            retryAt = Infinity;
+            observing = false;
+            ctx = undefined;
+            adoptedScope = undefined;
+            generation++;
+            rows = [];
+            legacyRows = [];
+            details.clear();
+            logs.clear();
+            retainedTasks.clear();
+            queued.clear();
+            ownership.clear();
+            pendingAttention.clear();
+        },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin, _options = {}) { return active(origin) ? rows : []; },
@@ -187,6 +284,7 @@ export function createManagedBackgroundFrontend(pi) {
         } });
     registerObservedWaitClient(proxy, host);
     const ui = {
+        onOpen: activate,
         rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;

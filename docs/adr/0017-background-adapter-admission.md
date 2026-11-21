@@ -1,5 +1,7 @@
 # Verified Background tool admission
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Implementation amendment for [#572](https://github.com/1aboveio/pi-better-harness/issues/572), following the Architect's admission recommendation. Extends [ADR 0007](0007-trusted-runtime-task-boundary.md) and the Background amendment in [ADR 0005](0005-sandbox-permission-table.md). No new permission defaults or shared task-sandbox API are introduced.
@@ -41,3 +43,16 @@ Verification on macOS:
 - Scoped `git diff --check`: passed. Test-quality lint reported zero gates and one text-oracle lead. That lead matches source-path fixtures used for provenance checks; the test loads and executes tools, not source-text assertions.
 
 Linux kernel behavior requires a capable Linux runner; the macOS run does not establish that evidence. The previously reproduced #409 end-to-end failure was not rerun or changed. No full-repository suite, new TUI end-to-end run, or live SSH test was claimed. No commits were made.
+
+## Background host process identity
+
+The foreground and daemon negotiate the process start token through the daemon's
+`runtime-background-admission-v2` capability. Version 2 uses the Linux kernel's
+process start ticks or a UTC, C-locale start time from Darwin's system `ps`.
+Both sides read the live PID when admitting a request. A failed read or a
+different start token refuses the operation.
+
+During a rolling upgrade, a new client sends the original version 1 record to
+an older daemon. An upgraded daemon verifies version 1 records from older
+clients with the original local-time format. Cross-time-zone admission requires
+version 2 on both sides.

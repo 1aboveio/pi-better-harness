@@ -1,5 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/goal-provider.ts. Do not edit directly.
-import { workObservation, onWorkObservation } from "./work-observation.domain.mjs";
+import { activateWorkObservation, hasWorkObservationContext, workObservation, onWorkObservation } from "./work-observation.domain.mjs";
 import { belongsToOrigin, effectiveStatus, isPendingPark, listMetasForParent, onMetaChanged, readParkRecord, } from "./registry.domain.mjs";
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
@@ -31,6 +31,22 @@ function parkActivity(meta) {
         ...(record.resumedBy ? { resumedBy: record.resumedBy } : {}),
     };
 }
+function observedActivity(observed, ctx) {
+    if (observed?.status !== "ready")
+        throw new Error(observed?.reason ?? "Subagent activity is unverified");
+    return {
+        providerId: "subagents", label: "Subagents", nextDeadline: observed.nextDeadline ?? null,
+        items: observed.rows.filter((row) => !ctx || (belongsToOrigin(row.meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() }) &&
+            (!row.meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === row.meta.callbackOrigin.branchId)))).map((row) => {
+            const status = row.assignment.state;
+            const active = status === "running" || status === "waiting";
+            return { id: row.meta.id, label: row.meta.name, status, active, terminal: !active,
+                attention: !active && status !== "completed", unhealthy: row.meta.status === "orphaned",
+                startedAt: row.meta.startedAt, endedAt: row.meta.endedAt,
+                details: { assignment: row.assignment, sourceRevision: row.sourceRevision } };
+        }),
+    };
+}
 export function registerSubagentsGoalProvider(pi) {
     const emitProvider = () => {
         pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
@@ -38,23 +54,16 @@ export function registerSubagentsGoalProvider(pi) {
             label: "Subagents",
             scope: "session",
             activityVersion: 1,
-            getActivity: (ctx) => {
+            getActivity: (ctx, options) => {
                 const observed = workObservation();
+                if (!observed && options?.cachedOnly) {
+                    return { providerId: "subagents", coverage: "unverified", items: [], nextDeadline: null };
+                }
+                if (!observed && hasWorkObservationContext()) {
+                    return activateWorkObservation().then(() => observedActivity(workObservation(), ctx));
+                }
                 if (observed) {
-                    if (observed.status !== "ready")
-                        throw new Error(observed.reason ?? "Subagent activity is unverified");
-                    return {
-                        providerId: "subagents", label: "Subagents", nextDeadline: observed.nextDeadline ?? null,
-                        items: observed.rows.filter((row) => !ctx || (belongsToOrigin(row.meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() }) &&
-                            (!row.meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === row.meta.callbackOrigin.branchId)))).map((row) => {
-                            const status = row.assignment.state;
-                            const active = status === "running" || status === "waiting";
-                            return { id: row.meta.id, label: row.meta.name, status, active, terminal: !active,
-                                attention: !active && status !== "completed", unhealthy: row.meta.status === "orphaned",
-                                startedAt: row.meta.startedAt, endedAt: row.meta.endedAt,
-                                details: { assignment: row.assignment, sourceRevision: row.sourceRevision } };
-                        }),
-                    };
+                    return observedActivity(observed, ctx);
                 }
                 let sessionId;
                 try {

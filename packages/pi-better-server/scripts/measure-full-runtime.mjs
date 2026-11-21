@@ -21,6 +21,8 @@ const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
 process.env.PI_RESOURCE_REPORT_DIR=samples;await import(probe);
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
+  // The steady-state measurement needs silent commands to stay healthy for the entire run.
+  PI_BETTER_STALL_QUIET_MS: String(60 * 60_000), PI_BETTER_STALL_MS: String(2 * 60 * 60_000),
   BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 mkdirSync(join(agent,'extensions'),{recursive:true});
 writeFileSync(join(agent,'extensions','resource-hosted.ts'),`export { default } from ${JSON.stringify(fileURLToPath(new URL('./measure-full-runtime/hosted-extension.ts',import.meta.url)))};\n`);
