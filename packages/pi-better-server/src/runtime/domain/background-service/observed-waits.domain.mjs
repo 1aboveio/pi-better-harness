@@ -2840,10 +2840,18 @@ export class ObservedWaitHost {
                 throw error;
             }
         }
-        const inspection = this.inspect(operation.taskId);
+        let inspection;
+        let unavailable = false;
+        try {
+            if (LOCAL_DURABLE_ID.test(operation.taskId))
+                inspection = this.supervisor.inspect(operation.taskId, { recordLost: true });
+        }
+        catch {
+            unavailable = true;
+        }
         if (!inspection) {
             const now = this.options.now?.() ?? Date.now();
-            if (now - operation.createdAt >= 30_000) {
+            if (!unavailable && now - operation.createdAt >= 30_000) {
                 // The supervisor writes its launch record before spawning. No record
                 // after the claim grace means no execution can be witnessed; this is
                 // `lost`, never a success and never a silent retry.
@@ -2867,14 +2875,15 @@ export class ObservedWaitHost {
                 void this.dispatchOutbox();
                 return;
             }
+            const reason = unavailable ? "durable supervisor records could not be read" : "no durable supervisor record exists for this operation";
             try {
-                if (claimed || operation.health !== "unmonitored" || operation.healthReason !== "no durable supervisor record exists for this operation") {
+                if (claimed || operation.health !== "unmonitored" || operation.healthReason !== reason) {
                     this.store?.recordSupervision({
                         operationId: operation.operationId,
                         owner: operation.owner,
                         expectedHostId: this.hostId,
                         health: "unmonitored",
-                        reason: "no durable supervisor record exists for this operation",
+                        reason,
                     });
                 }
             }
