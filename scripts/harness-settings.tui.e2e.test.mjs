@@ -102,7 +102,7 @@ export default function(pi){
     key("Down");
     wait(pane => /^> Navigator layout\s+Flat list/m.test(pane));
     tmux("resize-window", "-t", "test", "-x", "48", "-y", "28");
-    wait(pane => /^> Navigator layout\s+Flat list/m.test(pane) && /Tree groups related work under its\s+parent/.test(pane));
+    wait(pane => /^> Navigator layout\s+Flat list/m.test(pane) && /Tree nests tasks under their\s+agent/.test(pane));
     tmux("resize-window", "-t", "test", "-x", "100", "-y", "32");
     key("Down");
     wait(pane => /^> Tool output\s+Normal/m.test(pane));

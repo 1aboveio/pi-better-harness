@@ -110,7 +110,7 @@ test("the selected setting explains its effect at narrow and wide terminal width
   page.handleInput("\x1b[B");
   const layout = page.render(48).join(" ");
   assert.match(layout, /Navigator layout\s+Flat list/);
-  assert.match(layout, /Tree groups related work under its\s+parent/);
+  assert.match(layout, /Tree nests tasks under their\s+agent/);
   assert.doesNotMatch(layout, /Ctrl\+S/);
   page.handleInput("\x1b[B");
   assert.match(page.render(100).join("\n"), /Subagent settings\s+Open/);

@@ -124,8 +124,8 @@ export default function(pi){
   };
   const setSetting = (label, enabled) => {
     command("/harness-settings");
-    wait(frame => /Outcome & Todo display\s+(?:On|Off)/.test(frame) && /Outcome & Todo hooks\s+(?:On|Off)/.test(frame) &&
-      /Long-term work ledger\s+(?:On|Off)/.test(frame));
+    wait(frame => /Outcome and Todo panel\s+(?:On|Off)/.test(frame) && /Outcome and Todo tools\s+(?:On|Off)/.test(frame) &&
+      /Project work ledger\s+(?:On|Off)/.test(frame));
     selectSetting(label);
     const expected = enabled ? "On" : "Off";
     const current = new RegExp(`${label}\\s+(On|Off)`).exec(screen())?.[1];
@@ -136,9 +136,9 @@ export default function(pi){
     key("Escape");
     wait(frame => !frame.includes("Harness settings"));
   };
-  const setHooks = enabled => setSetting("Outcome & Todo hooks", enabled);
-  const setDisplay = enabled => setSetting("Outcome & Todo display", enabled);
-  const setLedger = enabled => setSetting("Long-term work ledger", enabled);
+  const setHooks = enabled => setSetting("Outcome and Todo tools", enabled);
+  const setDisplay = enabled => setSetting("Outcome and Todo panel", enabled);
+  const setLedger = enabled => setSetting("Project work ledger", enabled);
   const probeState = () => {
     rmSync(probe, { force: true });
     command("/probe-todo-tools");

@@ -35,7 +35,7 @@ export const controlCopy = new Map<string, SettingCopy>([
   }],
   ["navigator-view", {
     label: "Navigator layout",
-    description: "Tree groups related work under its parent. Flat list shows all work in one list.",
+    description: "Tree nests tasks under their agent. Flat list groups rows by work type.",
     values: { tree: "Tree", flatten: "Flat list" },
   }],
   ["tool-output", {
