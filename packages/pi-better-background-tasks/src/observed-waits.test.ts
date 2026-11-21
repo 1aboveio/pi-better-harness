@@ -286,7 +286,7 @@ describe("parent durable launches", () => {
     const wait = host.waitForParent(ctx, [launch.id], "Check delivery evidence");
     const review = () => host.backgroundWaitReview(origin, launch.id, [wait], interval);
     try {
-      await until(host, () => existsSync(checkpoint));
+      await until(host, () => existsSync(checkpoint) && Boolean(JSON.parse(readFileSync(checkpoint, "utf8")).fingerprint));
       const dueAt = review()!.dueAt;
       const initialProgress = progressTime();
       now = dueAt - 1;
