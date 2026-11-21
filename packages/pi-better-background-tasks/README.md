@@ -2,6 +2,8 @@
 
 `pi-better-background-tasks` is a Pi extension for durable background shell tasks, watchers, logs, and status inspection.
 
+For the decisions governing execution, progress, waits, and notifications, see the [Background task policy (ADR 0028)](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0028-background-task-policy.md).
+
 ## Quick Answer
 
 Use `pi-better-background-tasks` when a command should keep running while the foreground Pi session stays free. It is best for dev servers, long scripts, queue watchers, deploy checks, log tails, and other command-driven work.
@@ -110,10 +112,10 @@ timeouts, and v1 non-goals.
 
 ## Reloads and session switches
 
-Tasks belong to the Pi session that started them. After `/reload`, the same
-session picks every task back up: watches keep polling, remote tmux output keeps
-being collected, and a task that finished during the reload (or exits later) gets
-its completion callback exactly once.
+SSH and legacy tasks belong to the Pi session that started them. After `/reload`,
+that session resumes polling watches and collecting remote tmux output. The
+runtime checks delivery receipts and recovers pending callbacks. For supervised
+local tasks (`bgs_`), see [Observed operations and waits](#observed-operations-and-waits).
 
 After `/new`, `/resume`, fork, or switching to another session, the previous
 session's tasks keep running but are paused from Pi's side: watches do not poll,
@@ -126,6 +128,9 @@ If you quit Pi first, nothing records that exit: when the session is resumed in 
 new Pi process, a task whose process is gone is marked lost.
 
 ## Progress And Suspected Stalls
+
+SSH and legacy tasks support the stall alerts below. For supervised local
+tasks (`bgs_`), delivery of stall alerts during a wait is pending implementation.
 
 A task can remain `running` without recent progress evidence. Compact status and
 navigator use the same observation. Process tasks use recorded progress and the
@@ -335,7 +340,7 @@ leader exits before cleanup can be verified. Descendants may remain running;
 inspect that evidence before interpreting the result.
 
 Call `wait_for_operations` with `task_ids` and an optional `continuation_note` to
-register an all-settled wait. The parent remains responsive. A notification means
+register an all-settled wait. The parent remains responsive. A wait completion notification means
 every dependency is terminal, including failed, cancelled, timed-out or lost
 operations; it does not mean the command succeeded.
 
