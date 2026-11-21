@@ -475,6 +475,47 @@ describe("parent durable launches", () => {
     expect(status.matchedCondition).toEqual({ type: "stdout_contains", value: "ready" });
   });
 
+  it.each(["launch.json", "claim.json"])("keeps a wait pending when %s is temporarily unreadable for a claimed runner", async (record) => {
+    const root = workspace("unreadable-launch");
+    const ctx = createCtx(root);
+    const directory = join(root, "supervisor");
+    const supervisor = createLocalSupervisor({ directory });
+    let now = Date.now();
+    const { host } = startHost({ root, ctx, supervisor, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "process", params: { shell: false, callback: false,
+      argv: nodeCommand("const fs = require('node:fs'); const timer = setInterval(() => { if (fs.existsSync('finish')) clearInterval(timer); }, 25);") } });
+    cleanups.push(async () => { await supervisor.stop(launch.id); });
+    expect(supervisor.inspect(launch.id)?.claim?.alive).toBe(true);
+
+    const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+    const originalRead = fs.readFileSync;
+    const recordPath = join(directory, "tasks", launch.id, record);
+    const unavailable = vi.spyOn(fs, "readFileSync").mockImplementation(((path, options) => {
+      if (path === recordPath) throw Object.assign(new Error("fixture descriptor limit"), { code: "EMFILE" });
+      return originalRead(path, options);
+    }) as typeof fs.readFileSync);
+    syncBuiltinESMExports();
+    now += 31_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    let wait;
+    try {
+      wait = host.waitForParent(ctx, [launch.id], "inspect the exit result");
+      expect(wait.phase).toBe("waiting");
+      expect(wait.dependencies[0]?.terminalRevision).toBe(0);
+    } finally {
+      clock.mockRestore();
+      unavailable.mockRestore();
+      syncBuiltinESMExports();
+    }
+
+    expect(supervisor.inspect(launch.id)?.claim?.alive).toBe(true);
+    writeFileSync(join(root, "finish"), "go");
+    await until(host, () => host.statusForParent(ctx, launch.id).terminalOutcome === "succeeded");
+    const ready = host.listWaitsForParent(ctx).find((entry) => entry.waitId === wait.waitId);
+    expect(ready?.phase).toBe("ready");
+    expect(ready?.dependencies[0]).toMatchObject({ terminalOutcome: "succeeded", terminalRevision: 1 });
+  });
+
   it("records a lost operation as lost, never as success", async () => {
     const root = workspace("lost");
     const supervisor: LocalSupervisor = fakeSupervisor(root, "lost");
