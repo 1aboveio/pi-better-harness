@@ -274,7 +274,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         }
                     }
                     const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
-                    const liveAlerts = new Set<string>();
+                    const liveAlerts = new Map<string, any>();
                     const reviewTasks = tasks.filter(task => task.active && task.progress && task.callback && task.owner.kind === 'parent-session');
                     let intervalMinutes = reviewSettings.DEFAULT_BACKGROUND_REVIEW_INTERVAL_MINUTES;
                     if (reviewTasks.some(task => task.waits.length)) {
@@ -287,7 +287,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         const review = task.waits.length ? service.backgroundWaitReview(origin, task.id, task.waits, intervalMinutes * 60_000) : undefined;
                         for (const alert of [stall, review?.alert]) {
                             if (!alert) continue;
-                            liveAlerts.add(alert.delivery.receiptId);
+                            liveAlerts.set(alert.delivery.receiptId, alert.notification);
                             notifyParent(alert.notification, alert.delivery);
                         }
                         if (review && !review.alert) nextReviewAt = Math.min(nextReviewAt, review.dueAt);
@@ -297,9 +297,11 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (liveAlerts.size && deliveries.size >= 256) retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
                     for (const [token, item] of deliveries) {
                         if (ownerKey(item.scope.owner) !== key) continue;
+                        let notification = item.notification;
                         if (isAttentionDelivery(item)) {
                             if (item.notification.branchId && !record.branchIds.includes(item.notification.branchId)) continue;
-                            if (!liveAlerts.has(item.receiptId)) { deliveries.delete(token); continue; }
+                            notification = liveAlerts.get(item.receiptId);
+                            if (!notification) { deliveries.delete(token); continue; }
                             // Two frontends can share a session and branch. Only the holder may hand off
                             // each alert. A survivor polls again at lease expiry if no receipt arrives.
                             if (!sameNativeHost(item, record)) {
@@ -308,7 +310,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                                 continue;
                             }
                         }
-                        outgoing.push({ token, notification: item.notification, receiptId: item.receiptId });
+                        outgoing.push({ token, notification, receiptId: item.receiptId });
                     }
                     traceHandoff('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
                     return { ...projection, tasks, retryAfterMs, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };

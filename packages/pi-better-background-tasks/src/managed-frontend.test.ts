@@ -6,7 +6,7 @@ vi.mock('./shared-callback-batcher.js', () => ({ getCallbackBatcher: () => ({ en
 import { createManagedBackgroundFrontend } from './managed-frontend.js';
 import { createBackgroundTasksNavigator } from './navigator-provider.js';
 import { NAVIGATOR_PANEL_WIDGET_KEY, setNavigatorPanel } from './shared-navigator-panels.ts';
-const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
+const context = (branch: any[] = []) => ({ cwd: '/workspace', isIdle: () => true, sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
     it('keeps running tasks beside the todo when an older server includes a pending callback pointer', async () => {
@@ -230,20 +230,78 @@ describe('managed native UI boundary', () => {
       expect(frontend.host.ownsDurableTask('durable')).toBe(true);
       frontend.host.close();
     });
+    it.each([
+        ["background-task-stall", "finished"],
+        ["background-wait-review", "progressed"],
+        ["background-task-stall", "unchanged"],
+    ])("rechecks %s after the parent becomes idle (task %s)", async (customType, taskState) => {
+        vi.useFakeTimers();
+        const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+        let idle = false;
+        const ctx = { ...context(), isIdle: () => idle };
+        const item = { token: "pending", receiptId: "episode", notification: { urgent: true, taskId: "bgs_one",
+            origin: { cwd: "/workspace", sessionId: "native" }, event: { customType, content: "initial observation" } } };
+        const completion = { token: "terminal", receiptId: "result", notification: { taskId: "bgs_one",
+            origin: item.notification.origin, status: "succeeded", event: {} } };
+        fixture.request.mockResolvedValueOnce({ tasks: [], deliveries: [item] }).mockResolvedValue({
+            tasks: [],
+            deliveries: taskState === "finished" ? [completion] : taskState === "progressed" ? []
+                : [{ ...item, notification: { ...item.notification, event: { customType, content: "fresh observation" } } }],
+        });
+        fixture.urgent.mockReturnValue(true);
+        try {
+            frontend.host.start(ctx, false);
+            await frontend.host.reconcileNow();
+            await vi.advanceTimersByTimeAsync(3000);
+            expect(fixture.urgent).not.toHaveBeenCalled();
+            expect(fixture.request).toHaveBeenCalledOnce();
+            idle = true;
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(fixture.request).toHaveBeenCalledTimes(2);
+            if (taskState === "unchanged") {
+                expect(fixture.urgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ customType, content: "fresh observation" }));
+            } else {
+                expect(fixture.urgent).not.toHaveBeenCalled();
+            }
+            expect(fixture.enqueue).toHaveBeenCalledTimes(taskState === "finished" ? 1 : 0);
+        } finally { frontend.host.close(); vi.useRealTimers(); }
+    });
     it.each([true, false])("revalidates a deferred health handoff before retry (still eligible=%s)", async stillEligible => {
         vi.useFakeTimers();
         const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
         const item = { token: "pending", receiptId: "episode", notification: { urgent: true, taskId: "bgs_one",
             origin: { cwd: "/workspace", sessionId: "native" }, event: { customType: "background-task-stall" } } };
         let attempt = 0;
-        fixture.request.mockImplementation(async () => ({ tasks: [], deliveries: ++attempt === 1 || stillEligible ? [item] : [] }));
+        fixture.request.mockImplementation(async () => ({ tasks: [], deliveries: ++attempt <= 2 || stillEligible ? [item] : [] }));
         fixture.urgent.mockReturnValueOnce(false).mockReturnValue(true);
         try {
             frontend.host.start(context(), false);
             await frontend.host.reconcileNow();
+            expect(attempt).toBe(2);
+            expect(fixture.urgent).toHaveBeenCalledOnce();
             await vi.advanceTimersByTimeAsync(1000);
             expect(fixture.urgent).toHaveBeenCalledTimes(stillEligible ? 2 : 1);
-            expect(attempt).toBe(2);
+            expect(attempt).toBe(stillEligible ? 4 : 3);
+        } finally { frontend.host.close(); vi.useRealTimers(); }
+    });
+    it("retries a failed pre-delivery check without handing off the earlier observation", async () => {
+        vi.useFakeTimers();
+        const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+        const item = { token: "pending", receiptId: "episode", notification: { urgent: true, taskId: "bgs_one",
+            origin: { cwd: "/workspace", sessionId: "native" }, event: { customType: "background-task-stall" } } };
+        fixture.request.mockResolvedValueOnce({ tasks: [], deliveries: [item] })
+            .mockRejectedValueOnce(new Error("service temporarily unavailable"))
+            .mockResolvedValue({ tasks: [], deliveries: [item] });
+        fixture.urgent.mockReturnValue(true);
+        try {
+            frontend.host.start(context(), false);
+            await frontend.host.reconcileNow();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fixture.request).toHaveBeenCalledTimes(2);
+            expect(fixture.urgent).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(fixture.request).toHaveBeenCalledTimes(3);
+            expect(fixture.urgent).toHaveBeenCalledOnce();
         } finally { frontend.host.close(); vi.useRealTimers(); }
     });
     it.each([false,true])('acknowledges exact native structured transcript proof without appending again (urgent=%s)', async (urgent) => {
