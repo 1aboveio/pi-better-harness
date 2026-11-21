@@ -9,18 +9,20 @@ import { ownerBindingFromContext, getWorkerOperationService, resolveProductionSc
 import { processStartToken } from "./registry.domain.mjs";
 import { connectWorkClient } from "./shared-work-client.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
-import { openSharedCatalog } from "./shared-catalog.domain.mjs";
+import { openSharedCatalog, waitForCatalogSetup } from "./shared-catalog.domain.mjs";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.domain.mjs";
 import { canonicalJson } from "./operation-bridge-types.domain.mjs";
 import { activeChildProviders } from "./config.domain.mjs";
 import { captureLaunchContext } from "./launch-context.domain.mjs";
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
-export async function submitManagedLaunch(pi, ctx, key, tool, params) {
+export async function submitManagedLaunch(pi, ctx, key, tool, params, signal) {
+    signal?.throwIfAborted();
     ctx = captureLaunchContext(ctx);
     mkdirSync(getAgentDir(), { recursive: true });
     const root = realpathSync(getAgentDir());
-    const catalog = await openSharedCatalog(ctx.cwd, root);
+    const catalog = await openSharedCatalog(ctx.cwd, root, undefined, undefined, signal);
     catalog.close();
+    signal?.throwIfAborted();
     const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
     if (registration.agentDir !== root || registration.version !== 1)
         throw new Error("Invalid runtime registration");
@@ -29,12 +31,22 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077))
         throw new Error("Unsafe launch admission directory");
-    const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"]);
+    const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"], { signal });
     const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
     let unsubscribe;
+    const cancel = () => {
+        try {
+            rmSync(path, { force: true });
+        }
+        catch { /* Finally retries cleanup. */ }
+        client.close();
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
     try {
+        signal?.throwIfAborted();
         const hello = await client.ready;
-        const catalogAuthority = await catalogHostAuthority(root, ctx.cwd, join(registration.serverDir, "pi-server.sock"));
+        const catalogAuthority = await waitForCatalogSetup(catalogHostAuthority(root, ctx.cwd, join(registration.serverDir, "pi-server.sock")), signal);
+        signal?.throwIfAborted();
         const owner = ownerBindingFromContext(ctx);
         if (!owner.sessionId)
             throw new Error("Launch requires a registered parent session");
@@ -66,7 +78,12 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
         });
         return await client.request("runtime_launch_subagent", { authority: { id, secret } });
     }
+    catch (error) {
+        signal?.throwIfAborted();
+        throw error;
+    }
     finally {
+        signal?.removeEventListener("abort", cancel);
         if (typeof unsubscribe === "function")
             unsubscribe();
         client.close();
