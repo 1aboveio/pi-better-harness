@@ -50,7 +50,13 @@ export default function offline(pi: ExtensionAPI) {
       };
       const resumed = context.messages.some((m: any) => m.role === "toolResult" && m.toolName === "wait_for_operations");
       const bootstrapGate = process.env.CONTINUATION_BOOTSTRAP_GATE;
-      if (resumed && turn === 1 && bootstrapGate && !existsSync(bootstrapGate)) {
+      const writerGate = process.env.CONTINUATION_WRITER_GATE;
+      if (!resumed && turn === 2 && writerGate && !existsSync(writerGate)) {
+        writeFileSync(`${writerGate}.entered`, JSON.stringify({ pid: process.pid }));
+        const watcher = watch(process.env.LAUNCH_WORKSPACE!, () => {
+          if (existsSync(writerGate)) { watcher.close(); finish(); }
+        });
+      } else if (resumed && turn === 1 && bootstrapGate && !existsSync(bootstrapGate)) {
         writeFileSync(`${bootstrapGate}.entered`, JSON.stringify({ pid: process.pid }));
         const watcher = watch(process.env.LAUNCH_WORKSPACE!, () => {
           if (existsSync(bootstrapGate)) { watcher.close(); finish(); }

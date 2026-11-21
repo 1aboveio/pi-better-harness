@@ -7,7 +7,7 @@ import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } fro
 import { openStore, ownerDiff } from "./shared-operation-coordinator/index.domain.mjs";
 import { processStartToken, readMeta } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
-import { readAssignmentReport } from "./assignment-report.domain.mjs";
+import { assignmentReportOutcomeReason, readAssignmentReport } from "./assignment-report.domain.mjs";
 export const ASSIGNMENT_OUTCOMES_VERSION = 1;
 const closedHosts = globalThis.__assignmentOutcomeClosedHosts ??= new Set();
 export function createOutcomeHost() {
@@ -126,13 +126,10 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
-        const reportReason = report?.status === "incomplete" ? `Assignment incomplete: ${report.reason}`
-            + (report.blocker ? ` Blocked (${report.blocker.kind}): ${report.blocker.reason}.` : "")
-            + (report.remainingWork ? ` Remaining work: ${report.remainingWork.join("; ")}.` : "") : report?.reason;
         try {
             return store.recordAssignmentOutcome({ ...binding, revision: 1,
                 outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-                reason: (meta.failureReason || invalidReport || (meta.status === "completed" && report ? reportReason : complete ? "Assigned work and required interpretation are complete."
+                reason: (meta.failureReason || invalidReport || (meta.status === "completed" && report ? assignmentReportOutcomeReason(report) : complete ? "Assigned work and required interpretation are complete."
                     : meta.status === "completed" && meta.assignmentReportRejection ? `Assignment report rejected: ${meta.assignmentReportRejection.reason}`
                         : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
                             : `Assignment ended ${meta.status}; retained attempt evidence is available.`)).slice(0, 8192),

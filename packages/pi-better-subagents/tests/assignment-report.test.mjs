@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import { createWorkerOperationsHost } from "../worker-waits.ts";
 import { createOperationBridgeClient } from "../child-operations.ts";
 import { createToolDescriptor } from "../operation-bridge-types.ts";
@@ -208,6 +209,48 @@ test("maximum incomplete detail stays within the terminal reason bound and retai
     assert.equal(outcome.outcome, "failed");
     assert.equal(outcome.reason.length, 8192);
     assert.deepEqual(readAssignmentReport(terminal).remainingWork, remaining);
+  } finally { await f.close(); }
+});
+
+test("report prose rejected by the coordinator is refused before report acceptance", async () => {
+  const f = await fixture("report-coordinator-text");
+  try {
+    for (const change of [
+      { reason: "Checked Bearer exampletoken12345" },
+      { reason: "Checked\nwith evidence" },
+      { evidence: [{ path: "work.txt", explanation: "Bearer exampletoken12345" }] },
+      { status: "incomplete", remaining_work: ["Bearer exampletoken12345"] },
+      { status: "incomplete", blocker: { kind: "external-input", reason: "Bearer exampletoken12345" } },
+      { status: "incomplete", reason: "Use Bearer", remaining_work: ["Check the endpoint"] },
+    ]) {
+      await assert.rejects(() => f.send({ ...f.report, ...change }), /Invalid/);
+      assert.equal(readMeta(f.id).assignmentReport, undefined);
+    }
+    await f.send();
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    assert.equal(commitAssignmentTerminal(terminal).outcome, "succeeded");
+  } finally { await f.close(); }
+});
+
+test("terminalization tolerates legacy report prose that the coordinator refuses", async () => {
+  const f = await fixture("report-legacy-coordinator-text");
+  try {
+    await f.send();
+    const previous = readMeta(f.id);
+    const report = JSON.parse(readFileSync(previous.assignmentReport.path, "utf8"));
+    report.reason = "Checked Bearer exampletoken12345";
+    const text = JSON.stringify(report);
+    const digest = createHash("sha256").update(text).digest("hex");
+    const path = join(runDir(f.id), "assignment-report-v1", `${digest}.json`);
+    writeFileSync(path, text);
+    writeMeta({ ...previous, assignmentReport: { ...previous.assignmentReport, path, digest } });
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    const outcome = commitAssignmentTerminal(terminal);
+    assert.equal(outcome.outcome, "failed");
+    assert.match(outcome.reason, /unverified/);
+    assert.equal(JSON.stringify(outcome).includes("exampletoken12345"), false);
   } finally { await f.close(); }
 });
 
