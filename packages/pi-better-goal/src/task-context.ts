@@ -4,12 +4,13 @@ import type { GoalSnapshot } from "./types.js";
 /** Synchronous request bus shared with an installed `pi-better-harness` runtime. */
 export const TASK_CONTEXT_EVENT = "pi-better-harness:task-context";
 
-export type TaskContextAction = "inspect" | "start" | "bind" | "pause" | "resume" | "complete";
+export type TaskContextAction = "inspect" | "audit" | "start" | "bind" | "pause" | "resume" | "complete";
 
 export const OUTCOME_ACCEPTED_EVENT = "pi-better-harness:outcome-accepted";
 
 export interface OutcomeAcceptedEvent {
   sessionId: string;
+  reopenedGoalId?: string;
   outcome: {
     objective: string;
     doneWhen?: readonly string[];
@@ -19,13 +20,13 @@ export interface OutcomeAcceptedEvent {
 }
 
 /** Only explicit, actionable outcomes qualify; prose and restored state do not. */
-export function canStartGoalFromOutcome(value: unknown): value is OutcomeAcceptedEvent["outcome"] {
+export function canStartGoalFromOutcome(value: unknown, reopening = false): value is OutcomeAcceptedEvent["outcome"] {
   if (!value || typeof value !== "object") return false;
   const outcome = value as Partial<OutcomeAcceptedEvent["outcome"]>;
   return outcome.status === "active" && outcome.goalId === undefined &&
     typeof outcome.objective === "string" && !!outcome.objective.trim() && !outcome.objective.trim().startsWith("/") &&
-    Array.isArray(outcome.doneWhen) && outcome.doneWhen.length > 0 &&
-    outcome.doneWhen.every(item => typeof item === "string" && !!item.trim());
+    (reopening || (Array.isArray(outcome.doneWhen) && outcome.doneWhen.length > 0 &&
+      outcome.doneWhen.every(item => typeof item === "string" && !!item.trim())));
 }
 
 /**
@@ -35,10 +36,13 @@ export function canStartGoalFromOutcome(value: unknown): value is OutcomeAccepte
  */
 export interface TaskContextRequest {
   action: TaskContextAction;
+  doneWhen?: readonly string[];
+  openSteps?: readonly string[];
+  ledgerBlocker?: string;
   goalId?: string;
   /** Current widget width on a visual ownership inspection. */
   width?: number;
-  /** The raw original goal trigger; only start/bind requests carry it. */
+  /** The raw original goal trigger; returned as the refined objective on audit. */
   objective?: string;
   /** Hooks authority: a present Harness runtime sets this even when Outcome & Todo is off. */
   enabled?: boolean;

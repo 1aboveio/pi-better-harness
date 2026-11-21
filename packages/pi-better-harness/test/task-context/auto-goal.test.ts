@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -13,13 +13,13 @@ import taskExtension from "../../extensions/task-context/index.js";
 import { createSettingsRegistry } from "../../extensions/settings/registry.js";
 import { OUTCOME_ENTRY, restoreOutcome } from "../../extensions/task-context/outcome-state.js";
 
-async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFirst?: boolean; restored?: boolean; workflow?: "available" | "missing" | "invalid" } = {}) {
+async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: boolean; harnessFirst?: boolean; restored?: boolean; workflow?: "available" | "missing" | "invalid" } = {}) {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const dir = mkdtempSync(join(tmpdir(), "outcome-auto-goal-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ piBetterHarness: {
-    outcomeTodo: { version: 1, enabled: true },
+    outcomeTodo: { version: 1, enabled: true, ledger: options.ledger ?? false },
     goal: { version: 1, autoStartFromOutcome: options.autoStart ?? true },
   } }));
   const entries: any[] = [];
@@ -78,7 +78,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFi
     outcome: () => restoreOutcome(entries),
     update: (input: unknown) => tools.get("update_todo").execute("update", input, undefined, undefined, ctx),
     getTodo: async () => (await tools.get("get_todo").execute("get", {}, undefined, undefined, ctx)).details,
-    complete: () => tools.get("update_goal").execute("complete", { status: "complete" }, undefined, undefined, ctx),
+    complete: (evidence?: { criterion: string; result: string }[]) => tools.get("update_goal").execute("complete", { status: "complete", evidence }, undefined, undefined, ctx),
     command: (args: string) => commands.get("goal").handler(args, ctx),
   };
 }
@@ -227,4 +227,73 @@ test("session restore, branch navigation and foreign session notifications do no
   assert.equal(h.goal(), null);
   await h.update({ outcome: accepted });
   assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
+});
+
+test("scheduler finish still requires evidence for each accepted criterion", async t => {
+  const h = await fixture(t, { workflow: "available" });
+  const doneWhen = ["SGP1 deployment verified", "Payment rules accepted", "Issue closed"];
+  await h.update({ outcome: { objective: "Deliver the issue", doneWhen } });
+  mkdirSync(join(h.ctx.cwd, "scripts"));
+  writeFileSync(join(h.ctx.cwd, "scripts", "next-actions.mjs"), 'console.log(JSON.stringify({due:[{action:"finish"}]}))');
+  h.entries.push({ type: "custom", customType: "pi-better-workflow-plan",
+    data: { version: 1, kind: "set", owner: "rush-issues", path: join(h.ctx.cwd, "task-plan.json") } });
+  await assert.rejects(h.update({ outcome: { objective: "Deliver the issue", status: "complete" } }), /update_goal/);
+  const evidence = doneWhen.map((criterion, i) => ({ criterion, result: ["QA receipt 12 passed", "Policy test 5 passed", "Issue tracker shows closed"][i]! }));
+  assert.deepEqual((await h.complete()).details.missing, doneWhen);
+  assert.deepEqual((await h.complete(evidence.slice(0, 2))).details.missing, ["Issue closed"]);
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.equal((await h.complete(evidence)).details.ok, true);
+  assert.equal(h.outcome()?.status, "complete");
+});
+
+test("explicitly reopening work after a completed Goal continues its Todo with a fresh Goal", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.command("Deliver checkout");
+  const first = h.goal()!.goalId;
+  await h.command("complete");
+  const objective = "Verify deployment and close the issue";
+  await h.update({ outcome: { objective, status: "active" }, todo: [{ step: "Verify deployment", status: "in_progress" }] });
+  assert.notEqual(h.goal()?.goalId, first);
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
+  const evidence = [{ criterion: objective, result: "Deployment QA passed and the tracker records the issue closed" }];
+  assert.deepEqual((await h.complete(evidence)).details.openSteps, ["Verify deployment"]);
+  await h.update({ todo: [{ step: "Verify deployment", status: "completed" }] });
+  assert.deepEqual((await h.complete()).details.missing, [objective]);
+  assert.equal((await h.complete(evidence)).details.ok, true);
+});
+
+test("restoring a legacy follow-up preserves its active work and an explicit Goal adopts it", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.command("Deliver checkout");
+  await h.command("complete");
+  const objective = "Verify deployment";
+  h.entries.push({ type: "custom", customType: OUTCOME_ENTRY, data: { version: 1,
+    outcome: { objective, status: "active", goalId: h.goal()!.goalId, source: "goal" } } });
+  await h.emit("session_tree");
+  const restored = (await h.getTodo()).outcome;
+  assert.equal(restored.status, "active");
+  assert.equal(restored.goalId, undefined);
+  await h.update({ todo: [{ step: "Verify receipts", status: "pending" }] });
+  await h.command(objective);
+  assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
+  assert.deepEqual((await h.complete()).details.openSteps, ["Verify receipts"]);
+});
+
+test("Goal completion checks the associated work ledger in a headless session", async t => {
+  const h = await fixture(t, { ledger: true });
+  await h.update({ outcome: accepted });
+  const created = await h.update({ ledger: { action: "create", outcome: accepted.objective,
+    items: [{ id: "qa", title: "Verify SGP1" }] } });
+  const ledgerId = created.details.ledger.id;
+  await h.update({ ledger: { action: "attach", ledgerId } });
+  const evidence = [{ criterion: accepted.doneWhen[0]!, result: "Checkout passed in SGP1" }];
+  const blocked = await h.complete(evidence);
+  assert.equal(blocked.details.ok, false);
+  assert.match(blocked.content[0].text, /qa \(pending\)/);
+  assert.equal(h.goal()?.status, "active");
+  await h.update({ ledger: { action: "update", ledgerId, revision: 1,
+    changes: [{ id: "qa", status: "completed", evidence: ["Deployment receipt"] }] } });
+  assert.equal((await h.complete(evidence)).details.ok, true);
 });

@@ -998,11 +998,12 @@ export default function (pi: ExtensionAPI): void {
   const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
     const ctx = currentCtx;
     const event = value as Partial<OutcomeAcceptedEvent> | null;
-    if (!preferences.autoStartFromOutcome || !ctx || !event ||
-        typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId() ||
-        !canStartGoalFromOutcome(event.outcome)) return;
+    if (!ctx || !event ||
+        typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId()) return;
     const current = getGoal(ctx);
     if (current && current.status !== "complete") return;
+    const reopening = current?.status === "complete" && current.goalId === event.reopenedGoalId;
+    if ((!reopening && !preferences.autoStartFromOutcome) || !canStartGoalFromOutcome(event.outcome, reopening)) return;
     const objective = event.outcome.objective.trim();
     if (validateObjective(objective)) return;
     const owner = getWorkflow(ctx);
@@ -1180,13 +1181,17 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "update_goal",
     label: "Update Goal",
-    description: "Mark the current pi-better-goal objective complete after a completion audit.",
+    description: "Mark the Goal complete after verifying the requested outcome. For each recorded doneWhen criterion, supply its exact text and observed result in evidence. If a bound Outcome has no criteria, use its objective. A scheduler finish alone only confirms that workflow actions have settled.",
     promptSnippet: "Mark the current Codex-style goal complete after verification.",
     parameters: Type.Object({
+      evidence: Type.Optional(Type.Array(Type.Object({
+        criterion: Type.String(),
+        result: Type.String({ description: "Observed result and its source, such as a test run, deployment receipt, or issue state." }),
+      }))),
       status: Type.String({ description: "Only 'complete' is accepted." }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const input = params as { status: string };
+      const input = params as { status: string; evidence?: Array<{ criterion: string; result: string }> };
       if (input.status !== "complete") {
         return {
           content: [{ type: "text", text: "Only status:'complete' is accepted." }],
@@ -1214,7 +1219,23 @@ export default function (pi: ExtensionAPI): void {
           details: { ok: false, goal: current, due: verdict.due },
         };
       }
-      const goal = goalWithStatus(current, "complete");
+      const latest = getGoal(ctx);
+      if (latest?.goalId !== current.goalId || latest.status !== current.status) {
+        return { content: [{ type: "text", text: "Goal changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
+      }
+      const audit = requestTaskContext(pi, "audit", current);
+      const criteria = audit.doneWhen?.length ? audit.doneWhen : audit.objective ? [audit.objective] : [];
+      const missing = criteria.filter(criterion => !input.evidence?.some(item => item.criterion === criterion && item.result.trim()));
+      if (audit.ledgerBlocker || audit.openSteps?.length || missing.length) {
+        const message = [
+          "Verify the requested outcome before completing the Goal.",
+          ...(audit.ledgerBlocker ? [audit.ledgerBlocker] : []),
+          ...(audit.openSteps ?? []).map(step => `Open Todo: ${step}`),
+          ...missing.map(criterion => `Missing evidence: ${criterion}`),
+        ].join("\n");
+        return { content: [{ type: "text", text: message }], details: { ok: false, goal: current, missing, openSteps: audit.openSteps } };
+      }
+      const goal = goalWithStatus(latest, "complete");
       setGoal(goal, ctx, "tool");
       if (getWorkflow(ctx)) recordWorkflow(null);
       const warning = verdict?.allow ? verdict.warning : undefined;
@@ -1505,7 +1526,7 @@ export default function (pi: ExtensionAPI): void {
           `${pausedInstruction}\n` + "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n",
         `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}`,
         isPokeable(goal) && (harnessPresent
-          ? "Complete the goal only after the workflow completion audit."
+          ? "Complete the goal only after the workflow completion audit and verification of every accepted Outcome criterion."
           : `Active objective: ${goal.objective}. Complete it only after the workflow completion audit.`),
         questionInstruction && questionInstruction.trim(),
         heldInstruction,
