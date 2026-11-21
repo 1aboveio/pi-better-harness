@@ -205,7 +205,8 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
       assert.equal(result.stdout, "");
       assert.match(result.stderr, /readiness timed out after 2500ms/);
       assert.ok(result.stderr.includes(join(setup.serverDir, "daemon.log")));
-      assert.equal(existsSync(join(setup.serverDir, "daemon-owner")), false, result.stderr);
+      // The caller's deadline can expire while the detached daemon handles the bad index.
+      await waitFor("failed startup to release daemon ownership", () => !existsSync(join(setup.serverDir, "daemon-owner")));
     } catch (error) { retainStartupOwnerFailure(setup.serverDir); throw error; }
   });
 
