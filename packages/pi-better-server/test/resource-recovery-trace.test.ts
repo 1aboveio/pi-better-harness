@@ -12,7 +12,8 @@ test('resource fixture trace instruments the real recovery gate without replacin
   for (const gate of [
     'recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()',
     'projection?.revision !== revision',
-    'Date.now() - item.createdAt > 30000',
+    'Date.now() - item.createdAt >= deliveryLeaseMs',
+    'isStallDelivery(item) && !sameNativeHost(item, record)',
     'record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId)',
   ]) assert.ok(instrumented.includes(gate), gate);
   for (const field of ['coordinatorRevision', 'cachedRecoveryDigest', 'branchDigest', 'beforeContext', 'afterContext', 'snapshotSequence', 'delivery-lease-expired', 'receipt-deferred', 'scope-evicted']) {
