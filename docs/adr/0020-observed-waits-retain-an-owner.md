@@ -27,7 +27,9 @@ This slice adds no repair loop, terminal outcome store or always-running daemon.
 
 Use background operations for established commands and external waits. Use model execution for judgment before an operation and interpretation after it. A worker may retain necessary synchronous checks, including long ones; duration alone does not determine ownership. A command-only polling assignment does not become model work because its requested final report is detailed.
 
-A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution.
+A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution. Stopping an assignment's owned background tasks is governed by [ADR 0025](0025-assignment-terminal-task-cleanup.md) and does not apply to parking.
+
+For Background dependencies, a stall alert can reach the owning session while its wait is pending. All dependencies must reach a terminal state before the wait delivers its completion notification. [Background task policy](0028-background-task-policy.md#waits-and-callbacks)
 
 ## Context and trade-off
 
@@ -128,7 +130,14 @@ Parent delivery and exact-revision disposition remain separate from worker judgm
 The existing callback batcher uses the stable outcome event as its notification
 identity and the attempt as its retrieval identity. Recipient transcript entries
 are reconciled before replay; a callback receipt remains distinct from inspection
-and exact-revision consumption through `subagent_result`. Recorded branch anchors
+and exact-revision consumption through `subagent_result`. Parent execution admission
+controls automatic model continuation, not visibility of a committed outcome. If
+admission is refused while the captured session and branch are attached, append a
+visible notification with `triggerTurn: false` and retain its transcript receipt.
+A paused, completed or replaced Goal must not silently hide success or failure.
+Notification does not resume the Goal, consume the outcome, or retry the task;
+receipt reconciliation prevents later reload or Goal changes from duplicating it.
+Recorded branch anchors
 must remain on the recipient's branch. Current file-read permissions apply to
 bounded dependency evidence reads; neither foreign-session overrides nor outcome
 inspection confer worker acknowledgement or mutation authority. Standalone

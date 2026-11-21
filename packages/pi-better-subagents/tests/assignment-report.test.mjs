@@ -221,6 +221,7 @@ test("report prose rejected by the coordinator is refused before report acceptan
       { evidence: [{ path: "work.txt", explanation: "Bearer exampletoken12345" }] },
       { status: "incomplete", remaining_work: ["Bearer exampletoken12345"] },
       { status: "incomplete", blocker: { kind: "external-input", reason: "Bearer exampletoken12345" } },
+      { status: "incomplete", reason: "Use Bearer", remaining_work: ["Check the endpoint"] },
     ]) {
       await assert.rejects(() => f.send({ ...f.report, ...change }), /Invalid/);
       assert.equal(readMeta(f.id).assignmentReport, undefined);

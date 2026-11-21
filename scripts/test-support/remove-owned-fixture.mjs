@@ -26,7 +26,9 @@ export async function stopOwnedRuntime(serverDir, expectedOwner) {
   for (;;) {
     const current = inspectDaemonOwner(serverDir);
     if (current.status === "missing" || current.status === "dead") return;
-    assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
+    // Release unlinks the token before removing its directory. An ambiguous
+    // observation is not exit proof; wait within the existing deadline.
+    if (current.status !== "ambiguous") assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
     assert.ok(Date.now() < deadline, `fixture runtime ${owner.owner.pid} did not stop`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }

@@ -210,6 +210,8 @@ export interface CallbackBatcher {
   toolEnded(toolCallId: string): Promise<boolean>;
   deliverUrgent(event: UrgentCallbackEvent): boolean | Promise<boolean>;
   cancel(): void;
+  /** Await already-started handoffs after the owner has cancelled scheduling. */
+  settled(): Promise<void>;
   pendingCount(): number;
 }
 
@@ -568,6 +570,7 @@ export function createCallbackBatcher(
   const pending = new Map<string, PendingEvent>();
   const inFlight = new Set<string>();
   const urgentInFlight = new Set<string>();
+  const urgentSettlements = new Set<Promise<boolean>>();
   const handedOff = new Map<string, number>();
   const activeTools = new Set<string>();
   let sequence = 0;
@@ -750,10 +753,12 @@ export function createCallbackBatcher(
         { deliverAs: "followUp", triggerTurn: true },
       );
       if (isPromiseLike(handoff)) {
-        return Promise.resolve(handoff).then(
+        const settlement = Promise.resolve(handoff).then(
           () => acknowledge(),
           () => false,
-        ).finally(() => urgentInFlight.delete(key));
+        ).finally(() => { urgentInFlight.delete(key); urgentSettlements.delete(settlement); });
+        urgentSettlements.add(settlement);
+        return settlement;
       }
       const acknowledged = acknowledge();
       urgentInFlight.delete(key);
@@ -800,6 +805,10 @@ export function createCallbackBatcher(
       return pending.size > 0 ? api.flush() : true;
     },
     deliverUrgent,
+    async settled() {
+      await flushPromise;
+      await Promise.all([...urgentSettlements]);
+    },
     cancel() {
       cancelTimer();
       pending.clear();

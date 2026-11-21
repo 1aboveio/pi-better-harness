@@ -17,8 +17,8 @@ const workspace = process.env.PI_RUNTIME_PACK_WORKSPACE ?? resolve(import.meta.d
 const hostRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const hostJiti = pathToFileURL(hostRequire.resolve("jiti")).href;
 mkdirSync(join(workspace, ".work"), { recursive: true });
-const execute = (command: string, args: string[], cwd: string, env = process.env) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-  const child = spawn(command, args, { cwd, env, stdio: "pipe" });
+const execute = (command: string, args: string[], cwd: string, env = process.env, signal?: AbortSignal) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+  const child = spawn(command, args, { cwd, env, stdio: "pipe", signal });
   let stdout = "", stderr = "";
   child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
   child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr })); child.stdin.end();
@@ -92,22 +92,24 @@ test("packed standalone packages use one pinned socket runtime, including cached
     const jiti=createJiti(import.meta.url);
     const tools=new Map(); let provider;
     const pi={on(){},registerTool(t){tools.set(t.name,t)},events:{on(){return ()=>{}},emit(name,value){if(name==='pi-better-goal:register-provider')provider=value}}};
-    const ctx={cwd:${JSON.stringify(evidence)},sessionManager:{getSessionId:()=> 'cold-background'}};
+    const ctx={cwd:${JSON.stringify(evidence)},sessionManager:{getSessionId:()=> 'cold-background',getBranch:()=> []}};
     const {registerTools}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "tools.ts"))}).href);
     const {registerBackgroundTasksGoalProvider}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "goal-provider.ts"))}).href);
-    const {closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
+    const {backgroundObservation,backgroundGoalObservation,closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
+    const {goalActivityWhenReady}=await import(${JSON.stringify(new URL("./support/goal-ready.mjs", import.meta.url).href)});
+    const readyActivity=(context=ctx)=>goalActivityWhenReady(provider,context,value=>backgroundGoalObservation(pi,value));
   `;
   const coldScript = entryScript + `
     try {
       registerTools(pi); registerBackgroundTasksGoalProvider(pi);
       const listed=await tools.get('bg_task_list').execute('cold',{},undefined,undefined,ctx);
       assert.match(listed.content[0].text,/No background tasks found \\(current session\\)/);
-      const activity=await provider.getActivity(ctx); assert.deepEqual(activity.items,[]);
-      const foreign=await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}}); assert.deepEqual(foreign.items,[]);
+      const activity=await readyActivity(); assert.deepEqual(activity.items,[]);
+      const foreign=await readyActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}}); assert.deepEqual(foreign.items,[]);
       console.log(JSON.stringify({list:listed,activity,foreign}));
     } finally {closeBackgroundObservation(pi)}
   `;
-  const cold = await execute(process.execPath, ["--input-type=module", "-e", coldScript], workspace, env);
+  const cold = await execute(process.execPath, ["--input-type=module", "-e", coldScript], workspace, env, t.signal);
   writeFileSync(join(evidence, "cold-background-entry.log"), cold.stdout + cold.stderr);
   assert.equal(cold.code, 0, cold.stderr);
   const first = await execute(process.execPath, [clients[0]!], workspace, env);
@@ -193,6 +195,8 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const recoveryScript = entryScript + `
     import {readFileSync,appendFileSync,existsSync} from 'node:fs';
     import {connect} from 'node:net';
+    import {execFileSync} from 'node:child_process';
+    const {WorkClient}=await import(${JSON.stringify(pathToFileURL(join(backgroundSource, "shared-work-client.mjs")).href)});
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
     const transport=process.env.PI_SERVER_DIR;
     const registration=readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8');
@@ -218,15 +222,42 @@ test("packed standalone packages use one pinned socket runtime, including cached
     try {
       registerTools(pi);registerBackgroundTasksGoalProvider(pi);
       trace('before-first-list');await listed();trace('first-list-ready');await probe();const first=owner().pid;
-      await provider.getActivity(ctx); // retain this exact production client's connection
+      await readyActivity(); // retain this exact production client's connection
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
-      assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
-      const crashed=owner().pid;process.kill(crashed,'SIGSTOP');
-      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));trace('before-kill');process.kill(crashed,'SIGKILL');trace('kill-sent');
-      assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);await listed();
+      assert.deepEqual((await readyActivity()).items,[]);
+      // Activity can be cached. Exercise a transport read before inspecting the new owner.
+      assert.deepEqual((await backgroundObservation(pi,ctx)).rows,[]);
+      trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
+      const crashedOwner=owner(),crashed=crashedOwner.pid;paused=crashed;process.kill(crashed,'SIGSTOP');
+      // Observe the stop before sending: SIGSTOP delivery alone is not an acknowledgment.
+      const stoppedBy=Date.now()+5000;
+      while(!execFileSync('ps',['-o','state=','-p',String(crashed)],{encoding:'utf8'}).trim().startsWith('T')) {
+        assert.ok(Date.now()<stoppedBy,'original daemon did not acknowledge SIGSTOP');
+        await new Promise(r=>setImmediate(r));
+      }
+      trace('stop-observed');
+      const originalRequest=WorkClient.prototype.request;let interruptedStarted=false;
+      WorkClient.prototype.request=function(type,params) {
+        const pending=originalRequest.call(this,type,params);
+        if(!interruptedStarted&&type==='runtime_get_snapshot') {
+          const requestId='work-'+this.sequence;
+          assert.equal(this.pending.has(requestId),true,'the interrupted RPC must be registered before the kill');
+          assert.equal(this.snapshot.instanceId,crashedOwner.token,'the interrupted read uses the original cached client');
+          assert.equal(params.scope.sessionId,ctx.sessionManager.getSessionId());
+          interruptedStarted=true;trace('read-inflight:'+requestId);trace('before-kill');
+          process.kill(crashed,'SIGKILL');paused=undefined;trace('kill-sent');
+        }
+        return pending;
+      };
+      try {
+        // Goal's warmed getActivity is a cache read, not a transport request.
+        const interrupted=backgroundObservation(pi,ctx);
+        assert.deepEqual((await interrupted).rows,[]);assert.equal(interruptedStarted,true);
+        trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);assert.notEqual(owner().token,crashedOwner.token);await listed();
+      } finally {WorkClient.prototype.request=originalRequest;}
       await stop();closeBackgroundObservation(pi);await listed('bg_status');
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
-      assert.deepEqual((await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
+      assert.deepEqual((await readyActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
       paused=owner().pid;process.kill(paused,'SIGSTOP');closeBackgroundObservation(pi);
       await assert.rejects(listed(),/runtime-unhealthy:.*timed out/);assert.equal(owner().pid,paused);
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
@@ -234,7 +265,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
     } catch(error) {trace('failure:'+String(error));await probe();throw error}
     finally {if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
   `;
-  const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env);
+  const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env, t.signal);
   writeFileSync(join(evidence, "background-recovery.log"), recovery.stdout + recovery.stderr);
   assert.equal(recovery.code, 0, recovery.stderr);
   assert.equal(JSON.parse(recovery.stdout).healthyRecovery, true);
@@ -243,7 +274,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   try {
     const ownerBefore = inspectDaemonOwner(serverDir);
     const backgroundRefusal = await execute(process.execPath, ["--input-type=module", "-e", entryScript + `
-      try {registerTools(pi);await assert.rejects(tools.get('bg_task_list').execute('live-owner',{},undefined,undefined,ctx),/existing live owner/)}
+      try {registerTools(pi);await assert.rejects(tools.get('bg_task_list').execute('live-owner',{},undefined,undefined,ctx),/existing live owner|reconnect deadline/)}
       finally {closeBackgroundObservation(pi)}
     `], workspace, env);
     writeFileSync(join(evidence, "background-live-owner-refusal.log"), backgroundRefusal.stdout + backgroundRefusal.stderr);

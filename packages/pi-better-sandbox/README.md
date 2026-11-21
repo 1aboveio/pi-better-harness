@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks.
+Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks. See the [sandbox tool-loading and permission contract](../../docs/adr/0027-sandbox-tools-and-permissions.md).
 
 ![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
 
@@ -18,7 +18,14 @@ enabled switches, keep their values. Open `/sandbox` to change any column, or us
 saved to the current session branch. **Ctrl+S** saves all three profiles as
 defaults for new sessions.
 
+Press **Tab** to switch between **Tool loading** and **Use permissions**. Tool
+loading lists the active Main tools and the providers for ordinary subagent
+defaults. A role, explicit tool list, or exclusion changes the selection for a
+particular launch. Local Background tasks launch commands through the Background
+adapter. Use permissions shows resource rules for the three profiles.
+
 ```text
+Tool loading      Use permissions      Tab switch
 Sandbox permissions               Main             Subagents         Background tasks
 
 Sandbox                           Off              Off               Off
@@ -32,62 +39,18 @@ Command time limit                -                -                 -
 Network access                    -                -                 -
 Process access                    -                -                 -
 
-  Subagents · Tools
-    Guarded (follows the file rules)
-    [x] apply_patch  harness adapter
-    Trusted (runs outside the file rules)
-    > [x] @juicesharp/rpiv-web-tools  2/2
-    > [ ] <other installed package>  0/1
-
-↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save default · Enter Fold · Esc Back
+↑↓ Select · ←→ Column · Space Toggle · ctrl+s Save default · Esc Back
 ```
 
-**Subagents · Tools** picks the extension tools a confined subagent may use:
+Loading a tool for a task permits that task to call it. The role, tool list and
+exclusions determine what loads. The active profile governs each operation.
 
-- **Guarded** tools go through the same guarded file operations as `write` and
-  `edit`, so the rows above govern them. `apply_patch` applies Codex-style
-  patches; deletes and moves follow the removal rules, and a patch is checked in
-  full before any file changes.
-- **Trusted** tools are the other tools your Pi has loaded, listed with their
-  package. A ticked one is loaded into the subagent and runs in its Pi process,
-  **outside the file rules**. One Space toggles it immediately. It is admitted
-  only from the package you ticked. Known network tool names are refused while
-  Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`,
-  `ssh_profile`, `ssh_mux`, and any `mcp__*` name. That is a name list, not a network sandbox.
-
-Trusted tools use two levels: a package/provider group, then its individual tools.
-Non-MCP tools are grouped by exact owning package; `mcp__<provider>__...` tools
-are grouped by provider and owning package together. Groups start collapsed.
-File-backed extensions explicitly marked `builtin` by Pi display as `built-in`,
-not their package path (which can be `.`). This is a display label only: saved
-choices and admission still use the original owning package. An unmarked `.`
-package is not built-in, and an unavailable saved tool keeps its package label
-until Pi reports its provenance again. Core tools with synthetic source paths
-remain excluded from trusted candidates.
-`>` means collapsed and `v` means expanded. Their checkbox shows `[x]` when
-all children are selected, `[-]` when some are selected, and `[ ]` when none
-are; the count is selected/total. Right expands a group. Left collapses a group,
-or moves from a child to its parent and collapses it. Enter folds the selected
-group. Space on a group selects all children when none or only some are selected,
-or deselects them all when all are selected. Every toggle applies on one Space;
-Ctrl+S saves defaults and reports anything loosened. Only individual tool
-entries are saved, never a package/provider wildcard or the open/closed state.
-
-Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
-The `pi-better-ssh` trusted group offers `ssh_profile`, `remote_bash`, and
-`ssh_mux`, all off by default. Expand it with Right and toggle individual tools
-with Space, or toggle the group to select all three. Keep Subagents Network
-access On. A ticked tool automatically loads its owning extension into new
-subagents; no separate extension mapping is needed. Default launches include
-ticked tools; an explicit spawn `tools` list must include the SSH tools needed,
-and `clean:true` does not load extensions. Ctrl+S saves these choices for new
-sessions. Running subagents keep their launch policy.
-
-Trusted SSH tools run outside local file, credential-file, and command rules;
-remote effects are not confined either. Only enable them when you trust the
-extension and the subagent's access to your SSH configuration and credentials.
-Other harness packages remain excluded from trusted candidates.
-See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).
+Editable workers get `apply_patch` by default. With Subagents On, Harness binds
+the guarded adapter and checks every patch target against the file rules.
+Extension tools use the selected provider. A configured worker mapping or an
+active user-installed provider can supply the implementation. The child verifies
+its source before dispatch. Known network tools require Network access On.
+Extension code runs inside the trusted Pi process, outside guarded file operations.
 
 Project files and Outside project cycle through four levels:
 
@@ -234,9 +197,29 @@ literal name filtering and a bounded result limit. It does not expose command
 arguments, environment variables, debugger attachment, signals, termination,
 or emulator/ADB operations. Explicit saved values are preserved, and legacy
 saved profiles without this setting stay Off until a human enables Read;
-subagents snapshot the setting at launch. Background tasks uses this row for
-explicit task-status process diagnostics, not `process_list`. Those diagnostics
-require current Read in both Main and Background tasks. They check a registered
+subagents snapshot the setting at launch. Use `/sandbox status` to see Main's
+`process_list` setting and where this session got it. While Main confinement is
+Off, its retained Process access setting cannot deny the fixed inventory tool.
+To change the value for confined use, edit **Main > Process access** in `/sandbox`
+(Main confinement must be On to edit the detail rows).
+No restart is needed for a local edit. Defaults saved in another session do not
+change an already running session, and reloading a saved branch restores its
+branch settings. Start a new session to use the saved defaults instead.
+
+A worker launch reports confinement and Process access separately. A fresh
+worker uses the current session's Subagents profile unless the launch requests
+confinement explicitly. A continuation keeps its saved recipe's confinement
+choice but applies the current Subagents permissions only if that profile is On.
+Switching Subagents confinement Off does not unconfine a saved confined recipe:
+its task sandbox uses the default permissions with guarded Process Read, subject
+to any independent captured authority. If the current profile requires
+confinement but the recipe is unconfined, the continuation is refused. Start a
+new run for a new recipe. A continuation cannot silently drop `process_list`
+if the saved loadout requires it and an active profile sets Process access Off.
+
+Background tasks uses this row for explicit task-status process diagnostics, not
+`process_list`. An active Background tasks profile must allow Process Read.
+Those diagnostics check a registered
 PID's start identity and can report state, CPU time and wait evidence without
 arguments or environment values. They are unavailable under Main confinement;
 no unconfined fallback runs. Task confinement remains the policy recorded when
@@ -297,8 +280,8 @@ are not writable. Credential-file and Pi control-path protections still win.
 Outside Off does not expose these host runtime directories.
 
 The currently admitted model-tool implementations are `read`, `write`, `edit`,
-`bash`, and guarded `run_application`, plus, for Subagents, the guarded `apply_patch` and the trusted tools
-ticked under Subagents · Tools. User-entered `!` and `!!` commands use the same
+`bash`, and guarded `run_application`, plus, for Subagents, the guarded `apply_patch` and selected extension tools
+with verified providers. User-entered `!` and `!!` commands use the same
 shell policy. Other model-callable tools require a verified execution adapter
 and are refused while that actor's sandbox is enabled; enabling network alone
 does not admit them. Subagent launch output identifies requested tools that are
@@ -314,8 +297,7 @@ under broader file grants. Task access to `~/.pi` does not receive a blanket
 write allowance or lock-file exception.
 
 Local confinement cannot govern a remote host's filesystem. SSH tools are
-available to confined Subagents only when explicitly ticked as trusted under
-Subagents · Tools, with Network access On. They run outside local task rules.
+available to confined Subagents when selected with a verified provider and Network access On. They run outside local task rules.
 Main SSH tools, and unadmitted MCP, scripting, background, and nested-agent
 tools, still lack admission adapters and fail closed under an enabled actor
 profile. SSH through confined `bash` receives local file, credential, and network

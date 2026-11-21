@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { WorkClient } from "./shared-work-client.mjs";
+import { WorkClient, connectWorkClient } from "./shared-work-client.mjs";
 import { catalogSnapshotFromWire, defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
 import { catalogHostAuthority } from "./catalog-host-admission.ts";
@@ -49,21 +49,13 @@ export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(
 
 /** Retry connection establishment only; never replay a Catalog edit or authorization failure. */
 export async function connectCatalogClient(agentDir: string, serverDir: string, ensure = ensureCatalogRuntime): Promise<WorkClient> {
-    const connect = async () => {
-        const client = new WorkClient(join(serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"]);
-        try { await client.ready; return client; }
-        catch (error) { client.close(); throw error; }
-    };
-    try { return await connect(); }
-    catch (error) {
-        if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-        await ensure(agentDir);
-        return connect();
-    }
+    return connectWorkClient(join(serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"], {
+        recover: ({ timeoutMs, signal }) => ensure(agentDir, serverDir, timeoutMs, signal),
+    });
 }
 
-async function ensureCatalogRuntime(agentDir: string): Promise<void> {
+async function ensureCatalogRuntime(agentDir: string, serverDir?: string, timeoutMs?: number, signal?: AbortSignal): Promise<void> {
     const path = "./runtime-client/src/runtime/client.mjs";
     const { ensureRuntime } = await import(path);
-    await ensureRuntime({ agentDir });
+    await ensureRuntime({ agentDir, serverDir, timeoutMs, signal });
 }

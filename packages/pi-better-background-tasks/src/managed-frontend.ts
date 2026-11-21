@@ -4,17 +4,22 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { requestBackgroundTool } from './managed-client.js';
 import { onBackgroundObservation } from './work-observation.js';
 import { getCallbackBatcher } from './shared-callback-batcher.js';
-import { registerObservedWaitClient, type ObservedWaitHost } from './observed-waits.js';
+import { registerObservedWaitClient } from "./observed-wait-client.js";
+import type { ObservedWaitHost } from "./observed-waits.js";
+import { observeNavigatorLaunch } from './shared-navigator.ts';
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     let ctx: ExtensionContext | undefined, generation = 0, refresh: Promise<void> | undefined, dirty=false;
     let rows: any[] = [], legacyRows: any[] = [], details = new Map<string, any>(), logs = new Map<string, any>();
+    const retainedTasks = new Map<string, any>();
+    const cachedTask = (id: string) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope: string | undefined;
+    let observing = false;
     const scopeOf = (context: ExtensionContext) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map<string, { operationId: string; owner: { kind: string; sessionId: string; workspace: string } }>();
     const adoptContext = (context: ExtensionContext) => {
         if (adoptedScope !== undefined && adoptedScope !== scopeOf(context)) {
-            ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); generation++;
+            ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); generation++;
         }
         ctx = context; adoptedScope = scopeOf(context);
     };
@@ -26,6 +31,16 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         if (ownership.size > 256) ownership.delete(ownership.keys().next().value!);
     };
     const queued = new Set<string>(), listeners = new Set<(change: any) => void>();
+    const traceSeen = new Set<string>();
+    const trace = (stage: string, facts: Record<string, unknown> = {}) => {
+        if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== '1') return;
+        const full = JSON.stringify({ stage, sessionId: ctx?.sessionManager.getSessionId(), ...facts });
+        const line = full.length <= 4096 ? full : JSON.stringify({ stage, truncated: true });
+        if (traceSeen.has(line) || traceSeen.size >= 128) return;
+        const output = traceSeen.size === 127 ? JSON.stringify({ stage: 'capture-limit', limit: 128 }) : line;
+        traceSeen.add(line);
+        try { console.error('[background-handoff-frontend]', output); } catch { /* diagnostics never own delivery */ }
+    };
     const active = (origin: any, branch?: string | null) => Boolean(ctx && origin.cwd === ctx.cwd && origin.sessionId === ctx.sessionManager.getSessionId()
         && (!branch || ctx.sessionManager.getBranch().some(entry => entry.id === branch)));
     const request = (tool: string, params: any) => {
@@ -35,6 +50,19 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     };
     const notify = () => { for (const listener of listeners)
         listener({ workspace: ctx?.cwd, sessionId: ctx?.sessionManager.getSessionId() }); };
+    let handoffRetry: ReturnType<typeof setTimeout> | undefined;
+    let retryAt = Infinity;
+    const scheduleHandoffPoll = (delayMs: number) => {
+        if (!ctx || retryAt <= Date.now() + delayMs) return;
+        clearTimeout(handoffRetry);
+        retryAt = Date.now() + delayMs;
+        // Poll again before attempting delivery: the task or its recipient may have changed.
+        handoffRetry = setTimeout(() => {
+            handoffRetry = undefined; retryAt = Infinity;
+            if (ctx) void reconcile().catch(() => undefined);
+        }, delayMs);
+        handoffRetry.unref();
+    };
     const reconcile = () => {
         if (!ctx)
             return Promise.resolve();
@@ -42,19 +70,36 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         dirty=false;
         const captured = ctx, version = generation;
         refresh = (async () => {
-            const snapshot = await request('__background_poll', {});
+            trace('poll-start');
+            const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
+            trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item: any) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
             if (version !== generation)
                 return;
+            if (Number.isFinite(snapshot.retryAfterMs)) scheduleHandoffPoll(snapshot.retryAfterMs);
             if (snapshot.recoveryPending === true) dirty = true;
-            rows = snapshot.tasks ?? [];
-            legacyRows = snapshot.legacyRows ?? [];
+            // A rebuilding snapshot is not evidence that visible tasks vanished.
+            if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
+                // Older servers include compact callback pointers in the task list.
+                rows = (snapshot.tasks ?? []).filter((task: any) => !task.callbackPending);
+                // Detail remains inspectable while Navigator retains a terminal row.
+                for (const task of rows) {
+                    retainedTasks.delete(task.id); retainedTasks.set(task.id, task);
+                    if (retainedTasks.size > 256) retainedTasks.delete(retainedTasks.keys().next().value!);
+                }
+                legacyRows = snapshot.legacyRows ?? [];
+            }
             notify();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
                     continue;
                 queued.add(item.token);
-                const receipt = (delivered: boolean, reason?: string) => void requestBackgroundTool(pi, captured, randomUUID(), '__background_receipt', { token: item.token, delivered, reason })
-                    .catch(() => undefined).finally(() => {queued.delete(item.token);if(ctx===captured)void reconcile().catch(()=>undefined);});
+                const facts = { taskId: item.notification.taskId, receiptId: item.receiptId };
+                const receipt = (delivered: boolean, reason?: string) => {
+                    trace('handoff', { ...facts, delivered, reason: reason?.slice(0, 256) });
+                    void requestBackgroundTool(pi, captured, randomUUID(), '__background_receipt', { token: item.token, delivered, reason })
+                    .then(() => trace('receipt-return', facts), error => trace('receipt-error', { ...facts, error: String(error).slice(0, 256) }))
+                    .finally(() => {queued.delete(item.token);if(ctx===captured)void reconcile().catch(()=>undefined);});
+                };
                 const proof = captured.sessionManager.getBranch().some((entry: any) => {
                     const message = entry.type === 'custom_message' ? entry : entry.message;
                     return item.notification.urgent ? message?.customType===item.notification.event.customType&&message.details?.urgentEventId===item.receiptId : message?.customType === 'background-completion-batch' && message.details?.completionEventIds?.includes(item.receiptId);
@@ -64,25 +109,43 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                     continue;
                 }
                 const n = item.notification;
-                if(n.urgent){void getCallbackBatcher(pi).deliverUrgent({...n.event,receiptId:item.receiptId,getSuppressionReason:()=>active(n.origin,n.branchId)?undefined:'The originating session or branch is no longer active',onDelivered:()=>receipt(true),onSuppressed:(reason)=>receipt(false,reason)});continue;}
+                trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
+                if (n.urgent) {
+                    const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
+                        getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
+                        onDelivered: () => receipt(true), onSuppressed: reason => receipt(false, reason) });
+                    const retry = () => { queued.delete(item.token); if (version === generation) scheduleHandoffPoll(1000); };
+                    void Promise.resolve(handoff).then(ok => { if (!ok) retry(); }, retry);
+                    continue;
+                }
                 getCallbackBatcher(pi).enqueue({ ...n.event, source: 'background-task', id: n.taskId, label: n.taskId, status: n.waitId ? `${n.status}; wait ${n.waitId} ready` : n.status,
                     detailTool: 'bg_task_status', outcome: n.outcome, callback: true, receiptId: item.receiptId,
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
                     onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
             }
-        })().finally(() => { refresh = undefined;if(dirty&&ctx)void reconcile().catch(()=>undefined); });
+        })().catch(error => { trace('poll-error', { error: String(error).slice(0, 256) }); throw error; })
+        .finally(() => { refresh = undefined;if(dirty&&ctx)void reconcile().catch(()=>undefined); });
         return refresh;
+    };
+    const activate = () => {
+        if (observing || !ctx) return;
+        observing = true;
+        const version = generation;
+        void reconcile().catch(() => { if (generation === version) observing = false; });
     };
     const host = {
         async reconcileNow() { await reconcile(); while (refresh) await refresh; },
-        start(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
+        start(context: ExtensionContext, restore = true) {
+            adoptContext(context); generation++; observing = false;
+            if (restore) activate();
+        },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
+        close() { clearTimeout(handoffRetry); handoffRetry = undefined; retryAt = Infinity; observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
-        listDurableTasks(origin: any, options: any = {}) { return active(origin) ? rows.filter(row => !options.retentionMs || !row.terminal || Date.now() - (row.endedAt ?? Date.now()) < options.retentionMs) : []; },
-        readDurableTask(origin: any, id: string) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
-        ownsDurableTask(id: string) { if (!ctx || adoptedScope !== scopeOf(ctx)) return false; return ownership.has(id) || rows.some(row => row.id === id); },
+        listDurableTasks(origin: any, _options: any = {}) { return active(origin) ? rows : []; },
+        readDurableTask(origin: any, id: string) { const task = cachedTask(id); return active(origin, task?.parentRecipient?.branchId) ? task : undefined; },
+        ownsDurableTask(id: string) { if (!ctx || adoptedScope !== scopeOf(ctx)) return false; return ownership.has(id) || rows.some(row => row.id === id && !row.readOnly); },
         readDurableTaskLog(origin: any, id: string, lines = 40) {
             if (!active(origin))
                 return;
@@ -104,7 +167,10 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                             throw new Error('Native Background context unavailable');
                         adoptContext(context);
                         const capturedGeneration = generation, capturedScope = adoptedScope;
-                        const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const launch = () => requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const spawning = ['bg_task_spawn', 'bg_task_spawn_batch', 'bg_task_watch'].includes(definition.name)
+                            || definition.name === 'bg_task' && ['spawn', 'watch'].includes(params?.action);
+                        const result = spawning ? await observeNavigatorLaunch(context, 'background-tasks', id, params?.name || 'Background task launch', launch) : await launch();
                         if (ctx === context && generation === capturedGeneration && adoptedScope === capturedScope) rememberOwnership(result.details?.backgroundOwnership, context);
                         await host.reconcileNow().catch(() => undefined);
                         return result;
@@ -114,10 +180,11 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         } });
     registerObservedWaitClient(proxy, host as unknown as ObservedWaitHost);
     const ui: ManagedBackgroundNavigator = {
-        rows: () => legacyRows.filter(row => !row.expiresAt || row.expiresAt > Date.now()),
+        onOpen: activate,
+        rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;
-            const durable = rows.some(row => row.id === id), cache = durable ? logs : details;
+            const durable = Boolean(cachedTask(id)), cache = durable ? logs : details;
             const version=generation;
             if (cache.has(key))
                 return;
@@ -125,7 +192,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             void request(durable ? '__background_log' : '__background_detail', { id, lines }).then(value => { if(version===generation){cache.set(key, value); notify();} }, () => {if(version===generation)cache.delete(key);});
         },
         detail(id, now, options) { return details.get(`${id}:${options?.logTailLines ?? 40}`) ?? null; },
-        close(id) { void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
+        close(id) { if (cachedTask(id)?.readOnly) return {action: 'not-closable', providerId: 'background-tasks', id}; void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
     };
     return { host, proxy, ui };
 }

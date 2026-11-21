@@ -1,6 +1,7 @@
 import { linkSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { socketPathFor } from "./socket.ts";
 
 /** Transport selection is durable and independent of installation or package version. */
 export function runtimeRoot(agentDir: string, requestedServerDir: string): { agentDir: string; serverDir: string } {
@@ -17,9 +18,11 @@ export function runtimeRoot(agentDir: string, requestedServerDir: string): { age
   };
   try { return read(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const temporary = `${path}.${randomUUID()}`;
   mkdirSync(requestedServerDir, { recursive: true, mode: 0o700 });
-  const proposed = { version: 1, agentDir, serverDir: realpathSync(requestedServerDir) };
+  const serverDir = realpathSync(requestedServerDir);
+  socketPathFor(serverDir);
+  const proposed = { version: 1, agentDir, serverDir };
+  const temporary = `${path}.${randomUUID()}`;
   writeFileSync(temporary, JSON.stringify(proposed), { mode: 0o600, flag: "wx" });
   try {
     try { linkSync(temporary, path); }

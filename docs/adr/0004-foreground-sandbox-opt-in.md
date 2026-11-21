@@ -1,5 +1,7 @@
 # Sandbox switches are opt-in for Main, Subagents, and Background tasks
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#permission-to-use-a-tool).
+
 ## Status
 
 Accepted, amended by the user's all-Off default request after #572. This

@@ -61,3 +61,13 @@ test("a shared test driver selects every lane", () => {
 test("the sandbox manifest is treated as sandbox code", () => {
   assert.deepEqual(selected(["docs/tests/sandbox-compatibility.smoke.manifest.json"]), ["sandbox"]);
 });
+
+test("sandbox contract and acceptance inputs select the sandbox checks", () => {
+  for (const path of [
+    "docs/adr/0027-sandbox-tools-and-permissions.md",
+    "scripts/sandbox-permissions.tui.e2e.test.mjs",
+    "packages/pi-better-server/test/support/subagent-offline-model.ts",
+    "packages/pi-better-server/test/support/subagent-launch-sdk.mjs",
+    "packages/pi-better-subagents/tests/continuation.test.mjs",
+  ]) assert.ok(selected([path]).includes("sandbox"), path);
+});

@@ -1,5 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/runtime.ts. Do not edit directly.
-import { createHash } from "node:crypto";
+import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fingerprint.domain.mjs";
 import { readFileSync, statSync } from "node:fs";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.domain.mjs";
 import { evaluateCondition, validateCondition } from "./conditions.domain.mjs";
@@ -14,16 +14,16 @@ import { markFailureAttentionDelivered } from "./shared-failure-observations.dom
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { formatCallbackFacts } from "./output.domain.mjs";
 import { observeTaskStallAttention } from "./stall-attention.domain.mjs";
-import { isTerminalStatus } from "./types.domain.mjs";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.domain.mjs";
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 /** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
 export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+export { FIRST_WATCH_CHECK_WAIT_MS } from "./types.domain.mjs";
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission, sourceWork = (_kind, _id, work) => work()) {
     const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
     const watcherTimers = new Map();
     const remoteSessionTimers = new Map();
@@ -432,7 +432,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearRemoteSessionTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
+        const dueAt = Date.now() + delayMs;
+        const timer = setTimeout(() => void sourceWork("remote-poll", id, () => scheduledWorkSuspended ? undefined : pollRemoteSession(pi, id, getActiveSession), dueAt), delayMs);
         timer.unref();
         remoteSessionTimers.set(id, timer);
     }
@@ -637,6 +638,10 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         scheduleLogRetention(pi, meta.id, getActiveSession);
         const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);
         if (meta.kind === "command_watch") {
+            // Shared display refreshes can revisit an already supervised watch. They
+            // must not replace its captured interval with a new immediate poll.
+            if (watcherTimers.has(meta.id) || activePolls.has(meta.id))
+                return meta;
             scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
                 ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
                 : dependencies.watchPollRunner);
@@ -714,7 +719,9 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const arm = () => {
             if (scheduledWorkSuspended)
                 return;
-            const timer = setTimeout(check, delayMs);
+            const dueAt = Date.now() + delayMs;
+            const timer = setTimeout(() => sourceWork("handoff", id, () => { if (!scheduledWorkSuspended)
+                check(); }, dueAt), delayMs);
             timer.unref();
             handoffTimers.set(id, timer);
         };
@@ -847,7 +854,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearWatchTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
+        const dueAt = Date.now() + delayMs;
+        const timer = setTimeout(() => void sourceWork("watch", id, () => scheduledWorkSuspended ? undefined : pollWatch(pi, id, getActiveSession, runOnce), dueAt), delayMs);
         timer.unref();
         watcherTimers.set(id, timer);
     }
@@ -1135,7 +1143,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         if (scheduledWorkSuspended)
             return;
         const delay = Math.max(0, deadlineAt - Date.now());
-        const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
+        const dueAt = deadlineAt;
+        const timer = setTimeout(() => void sourceWork("process-deadline", id, () => scheduledWorkSuspended ? undefined : timeoutProcess(pi, id, getActiveSession), dueAt), delay);
         timer.unref();
         processTimeoutTimers.set(id, timer);
     }
@@ -1329,16 +1338,23 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         stopLogRetention(id);
         if (scheduledWorkSuspended)
             return;
+        let dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
         const timer = setInterval(() => {
-            const meta = readMeta(id);
-            if (!meta || meta.status !== "running") {
-                stopLogRetention(id);
-                return;
-            }
-            if (meta.kind === "process")
-                enforceLogRetention(meta);
-            if (observeTaskStallAttention(meta))
-                scheduleFailureAttention(pi, id, getActiveSession);
+            const due = dueAt;
+            dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
+            return sourceWork("log-retention", id, () => {
+                if (scheduledWorkSuspended)
+                    return;
+                const meta = readMeta(id);
+                if (!meta || meta.status !== "running") {
+                    stopLogRetention(id);
+                    return;
+                }
+                if (meta.kind === "process")
+                    enforceLogRetention(meta);
+                if (observeTaskStallAttention(meta))
+                    scheduleFailureAttention(pi, id, getActiveSession);
+            }, due);
         }, LOG_RETENTION_CHECK_MS);
         timer.unref();
         logRetentionTimers.set(id, timer);
@@ -1402,71 +1418,6 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         catch {
             return result.stdout.slice(0, 4000);
         }
-    }
-    /** Version tag of the watch outcome fingerprint. A value from another version is adopted, never compared. */
-    const WATCH_FINGERPRINT_VERSION = "v1";
-    /** OSC and CSI control sequences are display markup, not content. */
-    const TERMINAL_ESCAPE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
-    /**
-     * Text as the terminal would settle it. Redraw frames and control sequences are
-     * display churn: repainting the same visible line is not a new observation.
-     */
-    function settledTerminalText(text) {
-        return text
-            .replace(TERMINAL_ESCAPE, "")
-            .split("\n")
-            .map((line) => {
-            // A CR immediately before LF ends the line; any other CR overwrites it in place.
-            const body = line.endsWith("\r") ? line.slice(0, -1) : line;
-            return (body.split("\r").at(-1) ?? "").replace(/[ \t]+$/, "");
-        })
-            .join("\n")
-            .replace(/\n+$/, "");
-    }
-    /** Objects compare by content regardless of key order, so reordered keys are not progress. */
-    function canonicalJsonText(value) {
-        if (Array.isArray(value))
-            return `[${value.map(canonicalJsonText).join(",")}]`;
-        if (value && typeof value === "object") {
-            const record = value;
-            const entries = Object.keys(record).sort()
-                .map((key) => `${JSON.stringify(key)}:${canonicalJsonText(record[key])}`);
-            return `{${entries.join(",")}}`;
-        }
-        return JSON.stringify(value) ?? "null";
-    }
-    /** stdout compares as JSON content when it parses, and as settled text otherwise. */
-    function canonicalWatchStdout(stdout) {
-        const settled = settledTerminalText(stdout);
-        try {
-            return `json:${canonicalJsonText(JSON.parse(settled))}`;
-        }
-        catch {
-            return `text:${settled}`;
-        }
-    }
-    /**
-     * What a poll observed, independent of when it ran. Exit status, signal, error,
-     * stdout content, and stderr content are included; poll metadata (start time,
-     * end time, duration, check count) is deliberately not, so it can never hide a
-     * watch that reports the same outcome forever. Watch stdout may carry its own
-     * timestamps: projecting meaningful fields is the caller's job, not this
-     * fingerprint's guess.
-     */
-    function watchOutcomeFingerprint(result) {
-        // A runner may report why the check itself could not run; that is part of the
-        // observed outcome, not poll metadata.
-        const reported = result.error;
-        const error = typeof reported === "string" ? settledTerminalText(reported) : null;
-        const payload = JSON.stringify([
-            result.exitCode,
-            result.signal ?? null,
-            result.timedOut === true,
-            error,
-            canonicalWatchStdout(result.stdout),
-            settledTerminalText(result.stderr),
-        ]);
-        return `${WATCH_FINGERPRINT_VERSION}:${createHash("sha256").update(payload).digest("hex")}`;
     }
     /**
      * A watch's state clock advances only when its observed outcome changes. The

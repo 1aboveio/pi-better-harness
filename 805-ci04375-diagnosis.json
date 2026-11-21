@@ -1,0 +1,119 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "diagnosis-complete-no-code-change-justified",
+  "testedHead": "04375d5b0dcc39cb5ea83f3c692ebc4f2eb61217",
+  "run": {
+    "id": 44210431272,
+    "attempt": 1,
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "url": "https://github.com/1aboveio/pi-better-harness/actions/runs/44210431272",
+    "createdAt": "2026-11-18T00:45:30Z",
+    "updatedAt": "2026-11-18T00:57:30Z",
+    "jobCounts": { "success": 30, "cancelled": 1, "failure": 1, "total": 32 },
+    "evidence": [".private-805/logs/ci04375-run.json", ".private-805/logs/ci04375-jobs.json"]
+  },
+  "actualModelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session JSONL model_change and thinking_level_change records read this turn." },
+  "classification": {
+    "primaryFailure": "workspace-ci (scripts-2) exceeded its unchanged 10-minute job execution limit; GitHub classified the job cancelled. This is not a manual-cancellation inference and not merely the coordinator's earlier network timeout.",
+    "underlyingScriptsStallCause": "Unknown. The last emitted TAP result is ok93 at00:48:20.7493874Z; no further TAP or complete suite summary precedes cancellation at00:56:03.5137301Z. The log cannot identify a later active test, lingering handle or teardown as the cause.",
+    "gateFailure": "ci correctly fails because WORKSPACE_RESULT=cancelled while SERVER_RESULT=success. Gate behavior is not a separate production regression.",
+    "originalRecoveryHistoryWitnesses": "The original named cases passed on this exact head in server-tests3/3 and pi-1x-compat3/3; shard2 is no longer where these files land after parent integration.",
+    "historicalCause": "These exact-head passes are new qualification evidence, not proof of the cause of004's timeout or attribution of a fix to diagnostics. Preserve all prior failure/progress counters.",
+    "wholeRunPassed": false
+  },
+  "failureEvidence": [
+    {
+      "jobId": 134487207860,
+      "name": "workspace-ci (scripts-2)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "startedAt": "2026-11-18T00:45:50Z",
+      "completedAt": "2026-11-18T00:56:07Z",
+      "step": { "number": 12, "name": "Root script tests", "conclusion": "cancelled", "startedAt": "2026-11-18T00:47:03Z", "completedAt": "2026-11-18T00:56:03Z" },
+      "annotation": "The job has exceeded the maximum execution time of 10m0s",
+      "error": "The operation was canceled.",
+      "notOkRecords": 0,
+      "noSuiteSummary": true,
+      "lastTap": { "line": 854, "number": 93, "name": "exit-child cleanup is bounded with failed-reload", "outcome": "ok", "at": "2026-11-18T00:48:20.7493874Z" },
+      "evidence": [".private-805/logs/ci04375-scripts2.log:854", ".private-805/logs/ci04375-scripts2.log:859", ".private-805/logs/ci04375-scripts2-annotations.json"],
+      "secondaryCleanup": "After cancellation artifact upload warned that navigator-golden files were absent. That warning does not explain the primary timeout and is not an assertion failure."
+    },
+    {
+      "jobId": 134491923855,
+      "name": "ci",
+      "status": "completed",
+      "conclusion": "failure",
+      "step": "Require every test lane",
+      "error": "workspace-ci: cancelled; Process completed with exit code1",
+      "inputs": { "CHANGES_RESULT": "success", "WORKSPACE_RESULT": "cancelled", "SERVER_RESULT": "success" },
+      "evidence": ".private-805/logs/ci04375-gate.log"
+    }
+  ],
+  "originalWitnesses": [
+    {
+      "case": "a failed worker recovers existing subscriptions under a new observation epoch",
+      "outcome": "passed",
+      "compat": { "jobId": 134487207462, "name": "pi-1x-compat (3/3)", "caseNumber": 80, "durationMs": 1136.876221, "evidence": ".private-805/logs/ci04375-compat3.log:1167" },
+      "server": { "jobId": 134487207524, "name": "server-tests (3/3)", "caseNumber": 80, "durationMs": 1117.696029, "evidence": ".private-805/logs/ci04375-server3.log:1244" }
+    },
+    {
+      "case": "shared query observes real runner and wait without taking supervision authority",
+      "outcome": "passed including original no-unasked-history inventory assertion",
+      "compat": { "jobId": 134487207462, "caseNumber": 180, "durationMs": 547.413727, "evidence": ".private-805/logs/ci04375-compat3.log:1973" },
+      "server": { "jobId": 134487207524, "caseNumber": 180, "durationMs": 660.399403, "evidence": ".private-805/logs/ci04375-server3.log:2050" }
+    },
+    {
+      "case": "old fold success cannot affect a replacement read worker",
+      "outcome": "passed",
+      "compat": { "caseNumber": 92, "durationMs": 1262.919765, "evidence": ".private-805/logs/ci04375-compat3.log:1279" },
+      "server": { "caseNumber": 92, "durationMs": 1218.123813, "evidence": ".private-805/logs/ci04375-server3.log:1356" }
+    },
+    {
+      "case": "old fold failure cannot affect a replacement read worker",
+      "outcome": "passed",
+      "compat": { "caseNumber": 93, "durationMs": 1145.053073, "evidence": ".private-805/logs/ci04375-compat3.log:1289" },
+      "server": { "caseNumber": 93, "durationMs": 1131.111957, "evidence": ".private-805/logs/ci04375-server3.log:1366" }
+    },
+    {
+      "case": "continues a killed attempt in its saved conversation without rewriting the interruption",
+      "outcome": "passed",
+      "jobId": 134487207871,
+      "name": "workspace-ci (workspaces-2)",
+      "evidence": ".private-805/logs/ci04375-workspaces2.log:5445"
+    },
+    {
+      "case": "lets a different foreground session continue without retention and moves the callback to it",
+      "outcome": "passed",
+      "jobId": 134487207871,
+      "evidence": ".private-805/logs/ci04375-workspaces2.log:5475"
+    }
+  ],
+  "newDiagnostics": {
+    "failurePhaseRecords": 0,
+    "successPhase": "observed-original-publication-before-exit",
+    "observedIn": [".private-805/logs/ci04375-compat3.log:1172", ".private-805/logs/ci04375-server3.log:1249"],
+    "facts": "Both traces record first then latest source writes; client sees rebuilding seq0, ready first seq1, ready latest seq2. Worker frame generation2 carries latest. Source imported=true, pending=false, repair=false; SQL and cached snapshots both contain latest before original worker exit.",
+    "summaryEvidence": ".private-805/logs/ci04375-witness-summary.txt",
+    "meaning": "Original publication and later recovery assertions passed. No failed phase is available because the failure-only diagnostic did not fire; do not infer the old failure's cause."
+  },
+  "allJobStatusEvidence": ".private-805/logs/ci04375-jobs.json",
+  "successfulJobIds": [134487073416,134487207436,134487207462,134487207503,134487207514,134487207524,134487207529,134487207571,134487207592,134487207602,134487207629,134487207650,134487207667,134487207705,134487207729,134487207753,134487207790,134487207795,134487207810,134487207833,134487207841,134487207847,134487207871,134487207878,134487207908,134487207913,134487207924,134487208012,134487208025,134491630306],
+  "commands": [
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/runs/44210431272", "exit": 0 },
+    { "command": "gh api 'repos/1aboveio/pi-better-harness/actions/runs/44210431272/jobs?per_page=100'", "exit": 0, "totalJobs": 32 },
+    { "commandTemplate": "gh api repos/1aboveio/pi-better-harness/actions/jobs/JOB_ID/logs", "jobIds": [134487207602,134487207650,134487207860,134491923855,134487207871,134487207629,134487207462,134487207503,134487207524], "exitForEveryFetch": 0, "evidencePrefix": ".private-805/logs/ci04375-" },
+    { "command": "gh api repos/1aboveio/pi-better-harness/check-runs/134487207860/annotations", "exit": 0 }
+  ],
+  "codeChanges": [],
+  "localTestsRun": [],
+  "justification": "Read-only primary CI evidence establishes original witness passes and a separate job-budget cancellation, not a new reproducible product defect. No speculative runtime/test/workflow patch is justified. No local native replay or redundant tests required for this diagnosis.",
+  "remaining": [
+    "scripts-2 remains unqualified. Coordinator owns any approved follow-up or retry; underlying silent interval/test teardown cause is not established by the retained log.",
+    "The required gate remains red and the whole run is cancelled; do not admit/merge or report full CI success from30 successful jobs.",
+    "Retain all earlier004/10f failures and non-convergence counters; exact04375 case-level passes do not reset history or establish causal repair."
+  ],
+  "boundaries": "No retry/dispatch, push, external watcher, gate/timeout/threshold change, restricted native replay or shared-runtime/settings intervention performed."
+}

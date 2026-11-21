@@ -34,11 +34,19 @@ interface ReportInput {
     evidence: Array<{ path: string; explanation: string; offset?: number; max_bytes?: number }>;
 }
 
+export function assignmentReportOutcomeReason(report: AssignmentReport): string {
+    if (report.status === "complete") return report.reason;
+    return (`Assignment incomplete: ${report.reason}`
+        + (report.blocker ? ` Blocked (${report.blocker.kind}): ${report.blocker.reason}.` : "")
+        + (report.remainingWork ? ` Remaining work: ${report.remainingWork.join("; ")}.` : "")).slice(0, 8192);
+}
+
 function validateReportText(report: AssignmentReport): void {
     requireText("report.reason", report.reason, 2048);
     for (const item of report.remainingWork ?? []) requireText("report.remaining_work", item, 1024);
     if (report.blocker) requireText("report.blocker.reason", report.blocker.reason, 1024);
     for (const evidence of report.evidence) requireText("report.evidence.explanation", evidence.explanation, 1024);
+    requireText("report.outcome_reason", assignmentReportOutcomeReason(report), 8192);
 }
 
 /** Runs synchronously under the authenticated handler: no yield between authority and persistence. */

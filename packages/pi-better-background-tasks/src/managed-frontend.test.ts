@@ -4,9 +4,130 @@ vi.mock('./managed-client.js', () => ({ requestBackgroundTool: fixture.request }
 vi.mock('./work-observation.js', () => ({ onBackgroundObservation: (_pi: unknown, callback: () => void) => { fixture.observe = callback; return () => { }; } }));
 vi.mock('./shared-callback-batcher.js', () => ({ getCallbackBatcher: () => ({ enqueue: fixture.enqueue,deliverUrgent:fixture.urgent }) }));
 import { createManagedBackgroundFrontend } from './managed-frontend.js';
+import { createBackgroundTasksNavigator } from './navigator-provider.js';
+import { NAVIGATOR_PANEL_WIDGET_KEY, setNavigatorPanel } from './shared-navigator-panels.ts';
 const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
+    it('keeps running tasks beside the todo when an older server includes a pending callback pointer', async () => {
+      const pi = { registerTool() {} } as any;
+      const frontend = createManagedBackgroundFrontend(pi);
+      const navigator = createBackgroundTasksNavigator(undefined, frontend.ui);
+      let widget: { render(width: number): string[] } | undefined;
+      const theme = { fg: (_color: string, text: string) => text };
+      const ctx = { ...context(), mode: 'tui', hasUI: true, ui: {
+        theme, setEditorComponent() {},
+        setWidget(key: string, factory: any) {
+          if (key === NAVIGATOR_PANEL_WIDGET_KEY) widget = factory?.({ requestRender() {} }, theme);
+        },
+      } };
+      const running = (name: string, kind: string) => ({
+        durable: true, id: kind, name, kind, status: 'running', active: true, terminal: false,
+        startedAt: Date.now(), waits: [], cwd: ctx.cwd, exitCode: null,
+      });
+      const pointer = { durable: true, id: 'old-failure', operationId: 'old-op', status: 'failed',
+        terminal: true, active: false, endedAt: Date.now() - 60000, callbackPending: true };
+      fixture.request.mockResolvedValue({
+        tasks: [pointer, running('PostgreSQL check', 'process'), running('Android CI watch', 'watch')],
+        deliveries: [{ token: 'lease', receiptId: 'receipt', notification: {
+          taskId: pointer.id, origin: { cwd: ctx.cwd, sessionId: 'native' }, status: 'failed', event: {},
+        } }],
+      });
+      try {
+        frontend.host.start(ctx, false);
+        navigator.ensureBackgroundTasksNavigatorProvider(pi);
+        navigator.ensureBackgroundTasksNavigator(ctx);
+        setNavigatorPanel(ctx, 'pi-better-plan', () => ({ render: () => ['todo 1/4 complete'], invalidate() {} }));
+        await frontend.host.reconcileNow();
+        const screen = widget?.render(120).join('\n');
+        expect(screen).toContain('todo 1/4 complete');
+        expect(screen).toContain('PostgreSQL check');
+        expect(screen).toContain('Android CI watch');
+        expect(frontend.host.readDurableTask({ cwd: ctx.cwd, sessionId: 'native' }, pointer.id)).toBeUndefined();
+        expect(fixture.enqueue).toHaveBeenCalledOnce();
+      } finally {
+        setNavigatorPanel(ctx, 'pi-better-plan', undefined);
+        navigator.clearBackgroundTasksNavigatorSession();
+        frontend.host.close();
+      }
+    });
+    it('opens observation once on demand and discards a pending poll after a session switch', async () => {
+      let release!: (snapshot: unknown) => void;
+      const poll = new Promise(resolve => { release = resolve; });
+      fixture.request.mockReturnValue(poll);
+      const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+      frontend.host.start(context(), false);
+      expect(frontend.ui.rows()).toEqual([]);
+      expect(fixture.request).not.toHaveBeenCalled();
+      frontend.ui.onOpen?.();
+      frontend.ui.onOpen?.();
+      expect(fixture.request).toHaveBeenCalledTimes(1);
+      frontend.host.close();
+      frontend.host.start(context(), false);
+      release({ tasks: [], legacyRows: [{ id: 'old' }], deliveries: [] });
+      await poll;
+      expect(frontend.ui.rows()).toEqual([]);
+      expect(fixture.enqueue).not.toHaveBeenCalled();
+      frontend.host.close();
+    });
+    it('passes late terminal observations to the navigator and keeps rows through rebuilding and request failure', async () => {
+      const origin = {cwd:'/workspace',sessionId:'native'};
+      const terminal = {id:'finished',terminal:true,endedAt:Date.now()-60000};
+      fixture.request.mockResolvedValue({tasks:[terminal],legacyRows:[{id:'legacy',status:'failed',expiresAt:1}],deliveries:[]});
+      const frontend=createManagedBackgroundFrontend({registerTool(){}} as any);
+      frontend.host.start(context());await frontend.host.reconcileNow();
+      expect(frontend.host.listDurableTasks(origin,{retentionMs:30000})).toEqual([terminal]);
+      expect(frontend.ui.rows()).toHaveLength(1);
+      fixture.request.mockResolvedValue({status:'rebuilding',tasks:[],legacyRows:[]});
+      await frontend.host.reconcileNow();expect(frontend.ui.rows()).toHaveLength(1);
+      fixture.request.mockRejectedValue(new Error('disconnected'));
+      await expect(frontend.host.reconcileNow()).rejects.toThrow('disconnected');
+      expect(frontend.host.listDurableTasks(origin)).toEqual([terminal]);
+      frontend.host.close();expect(frontend.ui.rows()).toHaveLength(0);
+    });
+    it('shows worker-owned tasks without adopting their stop authority', async () => {
+      const origin={cwd:'/workspace',sessionId:'native'};
+      fixture.request.mockResolvedValue({tasks:[{id:'child',active:true,readOnly:true,parentAgentId:'worker'}],legacyRows:[],deliveries:[]});
+      const frontend=createManagedBackgroundFrontend({registerTool(){}} as any);
+      frontend.host.start(context()); await frontend.host.reconcileNow();
+      expect(frontend.host.listDurableTasks(origin)[0].parentAgentId).toBe('worker');
+      expect(frontend.host.ownsDurableTask('child')).toBe(false);
+      fixture.request.mockClear();
+      expect(frontend.ui.close('child').action).toBe('not-closable');
+      expect(fixture.request).not.toHaveBeenCalled();
+      frontend.host.close();
+    });
+    it('captures poll, queue, handoff, receipt and failure without changing delivery', async () => {
+      vi.stubEnv('PI_BG_OBSERVED_WAITS_DEBUG', '1');
+      const output = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let delivered = false;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => {
+        if (tool === '__background_receipt') { delivered = true; return {}; }
+        return { tasks: [], deliveries: delivered ? [] : [{ token: 'private-token', receiptId: 'receipt',
+          notification: { taskId: 'watch', origin: { cwd: '/workspace', sessionId: 'native' }, status: 'succeeded', event: {} } }] };
+      });
+      const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+      try {
+        frontend.host.start(context()); await frontend.host.reconcileNow();
+        expect(fixture.enqueue).toHaveBeenCalledTimes(1);
+        fixture.enqueue.mock.calls[0][0].onDelivered();
+        await vi.waitFor(() => expect(delivered).toBe(true));
+        await frontend.host.reconcileNow();
+        const records = () => output.mock.calls.filter(call => call[0] === '[background-handoff-frontend]').map(call => JSON.parse(call[1]));
+        expect(records().map(item => item.stage)).toEqual(expect.arrayContaining(['poll-start', 'poll-received', 'queue', 'handoff', 'receipt-return']));
+        expect(JSON.stringify(records())).not.toContain('private-token');
+        fixture.request.mockRejectedValue(new Error('actual poll refusal'));
+        await expect(frontend.host.reconcileNow()).rejects.toThrow('actual poll refusal');
+        expect(records().some(item => item.stage === 'poll-error' && item.error.includes('actual poll refusal'))).toBe(true);
+        for (let i = 0; i < 140; i++) {
+          fixture.request.mockRejectedValue(new Error(`distinct failure ${i}`));
+          await frontend.host.reconcileNow().catch(() => {});
+        }
+        expect(records().length).toBeLessThanOrEqual(128);
+        expect(records().at(-1).stage).toBe('capture-limit');
+        expect(output.mock.calls.every(call => String(call[1]).length <= 4096)).toBe(true);
+      } finally { frontend.host.close(); output.mockRestore(); vi.unstubAllEnvs(); }
+    });
     it('keeps 60 render reads free of provider requests and fetches evidence only on explicit selection', async () => {
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [{ id: 'durable', active: true }], legacyRows: [{ id: 'legacy', status: 'running' }], deliveries: [] } : tool === '__background_log' ? { stdout: 'evidence' } : { id: 'legacy' });
         const frontend = createManagedBackgroundFrontend({ registerTool() { } } as any), ctx = context();
@@ -108,6 +229,22 @@ describe('managed native UI boundary', () => {
       await completed;
       expect(frontend.host.ownsDurableTask('durable')).toBe(true);
       frontend.host.close();
+    });
+    it.each([true, false])("revalidates a deferred health handoff before retry (still eligible=%s)", async stillEligible => {
+        vi.useFakeTimers();
+        const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+        const item = { token: "pending", receiptId: "episode", notification: { urgent: true, taskId: "bgs_one",
+            origin: { cwd: "/workspace", sessionId: "native" }, event: { customType: "background-task-stall" } } };
+        let attempt = 0;
+        fixture.request.mockImplementation(async () => ({ tasks: [], deliveries: ++attempt === 1 || stillEligible ? [item] : [] }));
+        fixture.urgent.mockReturnValueOnce(false).mockReturnValue(true);
+        try {
+            frontend.host.start(context(), false);
+            await frontend.host.reconcileNow();
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(fixture.urgent).toHaveBeenCalledTimes(stillEligible ? 2 : 1);
+            expect(attempt).toBe(2);
+        } finally { frontend.host.close(); vi.useRealTimers(); }
     });
     it.each([false,true])('acknowledges exact native structured transcript proof without appending again (urgent=%s)', async (urgent) => {
         let acknowledged=false;

@@ -42,7 +42,7 @@ process.env.TMPDIR = scratch;
 process.env.TEMP = scratch;
 process.env.TMP = scratch;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
-const { startWorkRuntime } = await import(new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href);
+const { startWorkRuntime, retainWorkRuntimeFailure } = await import(new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href);
 const stopWorkRuntime = await startWorkRuntime();
 after(async () => {
     await stopWorkRuntime();
@@ -93,8 +93,10 @@ async function harness(config: SandboxPermissionSettings, backgroundFirst = fals
         if (refusal?.block) return { blocked: true, text: refusal.reason ?? "Tool call blocked" };
         const tool = runner.getToolDefinition(name);
         assert.ok(tool);
-        const result = await tool.execute(toolCallId, input, undefined, undefined, runner.createContext());
-        return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
+        try {
+            const result = await tool.execute(toolCallId, input, undefined, undefined, runner.createContext());
+            return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
+        } catch (error) { await retainWorkRuntimeFailure(); throw error; }
     };
     return { root, runner, loaded, events, gate, execute, async policy(next: SandboxPermissionSettings) {
         setPolicy(next);

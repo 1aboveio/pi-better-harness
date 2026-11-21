@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { processStartToken } from "./registry.ts";
-import { WorkClient } from "./shared-work-client.mjs";
+import { WorkClient, connectWorkClient } from "./shared-work-client.mjs";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
 import { overlayDigest } from "./catalog-overlay.ts";
 export { overlayDigest } from "./catalog-overlay.ts";
@@ -13,6 +13,8 @@ export function createCatalogHostAdapter() {
     let live: { client: WorkClient; path: string; key: string; authority: Record<string, unknown> } | undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
     let epoch = 0;
+    let pendingConnection: AbortController | undefined;
+    let refreshPending = false;
     let admitting: Promise<Record<string, unknown> | undefined> = Promise.resolve(undefined);
 
     /** Fixed Pi adapter only. Never exposed as a tool or socket issuance operation. */
@@ -22,6 +24,7 @@ export function createCatalogHostAdapter() {
 
     function closeCatalogHost() {
         epoch++;
+        pendingConnection?.abort(); pendingConnection = undefined;
         clearInterval(timer); timer = undefined;
         if (live) { live.client.close(); rmSync(live.path, { force: true }); live = undefined; }
         current = undefined;
@@ -48,9 +51,13 @@ export function createCatalogHostAdapter() {
         const id = randomUUID(), secret = randomBytes(32).toString("hex"), generation = randomUUID();
         const path = join(root, `${id}.json`), staging = join(root, `.${id}`);
         const authority = { id, secret, generation, cwd: scope.cwd, sessionId: scope.sessionId, branchId: scope.branchId };
-        const client = new WorkClient(socketPath, agentDir, ["runtime-catalog-v1"]);
+        const controller = new AbortController();
+        pendingConnection = controller;
+        const client = await connectWorkClient(socketPath, agentDir, ["runtime-catalog-v1"], { signal: controller.signal })
+            .finally(() => { if (pendingConnection === controller) pendingConnection = undefined; });
         try {
             const hello = await client.ready;
+            if (epoch !== admittedEpoch || !current) throw new Error("catalog-host-revoked");
             const pidStartTime = processStartToken(process.pid);
             if (!pidStartTime) throw new Error("catalog-host-identity-unavailable");
             writeFileSync(staging, JSON.stringify({ version: 1, id, generation, serverInstance: hello.instanceId, pid: process.pid, pidStartTime, secretHash: hash(secret), ...scope }), { mode: 0o600, flag: "wx" });
@@ -58,7 +65,16 @@ export function createCatalogHostAdapter() {
             await client.request("runtime_bind_catalog_host", { authority });
             if (epoch !== admittedEpoch || !current) throw new Error("catalog-host-revoked");
             live = { client, path, key, authority };
-            if (!timer) { timer = setInterval(() => { void catalogHostAuthority(agentDir, current?.ctx.cwd ?? cwd, socketPath).catch(() => closeCatalogHost()); }, 500); timer.unref(); }
+            if (!timer) {
+                timer = setInterval(() => {
+                    if (refreshPending) return;
+                    refreshPending = true;
+                    void catalogHostAuthority(agentDir, current?.ctx.cwd ?? cwd, socketPath)
+                        .catch(() => { if (epoch === admittedEpoch) closeCatalogHost(); })
+                        .finally(() => { refreshPending = false; });
+                }, 500);
+                timer.unref();
+            }
             return authority;
         } catch (error) { client.close(); rmSync(path, { force: true }); rmSync(staging, { force: true }); throw error; }
     }

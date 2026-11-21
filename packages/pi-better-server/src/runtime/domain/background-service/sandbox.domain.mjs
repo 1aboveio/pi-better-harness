@@ -242,6 +242,7 @@ function readPermissions(value) {
         projectFiles: p.projectFiles,
         outsideProject: p.outsideProject,
         storedCredentials: p.storedCredentials,
+        ...(p.processAccess === undefined ? {} : { processAccess: p.processAccess }),
         ...(p.shell === undefined ? {} : { shell: p.shell }),
         ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds }),
     });
@@ -264,22 +265,20 @@ export function observeForegroundSandboxPolicy(pi) {
         try {
             const published = data && typeof data === "object" ? data : undefined;
             const hasBackground = published && Object.hasOwn(published, "background");
-            const policy = readPolicy(hasBackground ? published.background : data, hasBackground ? "Background tasks" : "Main");
-            if (hasBackground && !policy)
+            const main = readPolicy(data);
+            const policy = hasBackground ? readPolicy(published.background, "Background tasks") : main;
+            if (hasBackground && (!main || !policy))
                 throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
-            const access = (value) => {
-                if (!value || typeof value !== "object")
-                    return undefined;
-                return value.permissions?.processAccess;
-            };
-            mirror.mainConfined = published?.state !== "disabled" && published?.state !== "inactive";
-            mirror.processAccess = access(data) === "read" && access(hasBackground ? published.background : data) === "read" ? "read" : "off";
-            if (policy)
-                Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
-            if (policy) {
-                mirror.policy = policy;
-                mirror.error = undefined;
-            }
+            if (!policy || !main)
+                return;
+            const isOff = (scope) => scope.state === "disabled" || scope.state === "inactive";
+            const allowsRead = (scope) => scope.permissions !== undefined &&
+                (isOff(scope) || scope.permissions.processAccess === "read");
+            mirror.mainConfined = !isOff(main);
+            mirror.processAccess = allowsRead(main) && allowsRead(policy) ? "read" : "off";
+            Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
+            mirror.policy = policy;
+            mirror.error = undefined;
         }
         catch (error) {
             mirror.error = error;

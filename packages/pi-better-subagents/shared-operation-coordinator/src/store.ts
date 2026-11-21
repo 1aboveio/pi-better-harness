@@ -12,7 +12,7 @@ import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgro
 import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
 import { SubagentLaunchJournal } from "./subagent-launch.ts";
-import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
+import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
@@ -26,9 +26,11 @@ import {
     requirePath,
 } from "./validate.ts";
 import { ensureSchema } from "./schema.ts";
-import { createContext, openDatabase, type StoreContext } from "./sqlite.ts";
+import { ensureAssignmentChanges } from "./assignment-changes.ts";
+import { createContext, openDatabase, run, type StoreContext } from "./sqlite.ts";
 import {
     getOperation as readOperationRecord,
+    listAssignmentCleanupOperations as readAssignmentCleanupOperations,
     listOperations as readOperationRecords,
     listRunningSupervisedBy as readRunningSupervisedBy,
     releaseSupervision as writeSupervisionRelease,
@@ -124,6 +126,8 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    hasSubagentManagement(): boolean;
+    resultSupervisionChanges(after?: Parameters<typeof resultSupervisionChanges>[1]): ReturnType<typeof resultSupervisionChanges>;
     subagentLaunchJournal(): SubagentLaunchJournal;
     resultScopeManaged(scope: string): boolean;
     handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
@@ -160,18 +164,17 @@ export interface Store {
 
     // ---- operations ----
 
-    /**
-     * Register a durable operation for one task launch. The owner, task id,
-     * launch token and observer are immutable: a replay of the same launch
-     * returns `created: false`, and any difference is refused with
-     * `operation-conflict` or `task-ownership`.
-     */
     backgroundRequests(): BackgroundRequests;
     setParentCallbackPending(taskId: string, pending: boolean): boolean;
     listPendingParentCallbacks(scope: ParentCallbackScope, options?: ParentCallbackPage): OperationRecord[];
     listRecentBackgroundTerminals(options: RecentBackgroundTerminalPage): OperationRecord[];
     seedPendingParentCallbacks(options?: { limit?: number }): { done: boolean; seeded: number };
     setUpgradeFence(epoch: string | null): void;
+    /**
+     * Register a durable launch. Owner, task id, launch token, observer, and
+     * assignment attempt provenance are immutable. An exact replay returns
+     * `created: false`, even after assignment end, and admits no new work.
+     */
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
      * Replace supervision identity and/or report observer health
@@ -196,6 +199,12 @@ export interface Store {
     recordTerminalOutcome(input: RecordTerminalOutcomeInput): RecordTerminalOutcomeResult;
     getOperation(operationId: string): OperationRecord | null;
     listOperations(filter?: OperationFilter): OperationRecord[];
+    /**
+     * Read up to 256 unfinished cleanup obligations in operation id order.
+     * The cursor is exclusive. Start each new sweep without a cursor.
+     */
+    listAssignmentCleanupOperations(limit: number, afterOperationId?: string): OperationRecord[];
+    verifyAssignmentCleanup(operationId: string, launchToken: string, terminalRevision: number): boolean;
     /** Running operations currently assigned to this supervising host. */
     listRunningSupervisedBy(hostId: string): OperationRecord[];
     listOperationEvidence(operationId: string, terminalRevision?: number): OperationEvidenceRecord[];
@@ -327,6 +336,7 @@ export function openStore(options: StoreOptions): Store {
     const ctx: StoreContext = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     } catch (error) {
         try {
             db.close();
@@ -351,6 +361,8 @@ export function openStore(options: StoreOptions): Store {
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
         handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
@@ -407,6 +419,20 @@ export function openStore(options: StoreOptions): Store {
         listOperations(filter = {}) {
             alive();
             return readOperationRecords(ctx, filter);
+        },
+        listAssignmentCleanupOperations(limit, afterOperationId) {
+            alive();
+            return readAssignmentCleanupOperations(ctx, limit, afterOperationId);
+        },
+        verifyAssignmentCleanup(operationId, launchToken, terminalRevision) {
+            alive();
+            if (!Number.isSafeInteger(terminalRevision) || terminalRevision < 1) return false;
+            return run(ctx, `INSERT OR IGNORE INTO coordinator_state (key, value)
+                SELECT 'assignment-cleanup-verified:' || op.operation_id, op.launch_token
+                FROM operations op JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
+                JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+                WHERE op.operation_id = ? AND op.launch_token = ? AND op.terminal_revision = ?`,
+            operationId, launchToken, terminalRevision) > 0;
         },
         listRunningSupervisedBy(hostId) {
             alive();

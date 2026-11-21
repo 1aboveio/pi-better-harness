@@ -11,6 +11,7 @@ import {
     appendFileSync,
     closeSync,
     mkdirSync,
+    mkdtempSync,
     openSync,
     readFileSync,
     rmSync,
@@ -27,6 +28,12 @@ import { logPathFor, onMetaChanged, readMeta, runDir, writeMeta } from "../regis
 import { inspectOutcome, readOutcome, receiptOutcome, registerAssignmentAttempt } from "../assignment-outcomes.ts";
 import { recordAssignmentReport } from "../assignment-report.ts";
 import { failurePath } from "../failures.ts";
+import { completeOwnedExit } from "../owned-exit.ts";
+import { createCallbackBatcher } from "../shared-callback-batcher.ts";
+import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
+import { durableSessionsDir } from "../session-store.ts";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function writeLargeNewlineFreeRecord(id, { type, toolCallId, toolName, payloadBytes, appendNewline = true }) {
     mkdirSync(runDir(id), { recursive: true });
@@ -86,6 +93,82 @@ function seedRunningMeta(id, extras = {}) {
         ...extras,
     });
 }
+
+it("recovered old-parent child retires its cleanup receipt only after real finalization and callback settlement", async () => {
+    const durable = mkdtempSync(join(tmpdir(), "recovered-exit-")), previous = process.env.PI_SUBAGENT_DURABLE_DIR;
+    process.env.PI_SUBAGENT_DURABLE_DIR = durable;
+    const id = "sa_recovered_cleanup", pid = 4194304, liveRuns = [], owned = new Map();
+    let exit, accept;
+    const childExit = new Promise(resolve => { exit = resolve; });
+    const handoff = new Promise(resolve => { accept = resolve; });
+    const batcher = createCallbackBatcher({ sendMessage: () => handoff });
+    seedRunningMeta(id, { pid, spawnPid: 4194303, spawnPidStartTime: "dead-owner", sessionId: id,
+        supervisionInterruptedAt: 1, recipe: { version: 1, sessionId: id, sessionDir: durableSessionsDir(), cwd: process.cwd() } });
+    writeRunLog(id, [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }] } },
+        { type: "agent_end", messages: [] }]);
+    const completion = completeOwnedExit(childExit, code => {
+        assert.equal(code, null, "unobserved recovery cannot invent an exit code");
+        const result = finalizeRun(id, code);
+        assert.equal(result.meta.status, "completed");
+        batcher.deliverUrgent({ source: "subagent", id, label: id, status: "completed", customType: "completion", content: "recovered" });
+    }, () => {}, () => batcher.settled());
+    const receipt = { pid, start: "original-child-start", completion };
+    owned.set(id, receipt);
+    registerFixtureRun({ id, pid }, owned, liveRuns);
+    try {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(readMeta(id).status, "running", "live writer is not finalized from its partial history");
+        exit(null);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(liveRuns.length, 1, "terminal metadata is not cleanup acknowledgement while handoff is pending");
+        accept(); await completion;
+        batcher.cancel();
+        rmSync(runDir(id), { recursive: true, force: true });
+        retireFixtureRun({ id, pid }, receipt, owned, liveRuns);
+        assert.equal(readMeta(id).status, "completed", "durable archive remains visible after raw directory removal");
+        assert.equal(liveRuns.length, 0, "afterEach must not reap an archived recovered child a second time");
+        assert.equal(owned.size, 0);
+    } finally {
+        accept(); batcher.cancel(); rmSync(runDir(id), { recursive: true, force: true });
+        rmSync(durable, { recursive: true, force: true });
+        if (previous === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = previous;
+    }
+});
+
+it("a stale health acknowledgement preserves real exit evidence and aggregate completion", async () => {
+    const id = "sa_health_marker_exit_race";
+    const stale = { id, cwd: tmpdir(), sessionId: id, status: "lost", startedAt: 1, endedAt: 2,
+        pid: 4194304, spawnPid: process.pid, callback: true, logPath: logPathFor(id) };
+    const sent = [];
+    const batcher = createCallbackBatcher({ sendMessage: message => sent.push(message) }, { windowMs: 5000 });
+    try {
+        writeMeta(stale);
+        writeFileSync(logPathFor(id), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+        finalizeRun(id, 1);
+        assert.equal(readMeta(id).status, "failed");
+        writeMeta(stale, { patch: () => ({ lostCallbackSentAt: 3 }) });
+        const current = readMeta(id);
+        assert.equal(current.status, "failed", "callback metadata cannot restore provisional lost");
+        assert.equal(current.exitCode, 1);
+        assert.ok(current.completionCallbackPendingAt);
+        assert.equal(current.lostCallbackSentAt, 3);
+        const before = readFileSync(join(runDir(id), "meta.json"), "utf8");
+        let notifications = 0;
+        const stop = onMetaChanged(() => { notifications++; });
+        try {
+            writeMeta(stale, { patch: latest => {
+                assert.equal(latest.status, "failed");
+                return undefined;
+            } });
+        } finally { stop(); }
+        assert.equal(readFileSync(join(runDir(id), "meta.json"), "utf8"), before);
+        assert.equal(notifications, 0, "a declined marker patch does not publish a metadata change");
+        batcher.enqueue({ source: "subagent", id, label: id, status: current.status, detailTool: "subagent_result", callback: true });
+        assert.equal(await batcher.flush(), true);
+        assert.ok(sent.some(message => message.customType === "background-completion-batch" && message.content.includes(id)),
+            "the superseding completion remains present in the aggregate callback");
+    } finally { batcher.cancel(); await batcher.settled(); rmSync(runDir(id), { recursive: true, force: true }); }
+});
 
 describe("classifyChildExit", () => {
     // @covers subagent.run-finalization

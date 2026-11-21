@@ -32,14 +32,15 @@
  */
 import { spawn } from "node:child_process";
 import { closeSync, openSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { watchOutcomeFingerprint } from "./watch-fingerprint.mjs";
 import { evaluateCondition, validateCondition } from "./conditions.mjs";
 import { completeUtf8Length, stopProcessGroup, utf8PrefixLength } from "./process.mjs";
 import { readProcessStartToken } from "./process-identity.mjs";
 import { processGroupAlive } from "./identity.mjs";
-import { appendEvent, appendStreamBytes, claimLaunch, ensureSupervisorTaskDir, readLaunchRecord, readStopRequest, writeCommandRecord, writeTerminalRecord, } from "./store.mjs";
+import { appendEvent, appendStreamBytes, claimLaunch, ensureSupervisorTaskDir, readLaunchRecord, readStopRequest, writeCommandRecord, writeTerminalRecord, writeTextAtomic, } from "./store.mjs";
 import { DEFAULT_TERMINAL_TAIL_BYTES, DEFAULT_WATCH_INTERVAL_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_POLL_MS, SUPERVISOR_RECORD_VERSION, SUPERVISOR_RUNNER_VERSION, SUPERVISOR_TERMINATION_GRACE_MS, } from "./types.mjs";
 /** How long the runner waits for `close` after the child reported `exit`. */
 const PIPE_CLOSE_GRACE_MS = 1_000;
@@ -116,6 +117,39 @@ function streamChunk(sink, chunk, maxBytes) {
         sink.tail = [keep];
         sink.tailBytes = keep.length;
     }
+}
+/** Coalesce stream bursts while retaining the timestamp of the last byte, including discarded output. */
+function progressRecorder(directory) {
+    const path = join(directory, "progress.json");
+    let pending;
+    let timer;
+    let lastWrite = 0;
+    const flush = () => {
+        timer = undefined;
+        if (!pending)
+            return;
+        try {
+            writeTextAtomic(path, JSON.stringify(pending));
+        }
+        catch (error) {
+            process.stderr.write(`Could not record Background progress: ${String(error)}\n`);
+        }
+        lastWrite = Date.now();
+    };
+    return (observedAt, fingerprint) => {
+        if (fingerprint !== undefined && pending?.fingerprint === fingerprint)
+            return;
+        pending = { observedAt, fingerprint };
+        if (timer)
+            return;
+        const remaining = lastWrite + 1000 - Date.now();
+        if (remaining <= 0)
+            flush();
+        else {
+            timer = setTimeout(flush, remaining);
+            timer.unref();
+        }
+    };
 }
 function startToken(pid) {
     return pid === undefined ? undefined : readProcessStartToken(pid);
@@ -389,15 +423,21 @@ function runChild(ctx, plan) {
         };
         child.stdout?.on("data", (chunk) => {
             const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            if (plan.mode === "stream")
+            if (plan.mode === "stream") {
                 streamChunk(ctx.stdout, buffer, plan.maxBytes);
+                if (buffer.length)
+                    ctx.progress(Date.now());
+            }
             else
                 captureChunk(stdoutCapture, buffer, plan.maxBytes);
         });
         child.stderr?.on("data", (chunk) => {
             const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            if (plan.mode === "stream")
+            if (plan.mode === "stream") {
                 streamChunk(ctx.stderr, buffer, plan.maxBytes);
+                if (buffer.length)
+                    ctx.progress(Date.now());
+            }
             else
                 captureChunk(stderrCapture, buffer, plan.maxBytes);
         });
@@ -596,6 +636,7 @@ async function runWatch(ctx) {
         if (ctx.finalized)
             return;
         ctx.checks += 1;
+        ctx.progress(outcome.endedAt, watchOutcomeFingerprint({ ...asCommandResult(outcome), ...(outcome.spawnError ? { error: outcome.spawnError } : {}) }));
         // Per-check output keeps the streams apart: stdout bytes in stdout.log, stderr in stderr.log.
         streamChunk(ctx.stdout, Buffer.from(outcome.stdout), ctx.launch.maxLogBytes);
         streamChunk(ctx.stderr, Buffer.from(outcome.stderr), ctx.launch.maxLogBytes);
@@ -823,9 +864,11 @@ function main() {
         checks: 0,
         stdout,
         stderr,
+        progress: progressRecorder(paths.dir),
         stopRequested: false,
         finalized: false,
     };
+    ctx.progress(ctx.startedAt);
     appendEvent(paths.events, `claimed runner_pid=${process.pid} runner_version=${SUPERVISOR_RUNNER_VERSION} kind=${launch.kind} cwd=${launch.command.cwd}`);
     const onSignal = (signal) => {
         appendEvent(paths.events, `runner received ${signal}`);

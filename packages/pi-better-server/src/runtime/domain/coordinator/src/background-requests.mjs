@@ -23,7 +23,7 @@ export class BackgroundRequests {
     write(value) {
         this.context.db.prepare('INSERT OR REPLACE INTO coordinator_state (key,value) VALUES (?,?)').run(storageKey(value.owner, value.key), JSON.stringify(value));
     }
-    accept(owner, key, digest) {
+    accept(owner, key, digest, writerFence) {
         this.alive();
         return this.context.transaction(() => {
             const prior = this.read(owner, key);
@@ -32,7 +32,7 @@ export class BackgroundRequests {
                     throw new Error('request-conflict: Background request key changed content');
                 return { prior: true, record: prior };
             }
-            const record = { owner, key, digest, state: 'accepted', operations: [] };
+            const record = { owner, key, digest, state: 'accepted', operations: [], acceptedAt: Date.now(), lastProgressAt: Date.now(), writerFence };
             this.write(record);
             return { prior: false, record };
         });
@@ -61,8 +61,17 @@ export class BackgroundRequests {
             if (!value)
                 throw new Error('Background request not admitted');
             change(value);
+            value.lastProgressAt = Date.now();
             this.write(value);
         });
+    }
+    lifecycleReasons() {
+        return this.pending().map(record => ({ kind: 'task', id: storageKey(record.owner, record.key),
+            owner: record.owner, state: record.state, acceptedAt: record.acceptedAt ?? null,
+            writerFence: record.writerFence ?? null,
+            lastProgressAt: record.lastProgressAt ?? null, executionDeadline: null, nextDeadline: null,
+            operations: record.operations.map(({ operationId, taskId }) => ({ operationId, taskId })),
+            recovery: 'drain-accepted-background-request-until-journal-return-or-authoritative-handoff' }));
     }
     hasPending() {
         this.alive();

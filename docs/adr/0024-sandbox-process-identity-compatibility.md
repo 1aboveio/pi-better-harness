@@ -1,5 +1,7 @@
 # Confined macOS process identity compatibility
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Accepted. Extends ADR 0011's Process Read adapters. Tracked in #834.

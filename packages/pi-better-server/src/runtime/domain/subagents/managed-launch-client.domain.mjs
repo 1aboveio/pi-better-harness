@@ -7,13 +7,16 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
 import { ownerBindingFromContext, getWorkerOperationService, resolveProductionSchemas, DEFAULT_WORKER_BRIDGE_TOOLS } from "./worker-waits.domain.mjs";
 import { processStartToken } from "./registry.domain.mjs";
-import { WorkClient } from "./shared-work-client.mjs";
+import { connectWorkClient } from "./shared-work-client.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 import { openSharedCatalog } from "./shared-catalog.domain.mjs";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.domain.mjs";
 import { canonicalJson } from "./operation-bridge-types.domain.mjs";
+import { activeChildProviders } from "./config.domain.mjs";
+import { captureLaunchContext } from "./launch-context.domain.mjs";
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
 export async function submitManagedLaunch(pi, ctx, key, tool, params) {
+    ctx = captureLaunchContext(ctx);
     mkdirSync(getAgentDir(), { recursive: true });
     const root = realpathSync(getAgentDir());
     const catalog = await openSharedCatalog(ctx.cwd, root);
@@ -21,12 +24,12 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
     const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
     if (registration.agentDir !== root || registration.version !== 1)
         throw new Error("Invalid runtime registration");
-    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"]);
     const directory = join(root, "subagent-launch-admission");
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077))
         throw new Error("Unsafe launch admission directory");
+    const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"]);
     const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
     let unsubscribe;
     try {
@@ -40,7 +43,7 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
         const payload = { version: 1, id, secretHash: createHash("sha256").update(secret).digest("hex"), instanceId: hello.instanceId,
             owner, pid: process.pid, start: processStartToken(process.pid), projectTrusted: ctx.isProjectTrusted(),
             background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1 || nativeBackgroundCapability(pi), tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
-            permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+            activeProviders: activeChildProviders(pi), permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
             catalogAuthority, key, tool, params };
         const staging = `${path}.tmp`;
         writeFileSync(staging, JSON.stringify(payload), { flag: "wx", mode: 0o600 });

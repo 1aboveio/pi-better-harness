@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 
 import type {
   ExtensionAPI,
@@ -105,7 +106,7 @@ test("active background work adds completion-audit guidance to the agent prompt"
   await handlers.get("session_shutdown")?.({}, ctx);
 });
 
-test("idle sessions sleep until provider activity needs polling", async (t) => {
+test("notifying providers sleep between real activity changes even while running", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
@@ -161,7 +162,7 @@ test("idle sessions sleep until provider activity needs polling", async (t) => {
   assert.ok(afterWake > afterStartup, "provider changes wake one immediate collection");
   t.mock.timers.tick(2_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(collections > afterWake, "owned running work keeps polling active");
+  assert.equal(collections, afterWake, "owned notifying work does not need polling");
 
   active = false;
   activityChanged?.();
@@ -218,6 +219,13 @@ test("only the slash command creates a goal and installs an observability-safe w
   extension(pi);
 
   assert.equal(tools.has("create_goal"), false);
+  let providerReads = 0;
+  pi.events.emit("pi-better-goal:register-provider", { id: "subagents", activityVersion: 1,
+    onActivityChanged: () => () => {}, getActivity: () => {
+      providerReads++;
+      return { providerId: "subagents", items: [], nextDeadline: null };
+    },
+  });
   assert.equal(tools.has("get_goal"), true);
   assert.equal(tools.has("update_goal"), true);
 
@@ -265,7 +273,26 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.match(line ?? "", /goal active \d+:\d{2} Ship slash-only goals/);
 
 
-  t.mock.timers.tick(9_999);
+  const require = createRequire(import.meta.url);
+  const fs = require("node:fs"), sqlite = require("node:sqlite"), net = require("node:net");
+  const original = new Map(["readFileSync", "statSync", "openSync", "readdirSync"].map(name => [name, fs[name]]));
+  const Database = sqlite.DatabaseSync, socketWrite = net.Socket.prototype.write;
+  let io = 0;
+  for (const [name, method] of original) fs[name] = (...args: any[]) => { io++; return method(...args); };
+  sqlite.DatabaseSync = class extends Database { constructor(...args: any[]) { super(...args); io++; } };
+  net.Socket.prototype.write = function(...args: any[]) { io++; return socketWrite.apply(this, args); };
+  syncBuiltinESMExports();
+  const readsBeforeTick = providerReads;
+  try {
+    component.render(80);
+    t.mock.timers.tick(9_999);
+  } finally {
+    for (const [name, method] of original) fs[name] = method;
+    sqlite.DatabaseSync = Database; net.Socket.prototype.write = socketWrite;
+    syncBuiltinESMExports();
+  }
+  assert.equal(io, 0, "elapsed-only timer and render read no filesystem, SQLite or socket");
+  assert.equal(providerReads, readsBeforeTick, "elapsed-only timer and render do not collect activity");
   assert.equal(renderRequests, 1, "active clock does not repaint every second");
   t.mock.timers.tick(1);
   assert.equal(renderRequests, 2, "active clock requests one coarse refresh");

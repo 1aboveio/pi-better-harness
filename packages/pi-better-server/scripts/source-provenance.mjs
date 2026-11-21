@@ -16,7 +16,7 @@ export function sourceProvenance(workspace) {
   const files = [];
   const walk = relative => {
     for (const entry of readdirSync(join(workspace, relative), { withFileTypes: true })) {
-      if (['node_modules', '.git', 'dist', 'coverage'].includes(entry.name)) continue;
+      if (['node_modules', '.git', '.work', 'dist', 'coverage'].includes(entry.name)) continue;
       const path = `${relative}/${entry.name}`;
       if (entry.isDirectory()) walk(path);
       else if (entry.isFile()) files.push(path);
@@ -26,6 +26,6 @@ export function sourceProvenance(workspace) {
   for (const file of ['package.json', 'package-lock.json']) if (existsSync(join(workspace, file))) files.push(file);
   const manifest = files.sort().map(path => ({ path, sha256: createHash('sha256').update(readFileSync(join(workspace, path))).digest('hex') }));
   return { head, dirty, kind: head ? 'git-checkout' : 'source-copy-without-git',
-    manifest: { algorithm: 'sha256', scope: 'packages and scripts excluding node_modules/dist/coverage, plus root package manifests',
+    manifest: { algorithm: 'sha256', scope: 'packages and scripts excluding .git/.work/node_modules/dist/coverage, plus root package manifests',
       files: manifest.length, sha256: createHash('sha256').update(JSON.stringify(manifest)).digest('hex') } };
 }

@@ -5,8 +5,7 @@
  * - Guarded tools are harness adapters that go through the task's guarded file
  *   operations, so the file rules govern them. Today: apply_patch.
  * - Trusted tools are extension tools admitted by name AND owning package.
- *   They run in the child Pi process, outside the file rules; a human ticks each
- *   one in /sandbox. Network tools are refused while Network is Off.
+ *   They run in the child Pi process, outside the file rules. The launch record pins their source. Network tools are refused while Network is Off.
  */
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -97,6 +96,12 @@ export function toolPackage(tool: ToolSource): DiscoveredTool | undefined {
     return { name: tool.name, package: pkg, root: base };
 }
 
+export function supportsChildProvider(name: string, pkg: string, root: string): boolean {
+    if (RESERVED_TOOL_NAMES.includes(name)) return false;
+    const harnessOwners = [pkg, root].map(id => id.replace(/\/+$/, "")).filter(id => HARNESS_PACKAGES.test(id));
+    return !harnessOwners.length || (SSH_TOOL_NAMES.includes(name) && harnessOwners.every(id => SSH_PACKAGE.test(id)));
+}
+
 /** Candidate trusted tools, excluding core builtins, guarded names and non-SSH harness tools. */
 export function discoverTrustedTools(tools: readonly ToolSource[]): DiscoveredTool[] {
     const found: DiscoveredTool[] = [];
@@ -104,9 +109,7 @@ export function discoverTrustedTools(tools: readonly ToolSource[]): DiscoveredTo
         if (RESERVED_TOOL_NAMES.includes(tool.name)) continue;
         const owner = toolPackage(tool);
         if (!owner) continue;
-        const harnessOwners = [owner.package, owner.root].map((id) => id.replace(/\/+$/, ""))
-            .filter((id) => HARNESS_PACKAGES.test(id));
-        if (harnessOwners.length && !(SSH_TOOL_NAMES.includes(tool.name) && harnessOwners.every((id) => SSH_PACKAGE.test(id)))) continue;
+        if (!supportsChildProvider(tool.name, owner.package, owner.root)) continue;
         if (!found.some((t) => t.name === owner.name && t.package === owner.package)) {
             found.push(tool.sourceInfo?.source === "builtin" ? { ...owner, source: "builtin" } : owner);
         }

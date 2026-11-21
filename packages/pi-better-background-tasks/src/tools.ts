@@ -1,7 +1,11 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  truncateToWidth as piTruncateToWidth,
+  visibleWidth as piVisibleWidth,
+  wrapTextWithAnsi as piWrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { advertiseBackgroundAdapter } from "./adapter-contract.js";
-import { formatBatchLaunch, spawnTaskBatch } from "./batch.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import {
   classifyOwnership,
@@ -18,26 +22,19 @@ import {
 import { cursorKind, readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.js";
 import { registerDeliveryObserver } from "./delivery-observer.js";
-import {
-  formatWaitView,
-  getObservedWaitHost,
-  observedWaitServiceUnavailableReason,
-  type DurableTaskKind,
-  type DurableLaunch,
-  type WaitView,
-} from "./observed-waits.js";
-import { backgroundObservation } from "./work-observation.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import type { DurableTaskKind, DurableLaunch, WaitView } from "./observed-waits.js";
+import { backgroundListNeedsHistory, backgroundObservation } from "./work-observation.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
-import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams, type BackgroundTaskRuntime } from "./runtime.js";
-import { runTaskMaintenance } from "./maintenance.js";
+import type { WatchTaskParams, BackgroundTaskRuntime } from "./runtime.js";
 import { backgroundProcessDiagnosticsAccess, ForegroundSandboxBlockedError } from "./sandbox.js";
 import { inspectTaskProcess } from "./task-diagnostics.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
-import { isTerminalStatus } from "./types.js";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.js";
 
 export { formatLaunch } from "./output.js";
 
-const defaultRuntime = { awaitFirstWatchCheck, resumeRunningTask, spawnTask, startWatchTask, stopTask };
+type ToolRuntime = Pick<BackgroundTaskRuntime, "awaitFirstWatchCheck" | "resumeRunningTask" | "spawnTask" | "startWatchTask" | "stopTask">;
 
 const JsonPathSchema = Type.String({
   pattern: "^\\$",
@@ -178,7 +175,7 @@ const IdParams = Type.Object({
   ...CursorFields,
 });
 const HistoryField = {
-  diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires current Process access Read in both Main and Background tasks. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
+  diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires Process access Read in each enabled sandbox profile (Main and Background tasks); unavailable under Main confinement. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
   history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
 };
 const StatusParams = Type.Object({
@@ -299,8 +296,7 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
   "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
 
-export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options: { resumeLocal?: boolean } = {}): void {
-  const { resumeRunningTask, spawnTask } = runtime;
+export function registerTools(pi: ExtensionAPI, runtime?: ToolRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options: { resumeLocal?: boolean } = {}): void {
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
   const schemas = new Map<string, object>();
@@ -316,12 +312,14 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     setCallbackBatchContext(pi, ctx);
     activeSession = getCallbackOrigin(ctx);
     if (options.resumeLocal !== false) {
-    for (const meta of listMetasForOrigin(activeSession)) {
-      if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
-        resumeRunningTask(pi, meta, getActiveSession);
+      const { resumeRunningTask } = runtime ?? await import("./runtime.js");
+      const { runTaskMaintenance } = await import("./maintenance.js");
+      for (const meta of listMetasForOrigin(activeSession)) {
+        if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
+          resumeRunningTask(pi, meta, getActiveSession);
+        }
       }
-    }
-    runTaskMaintenance({ activeOrigin: activeSession });
+      runTaskMaintenance({ activeOrigin: activeSession });
     }
   });
   pi.on("agent_start", (_event, ctx) => {
@@ -360,6 +358,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
         refreshNavigator(ctx);
         return text(durable, launchReceipt(receipt));
       }
+      const { spawnTask } = runtime ?? await import("./runtime.js");
       const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, origin, getActiveSession));
       refreshNavigator(ctx);
       return text(launched);
@@ -374,6 +373,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     parameters: BatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
+      const { formatBatchLaunch, spawnTaskBatch } = await import("./batch.js");
       const launched = spawnTaskBatch(pi, params, ctx.cwd, activeSession, getActiveSession, {}, runtime);
       refreshNavigator(ctx);
       return text(formatBatchLaunch(launched), launched);
@@ -456,7 +456,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
         refreshNavigator(ctx);
         return text(durable);
       }
-      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime ?? await import("./runtime.js"));
       refreshNavigator(ctx);
       return text(result);
     },
@@ -473,7 +473,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
+      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime ?? await import("./runtime.js"), refreshNavigator);
     },
   });
 
@@ -487,7 +487,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     },
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
+      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime ?? await import("./runtime.js"), refreshNavigator);
     },
   });
 
@@ -503,14 +503,14 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const host = getObservedWaitHost(pi);
       if (!host?.available) {
-        return text(observedWaitServiceUnavailableReason(pi)
+        return text((await import("./observed-waits.js")).observedWaitServiceUnavailableReason(pi)
           ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
       }
       try {
         const wait = host.usesServerResults
           ? await host.superviseParentWait(ctx, params.task_ids, params.continuation_note)
           : host.waitForParent(ctx, params.task_ids, params.continuation_note);
-        return text(formatWaitView(wait), wait);
+        return text((await import("./observed-waits.js")).formatWaitView(wait), wait);
       } catch (error) {
         return text(`Wait was not registered: ${readableError(error)}`);
       }
@@ -525,7 +525,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const host = getObservedWaitHost(pi);
       if (!host?.available) {
-        return text(observedWaitServiceUnavailableReason(pi)
+        return text((await import("./observed-waits.js")).observedWaitServiceUnavailableReason(pi)
           ?? "Observed waits are unavailable in this session; no wait was consumed.");
       }
       try {
@@ -571,6 +571,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
       try {
         const waits = host.listWaitsForParent(ctx, { pendingOnly: params.pending_only === true });
         if (waits.length === 0) return text("No durable waits for this session.");
+        const { formatWaitView } = await import("./observed-waits.js");
         return text(waits.map((wait: WaitView) => formatWaitView(wait)).join("\n\n"), waits);
       } catch (error) {
         return text(`Waits could not be listed: ${readableError(error)}`);
@@ -671,7 +672,7 @@ async function actionText(
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
   signal: AbortSignal | undefined,
-  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime>,
+  runtime: ToolRuntime,
   refreshNavigator: typeof refreshBackgroundTasksNavigator,
 ) {
   if (params.action === "log" && params.id) {
@@ -691,7 +692,7 @@ async function runAction(
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
   signal: AbortSignal | undefined,
-  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime>,
+  runtime: ToolRuntime,
   refreshNavigator: typeof refreshBackgroundTasksNavigator,
   onLaunch?: (launch: DurableLaunch) => void,
 ): Promise<string> {
@@ -746,7 +747,7 @@ async function runAction(
   }
 }
 
-/** Shared history applies ownership, filters and paging before metadata crosses the socket. */
+/** Ordinary lists reuse retained activity; explicit filtered/paged lists open history. */
 async function durableAwareList(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
@@ -754,10 +755,16 @@ async function durableAwareList(
   ctx: ExtensionContext,
 ): Promise<string> {
   const options = listOptions(params, origin);
-  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true,
+  const history = backgroundListNeedsHistory(params);
+  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, history, params.all === true,
     { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
   if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
-  const legacy = formatList(options, snapshot?.backgroundIndex);
+  const index = snapshot?.backgroundIndex ?? (snapshot ? { records: snapshot.rows
+    .map((row: any) => ({ found: true, meta: row.meta.durable ? { ...row.meta,
+      callbackOrigin: { cwd: row.meta.owner.workspace, sessionId: row.meta.owner.sessionId },
+      logPath: row.meta.logPaths?.stdout ?? "" } : row.meta }))
+    .sort((a: any, b: any) => b.meta.startedAt - a.meta.startedAt || b.meta.id.localeCompare(a.meta.id)) } : undefined);
+  const legacy = formatList(options, index);
   if (snapshot) return legacy;
   const host = getObservedWaitHost(pi);
   if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string") return legacy;
@@ -925,9 +932,9 @@ export async function launchWatch(
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
   waitMs = FIRST_WATCH_CHECK_WAIT_MS,
   signal?: AbortSignal,
-  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime,
+  runtime?: ToolRuntime,
 ): Promise<string> {
-  const { startWatchTask, awaitFirstWatchCheck } = runtime;
+  const { startWatchTask, awaitFirstWatchCheck } = runtime ?? await import("./runtime.js");
   let meta: BackgroundTaskMeta;
   try {
     meta = startWatchTask(pi, params, cwd, callbackOrigin, getActiveSession);
@@ -954,7 +961,8 @@ function getCallbackOrigin(ctx: ExtensionContext | undefined): BackgroundTaskCal
     sessionId = undefined;
     unavailable = true;
   }
-  const origin = { cwd: ctx?.cwd ?? "", sessionId };
+  const origin: BackgroundTaskCallbackOrigin = { cwd: ctx?.cwd ?? "", sessionId,
+    branchId: ctx?.sessionManager?.getLeafId?.() ?? null };
   if (unavailable) unavailableSessionOrigins.add(origin);
   return origin;
 }
@@ -1042,29 +1050,34 @@ function renderLines(lines: string[], mode: "truncate" | "wrap" = "truncate") {
   };
 }
 
+/**
+ * Split one display line into rows of at most `width` terminal columns.
+ *
+ * Measures columns rather than characters: a CJK grapheme or emoji occupies two,
+ * so counting characters emitted rows wider than the width Pi asked for. Pi
+ * asserts every rendered line fits the terminal and exits the process when one
+ * does not, which turned any log holding double-width text into a crash that
+ * replayed on resume, because the tool result stays in session history.
+ */
 function wrapLineToVisibleWidth(line: string, width: number): string[] {
   const str = String(line ?? "");
   const max = Math.max(1, Number(width) || 80);
-  if (truncateToVisibleWidth(str, max) === str) return [str];
-  const out: string[] = [];
-  let current = "";
-  let visible = 0;
-  for (const char of str) {
-    if (visible >= max) {
-      out.push(current);
-      current = "";
-      visible = 0;
-    }
-    current += char;
-    visible += 1;
-  }
-  out.push(current);
-  return out;
+  if (piVisibleWidth(str) <= max) return [str];
+  const wrapped = piWrapTextWithAnsi(str, max);
+  return (wrapped.length > 0 ? wrapped : [str]).map((row) => fitToVisibleWidth(row, max));
 }
 
 function truncateToVisibleWidth(value: string, width: number): string {
   const max = Math.max(0, Math.floor(width || 0));
-  return String(value ?? "").slice(0, max);
+  return fitToVisibleWidth(String(value ?? ""), max);
+}
+
+/** Last resort for anything a wrap missed: never return a line wider than `max`. */
+function fitToVisibleWidth(value: string, max: number): string {
+  const str = String(value ?? "");
+  const limit = Math.max(0, Math.floor(max || 0));
+  if (piVisibleWidth(str) <= limit) return str;
+  return piTruncateToWidth(str, limit, "");
 }
 
 async function formatStop(
@@ -1073,9 +1086,9 @@ async function formatStop(
   _ctx: ExtensionContext,
   getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
   options: OutputOptions = {},
-  runtime: Pick<BackgroundTaskRuntime, "stopTask"> = defaultRuntime,
+  runtime?: Pick<BackgroundTaskRuntime, "stopTask">,
 ): Promise<string> {
-  const { stopTask } = runtime;
+  const { stopTask } = runtime ?? await import("./runtime.js");
   const existing = inspectMeta(id);
   if (!existing.meta && !existing.found) return formatStopResult(existing, options);
   if (!existing.meta) return formatMissingTask(existing, options);

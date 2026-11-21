@@ -4,6 +4,8 @@ import type { RunMeta } from "./registry.ts";
 
 /** Fixed server adapter port; never deserialized from a socket request. */
 export interface ManagedLaunchPort {
+    observeHealth?(reconcile: (ids: readonly string[]) => void): () => void;
+    activeProviders?(): Record<string, string>;
     backgroundTools(): readonly string[];
     readonly owner: { pid: number; start?: string };
     readonly identity: { root: string; instance: string; epoch: number };
@@ -18,4 +20,6 @@ export interface ManagedLaunchPort {
     workerCommand(args: string[]): { file: string; fileArgs: string[] };
     beforeSpawn(input: { id: string; sessionId: string; lease: string; leasePath: string; preflightPath: string; policyPath?: string; permissions: unknown; recoveryMeta: RunMeta; recipe: NonNullable<RunMeta["recipe"]> }): Record<string, string>;
     spawned(id: string, pid: number): void;
+    /** Private fixture/owner observation, never a serialized execution capability. */
+    observeExit?(id: string, completion: Promise<void>): void;
 }

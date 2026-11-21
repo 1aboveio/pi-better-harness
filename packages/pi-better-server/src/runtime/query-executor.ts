@@ -4,19 +4,25 @@ import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
+import { executionPhases, inventoryPhases } from "./read-watchdog-probe.ts";
+import { notifyWorkBudget } from "./work-budget.ts";
+import { HostSourceWatches } from "./source-watch.ts";
 
 export interface EncodedRead { json: string }
-interface Waiter { connection: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
+interface Waiter { connection: number; expiresAt: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
 interface Query {
   id: number; key?: string; command: Record<string, unknown>; connection: number;
-  enqueued: number; started?: number; waiters: Set<Waiter>;
+  enqueued: number; started?: number; progressAt: number; waiters: Set<Waiter>;
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
+  queryCacheDiagnostics?: boolean;
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
+  logWatchdog?: (line: string) => void;
+  budgetBuffer?: SharedArrayBuffer;
   onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
@@ -24,6 +30,7 @@ export interface QueryExecutorOptions {
 /** One root, one read worker, one admitted operation at a time. No mutation RPC. */
 export class WorkQueryExecutor {
   private worker: Worker;
+  private sourceWatches = new HostSourceWatches();
   private streams = new Map<number, Stream>();
   private workerConnections = new Set<number>();
   private queue: Query[] = [];
@@ -41,7 +48,10 @@ export class WorkQueryExecutor {
   private internalRecoveryDemand = false;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private watchdog?: ReturnType<typeof setInterval>;
+  private watchdogCheck?: ReturnType<typeof setImmediate>;
   private lastResponse = performance.now();
+  private heartbeat!: BigInt64Array;
+  private probe?: Int32Array;
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
     status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
@@ -59,29 +69,91 @@ export class WorkQueryExecutor {
   private options: QueryExecutorOptions;
   private agentDir: string;
   readonly instanceId: string;
+  requestReasons() {
+    return [...this.queue, ...(this.active ? [this.active] : [])].flatMap(query => [...query.waiters].map(waiter => ({
+      kind: 'read-request', id: query.id, connection: waiter.connection, generation: this.workerGeneration,
+      phase: query.started === undefined ? 'queued' : 'dispatched',
+      lastProgressAt: query.progressAt,
+      nextDeadline: waiter.expiresAt, executionDeadline: null,
+      recovery: 'caller-timeout-or-disconnect-removes-waiter-without-cancelling-physical-worker-work',
+    })));
+  }
 
   constructor(agentDir: string, instanceId: string, options: QueryExecutorOptions = {}) {
     this.options = options; this.instanceId = instanceId; this.agentDir = agentDir;
     this.lag.enable();
     this.worker = this.startWorker();
+    const watchdogMs = this.options.watchdogMs ?? 4000;
+    let previousCheck = performance.now();
+    let resumedAt = previousCheck;
     this.watchdog = setInterval(() => {
-      if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
-        this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
-      }
-    }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
+      const now = performance.now();
+      // After system sleep both threads can resume with an expired heartbeat.
+      if (now - previousCheck > watchdogMs) resumedAt = now;
+      previousCheck = now;
+      if (this.closed || this.failure || now - Math.max(this.lastResponse, resumedAt) <= watchdogMs) return;
+      // Drain queued worker responses before treating a delayed timer as worker silence.
+      this.watchdogCheck ??= setImmediate(() => {
+        this.watchdogCheck = undefined;
+        this.checkWatchdog();
+      });
+      this.watchdogCheck.unref();
+    }, Math.min(250, watchdogMs / 4));
     this.watchdog.unref();
   }
 
+  private checkWatchdog() {
+      const silenceMs = performance.now() - this.lastResponse;
+      if (!this.closed && !this.failure && silenceMs > (this.options.watchdogMs ?? 4000)) {
+        const tick = Atomics.load(this.heartbeat, 0);
+        const heartbeatAgeMs = tick === 0n ? null : Number(process.hrtime.bigint() - tick) / 1e6;
+        // A busy parent can run the overdue watchdog before draining queued messages.
+        if (heartbeatAgeMs !== null && heartbeatAgeMs <= (this.options.watchdogMs ?? 4000)) return;
+        if (this.probe) {
+          const evidence = { generation: this.workerGeneration, silenceMs: Math.round(silenceMs),
+            heartbeatAgeMs: heartbeatAgeMs === null ? null : Math.round(heartbeatAgeMs),
+            mainLoopMaxDelayMs: Math.round(this.lag.max / 1e6), active: !!this.active, queued: this.queue.length,
+            execution: executionPhases[Atomics.load(this.probe, 0)], inventory: inventoryPhases[Atomics.load(this.probe, 1)] };
+          try { this.options.logWatchdog?.(`Read worker watchdog: ${JSON.stringify(evidence)}`); } catch { /* preserve watchdog behavior */ }
+        }
+        this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
+      }
+  }
+
   private startWorker() {
+    if (this.options.budgetBuffer) {
+      // startWorker runs only initially or after the preceding thread exited.
+      // A dead generation cannot retain source credits in the shared budget.
+      const counts = new Int32Array(this.options.budgetBuffer);
+      Atomics.store(counts, 1, 0); Atomics.store(counts, 2, 0);
+      notifyWorkBudget(this.options.budgetBuffer);
+    }
+    const generation = this.workerGeneration;
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
+    this.heartbeat = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
+    this.probe = this.options.logWatchdog ? new Int32Array(new SharedArrayBuffer(8)) : undefined;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions },
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer },
+        queryCacheDiagnostics: this.options.queryCacheDiagnostics === true, probe: this.probe, heartbeat: this.heartbeat },
     });
-    worker.on("message", message => { if (worker === this.worker) this.receive(message); });
-    worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });
+    worker.on("message", message => {
+      if (this.sourceWatches.handle(generation, message, value => {
+        if (worker === this.worker && !this.exited) worker.postMessage(value);
+      })) return;
+      if (worker === this.worker) this.receive(message);
+    });
+    worker.on("error", error => {
+      if (worker !== this.worker) return;
+      const original = String(error);
+      // Preserve the SQLite producer that the forwarded Error message omits.
+      const producer = /database (?:is locked|table is locked)/.test(original)
+        ? `\n${String(error instanceof Error ? error.stack ?? error : error).split("\n").slice(0, 12).join("\n").slice(0, 4096)}` : "";
+      this.fail(new Error(`runtime-unhealthy: read worker failed: ${original}${producer}`, { cause: error }));
+    });
     worker.on("exit", code => {
       if (worker !== this.worker) return;
       this.exited = true;
+      void this.sourceWatches.revoke(generation).catch(() => {});
       const sqlite = this.workerMetrics.sqlite;
       this.workerMetrics = { ...this.workerMetrics, sourceWatchers: 0, coordinatorConnections: 0, indexConnections: 0,
         ...(sqlite ? { sqlite: { ...sqlite, active: 0 } } : {}) };
@@ -156,7 +228,7 @@ export class WorkQueryExecutor {
   }
 
   metrics() {
-    return { ...this.workerMetrics, executor: { active: this.active ? 1 : 0, queued: this.queue.length,
+    return { ...this.workerMetrics, sourceSubscriptions: this.sourceWatches.metrics(), executor: { active: this.active ? 1 : 0, queued: this.queue.length,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
       cancelled: this.cancelled, timeouts: this.timeouts, queueTimeouts: this.queueTimeouts, callerTimeouts: this.callerTimeouts,
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
@@ -206,13 +278,14 @@ export class WorkQueryExecutor {
         return Promise.reject(new Error("runtime-overloaded: read queue is full; retry later"));
       }
       const id = ++this.counter;
-      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), waiters: new Set() };
+      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), progressAt: Date.now(), waiters: new Set() };
       this.queue.push(query);
       if (key) this.flights.set(key, query);
     }
     const admitted = query;
     const result = new Promise<EncodedRead>((resolve, reject) => {
       const waiter: Waiter = { connection, resolve, reject,
+        expiresAt: Date.now() + (this.options.timeoutMs ?? 4000),
         deadline: setTimeout(() => this.expire(admitted, waiter), this.options.timeoutMs ?? 4000) };
       admitted.waiters.add(waiter);
     });
@@ -224,6 +297,7 @@ export class WorkQueryExecutor {
     if (this.failure || this.active || !this.queue.length) return;
     const query = this.active = this.queue.shift()!;
     query.started = performance.now();
+    query.progressAt = Date.now();
     this.waits.push(performance.now() - query.enqueued);
     if (this.waits.length > 128) this.waits.shift();
     const stream = this.streams.get(query.connection);
@@ -327,6 +401,7 @@ export class WorkQueryExecutor {
     this.queue = []; this.active = undefined;
     for (const connection of this.streams.keys()) this.event(connection, JSON.stringify({ type: "event",
       event: { type: "resync_required", reason: error.message, instanceId: this.instanceId } }) + "\n");
+    void this.sourceWatches.revoke(this.workerGeneration).catch(() => {});
     this.termination = this.worker.terminate();
     this.worker.unref();
   }
@@ -334,12 +409,13 @@ export class WorkQueryExecutor {
   async close() {
     this.closed = true;
     if (this.watchdog) clearInterval(this.watchdog);
+    if (this.watchdogCheck) clearImmediate(this.watchdogCheck);
     if (this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined; }
     this.fail(new Error("runtime-unavailable: query executor closed"));
     for (const connection of this.streams.keys()) this.detach(connection);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Bound graceful close even while native SQLite is still finishing a call.
-    await Promise.race([this.termination, new Promise<void>(resolve => { timeout = setTimeout(resolve, 1000); })]);
+    await Promise.race([Promise.all([this.termination, this.sourceWatches.close().catch(() => {})]), new Promise<void>(resolve => { timeout = setTimeout(resolve, 1000); })]);
     if (timeout) clearTimeout(timeout);
   }
 }

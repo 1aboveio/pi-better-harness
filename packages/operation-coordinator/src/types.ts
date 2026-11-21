@@ -18,7 +18,7 @@
  *   spawned, so a crash is reconciled instead of relaunched.
  */
 
-/** Schema version this build writes and accepts. Any other version is refused. */
+/** Schema version this build writes after creating or migrating a store. */
 export const SCHEMA_VERSION = 4;
 
 /** Who receives an operation's result and decides what happens next. */
@@ -106,6 +106,8 @@ export interface RegisterOperationInput {
      */
     launchToken: string;
     owner: OwnerIdentity;
+    /** Exact registered worker attempt for this launch. Omit when no binding is known. */
+    assignmentAttemptId?: string;
     observer: ObserverIdentity;
     supervision?: SupervisionIdentity | null;
     /** Reference to the permission/authority snapshot. Never credential material. */
@@ -121,6 +123,8 @@ export interface OperationRecord {
     taskId: string;
     launchToken: string;
     owner: OwnerIdentity;
+    /** Immutable launch provenance. Absent on unbound and legacy operations. */
+    assignmentAttemptId?: string;
     observer: ObserverIdentity;
     supervision: SupervisionIdentity | null;
     authorityRef: string | null;

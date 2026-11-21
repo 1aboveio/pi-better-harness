@@ -10,6 +10,18 @@ interface ActivityProvider {
 
 /** One bus per hosted session; legacy providers may conservatively report process-wide work. */
 export class SessionActivity {
+  private recordCounter = 0;
+  private handlerRecords = new Map<number, number>();
+  private providerRecords = new Map<string, { lastProgressAt: number; state: string }>();
+  private refreshStartedAt: number | undefined;
+  lifecycleReasons() {
+    return [
+      ...[...this.handlerRecords].map(([id, lastProgressAt]) => ({ kind: 'hosted-handler', id, lastProgressAt })),
+      ...[...this.providerRecords].map(([id, record]) => ({ kind: 'hosted-provider', id, ...record })),
+      ...(this.refreshStartedAt === undefined ? [] : [{ kind: 'hosted-observation', id: 'provider-refresh', lastProgressAt: this.refreshStartedAt }]),
+      ...(this.unobservable ? [{ kind: 'hosted-retention', id: 'caller-owned-loader', lastProgressAt: null, recovery: 'caller-owned-loader-cannot-prove-background-idleness' }] : []),
+    ].map(record => ({ executionDeadline: null, nextDeadline: null, recovery: 'existing-hosted-session-idle-and-admission-policy', ...record }));
+  }
   readonly events = createEventBus();
   private readonly runtimeUnsubscribers = new Set<() => void>();
   /** Extensions share the host bus, but their subscriptions end at each loader reload. */
@@ -27,16 +39,18 @@ export class SessionActivity {
         // An emit already in progress can still hold a removed listener.
         if (!this.runtimeUnsubscribers.has(release) || this.runtimeRevoked) return;
         this.pendingHandlers++;
+        const record = ++this.recordCounter;
+        this.handlerRecords.set(record, Date.now());
         let asynchronous = false;
         try {
           const result = handler(data) as unknown as void | Promise<void>;
           if (result && typeof result.then === "function") {
             asynchronous = true;
             this.changed();
-            return Promise.resolve(result).finally(() => { this.pendingHandlers--; this.changed(); });
+            return Promise.resolve(result).finally(() => { this.pendingHandlers--; this.handlerRecords.delete(record); this.changed(); });
           }
           return result;
-        } finally { if (!asynchronous) this.pendingHandlers--; }
+        } finally { if (!asynchronous) { this.pendingHandlers--; this.handlerRecords.delete(record); } }
       });
       const release = () => {
         this.runtimeUnsubscribers.delete(release);
@@ -124,6 +138,7 @@ export class SessionActivity {
     this.unsubscribers.clear();
     for (const unsubscribe of this.runtimeUnsubscribers) unsubscribe();
     this.providers.clear();
+    this.providerRecords.clear();
     this.active = false;
     this.revision++;
   }
@@ -153,6 +168,7 @@ export class SessionActivity {
   refresh(): Promise<void> {
     if (this.disposed || !this.session) return Promise.resolve();
     if (this.refreshing) return this.refreshing;
+    this.refreshStartedAt = Date.now();
     // Defer collection so the guard is installed before invoking arbitrary provider code.
     const run = Promise.resolve().then(async () => {
       let observed: number;
@@ -161,18 +177,24 @@ export class SessionActivity {
         let active = false;
         try {
           const ctx = this.session!.extensionRunner.createContext();
+          this.providerRecords.delete('@context');
           for (const provider of this.providers.values()) {
             try {
               const snapshot = await provider.getActivity(ctx);
-              active ||= snapshot.items.some((item) => item.active);
+              const busy = snapshot.items.some((item) => item.active);
+              if (busy && !this.providerRecords.has(provider.id)) this.providerRecords.set(provider.id, { lastProgressAt: Date.now(), state: 'active' });
+              if (!busy) this.providerRecords.delete(provider.id);
+              active ||= busy;
             } catch (error) {
               // An unavailable owned-work observation cannot establish that work finished.
               active = true;
+              if (!this.providerRecords.has(provider.id)) this.providerRecords.set(provider.id, { lastProgressAt: Date.now(), state: 'observation-unavailable' });
               this.log(`session activity provider ${provider.id} failed: ${String(error)}`);
             }
           }
         } catch (error) {
           active = true;
+          if (!this.providerRecords.has('@context')) this.providerRecords.set('@context', { lastProgressAt: Date.now(), state: 'context-observation-unavailable' });
           this.log(`session activity observation failed: ${String(error)}`);
         }
         if (this.disposed) return;
@@ -181,7 +203,7 @@ export class SessionActivity {
         if (this.busy !== wasBusy) this.changed();
       } while (observed !== this.revision);
     });
-    this.refreshing = run.finally(() => { this.refreshing = undefined; });
+    this.refreshing = run.finally(() => { this.refreshing = undefined; this.refreshStartedAt = undefined; });
     return this.refreshing;
   }
 

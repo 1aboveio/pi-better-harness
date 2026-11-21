@@ -2,14 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { once } from "node:events";
+import { once, EventEmitter } from "node:events";
+import goalExtension from "../../pi-better-goal/src/index.ts";
 import { register, createRequire, syncBuiltinESMExports } from "node:module";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
+import { runtimeWorkFailureState } from "./support/runtime-work-failure-state.ts";
+import { historyPhaseMetrics } from "./support/history-phase-metrics.ts";
 
 function fixtureRoot(name: string) {
   const parent = resolve("../../.work/753");
@@ -17,7 +21,7 @@ function fixtureRoot(name: string) {
   return mkdtempSync(join(parent, `${name}-`));
 }
 
-test("one real daemon shares unchanged scope observations across 1, 5 and 10 socket clients", { timeout: 30000 }, async () => {
+test("one real daemon shares unchanged scope observations across 1, 5 and 10 socket clients", { timeout: 30000 }, async t => {
   const root = fixtureRoot("runtime");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent");
@@ -33,10 +37,12 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: `worker-${i}`, cwd: root,
       status: "completed", startedAt: i, endedAt: Date.now(), callbackOrigin: { cwd: root, sessionId: "parent" },
       operations: { conversationId: `worker-${i}`, workspace: root } }));
+    writeFileSync(join(runs, id, "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
   }
   writeFileSync(join(runs, "sa_shared_0", "output.log"), [
     { type: "tool_execution_start", toolCallId: "display-proof", toolName: "bash", at: Date.now() - 1000, args: {} },
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 100, output: 20, cost: { total: 0.01 } } } },
+    { type: "agent_end", messages: [] },
   ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const child = fork(new URL("./support/work-daemon.ts", import.meta.url), [], {
     execPath: privateRuntimeNode().node, execArgv: ["--import", "tsx"], env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport }, stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -47,10 +53,37 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   const readers: ReturnType<typeof fork>[] = [];
   let proxy: ReturnType<typeof createServer> | undefined;
   const proxySockets = new Set<Socket>();
+  let phase = "daemon-startup";
+  let lastToolRequest: unknown;
+  let capturedPage: any;
+  let suppliedCursor: string | undefined;
+  const requests: unknown[] = [];
+  const cursorIdentity = (cursor?: string) => {
+    if (!cursor) return undefined;
+    try {
+      const [scopeKey, instanceId, tokenRevision, startedAt, id] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+      return { cursor, scopeKey, instanceId, tokenRevision, startedAt, id };
+    } catch (error) { return { cursor, decodeError: String(error) }; }
+  };
+  const snapshotIdentity = (snapshot: any) => snapshot && ({ instanceId: snapshot.instanceId, seq: snapshot.seq,
+    scopeRevision: snapshot.scopeRevision, status: snapshot.status, reason: snapshot.reason,
+    observedRevisionVector: snapshot.observedRevisionVector, totalMatching: snapshot.totalMatching,
+    nextCursor: cursorIdentity(snapshot.nextCursor), rows: snapshot.rows?.slice(0, 4).map((row: any) => ({
+      id: row.meta.id, sourceRevision: row.sourceRevision, assignmentRevision: row.assignment?.revision,
+      cursor: cursorIdentity(row.cursor) })) });
+  const track = (client: WorkClient) => {
+    const request = client.request.bind(client);
+    client.request = (type, params) => {
+      requests.push({ phase, type, params }); if (requests.length > 8) requests.shift();
+      return request(type, params);
+    };
+    return client;
+  };
   try {
     const message = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`daemon startup failed: ${errors}`); })]);
     const socket = (message[0] as { ready: string }).ready;
-    const first = new WorkClient(socket, agent); clients.push(first);
+    const first = track(new WorkClient(socket, agent)); clients.push(first);
+    phase = "initial-subscribe";
     await first.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     if (first.snapshot?.status !== "ready") await new Promise<void>(resolve => {
       const stop = first.onChange(snapshot => { if (snapshot.status === "ready") { stop(); resolve(); } });
@@ -64,11 +97,12 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.active, 2, "one actual index and one actual coordinator connection are retained by the daemon");
+    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index, durable inbox and checkpoints");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
+      phase = `shared-scope-clients-${count}`;
       while (clients.length < count) {
-        const client = new WorkClient(socket, agent); clients.push(client);
+        const client = track(new WorkClient(socket, agent)); clients.push(client);
         await client.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
       }
       for (const client of clients) {
@@ -91,6 +125,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.deepEqual(await actualConnections(), sqliteBefore, "queries do not open extra SQLite connections");
     }
     for (const count of [1, 5, 10]) {
+      phase = `independent-readers-${count}`;
       while (readers.length < count) {
         const reader = fork(new URL("./support/work-reader.mjs", import.meta.url), [], {
           execArgv: [], env: { ...process.env, WORK_SOCKET: socket, WORK_AGENT_DIR: agent,
@@ -114,6 +149,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const extensionPath = new URL("../../pi-better-subagents/index.ts", import.meta.url).href;
     const { default: extension } = await import(extensionPath);
     const handlers = new Map<string, Function>();
+    const goalHandlers = new Map<string, Function>();
+    const events = new EventEmitter();
     const tools = new Map<string, any>();
     const ctx = { cwd: root, mode: "tui", hasUI: true, isIdle: () => true,
       sessionManager: { getSessionId: () => "parent", getBranch: () => [] },
@@ -123,16 +160,35 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const OriginalDatabase = sqlite.DatabaseSync;
     let localConnections = 0;
     try {
-      extension({ on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
+      extension({ events, on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
+      phase = "extension-session-start";
       await handlers.get("session_start")!({}, ctx);
-      sqlite.DatabaseSync = class extends OriginalDatabase { constructor(...args: any[]) { super(...args); localConnections++; } };
+      // The restored foreground subscribes asynchronously. Measure redraws after its first publication.
       const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
+      await t.waitFor(() => assert.equal(hooks.listRows().length, 50), { timeout: 5000 });
+      goalExtension({ events, on: (key: string, fn: Function) => goalHandlers.set(key, fn),
+        registerTool() {}, registerCommand() {}, appendEntry() {}, sendMessage() {} } as never);
+      await goalHandlers.get("session_start")!({}, ctx);
+      const request = WorkClient.prototype.request;
+      let goalQueries = 0;
+      WorkClient.prototype.request = function(type: string, params?: any) {
+        if (type === "runtime_get_snapshot") goalQueries++;
+        return request.call(this, type, params);
+      };
+      try {
+        for (let frame = 0; frame < 60; frame++) {
+          await goalHandlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx);
+        }
+        assert.equal(goalQueries, 0, "warmed Goal with the real Subagent provider sends no full-state socket queries");
+      } finally { WorkClient.prototype.request = request; }
+      sqlite.DatabaseSync = class extends OriginalDatabase { constructor(...args: any[]) { super(...args); localConnections++; } };
       for (let frame = 0; frame < 60; frame++) assert.equal(hooks.listRows().length, 50);
       const displayed = hooks.listRows().find((row: any) => row.id === "sa_shared_0");
       assert.equal(displayed.tool, "bash");
       assert.match(displayed.tokens, /120/);
       assert.ok(displayed.facts.some((fact: string) => /bash/.test(fact)), "cached health facts preserve configured long-tool diagnostics without client I/O");
       const logBefore = await first.request("runtime_get_metrics");
+      phase = "navigator-log-publication";
       appendFileSync(join(runs, "sa_shared_0", "output.log"), JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: Date.now() - 1000 }) + "\n");
       for (let retry = 0; hooks.listRows().find((row: any) => row.id === "sa_shared_0")?.tool !== "read"; retry++) {
         assert.ok(retry < 200, "Navigator did not consume the changed log snapshot");
@@ -142,6 +198,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(logAfter.logProjections - logBefore.logProjections, 1);
       assert.equal(logAfter.assignmentProjections - logBefore.assignmentProjections, 0);
       assert.equal(localConnections, 0, "actual registered provider paints never open the coordinator");
+      phase = "subagent-result";
+      lastToolRequest = { tool: "subagent_result", call: "result", params: { id: "sa_shared_0", all: true } };
       const result = await tools.get("subagent_result").execute("result", { id: "sa_shared_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.revision, first.snapshot!.rows.find(row => row.meta.id === "sa_shared_0")!.assignment.revision);
       assert.equal(result.details.snapshot.instanceId, first.snapshot!.instanceId);
@@ -149,14 +207,21 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.deepEqual(result.details.snapshot.observedRevisionVector, first.snapshot!.observedRevisionVector);
       assert.equal(localConnections, 0, "actual result observation uses the server batch, not a new local projector");
       const list = tools.get("subagent_list");
+      phase = "list-first-page";
+      lastToolRequest = { tool: "subagent_list", call: "list", params: { all: true, limit: 2, max_bytes: 4096, status: ["completed"] } };
       const page = await list.execute("list", { all: true, limit: 2, max_bytes: 4096, status: ["completed"] }, undefined, undefined, ctx);
+      capturedPage = snapshotIdentity(page.details.snapshot);
       assert.equal(page.details.snapshot.totalMatching, 50);
       assert.equal(page.details.snapshot.rows.length, 2);
       const cursor = page.content[0].text.match(/nextCursor=(\S+)/)[1];
+      suppliedCursor = cursor;
+      phase = "list-next-page";
+      lastToolRequest = { tool: "subagent_list", call: "list-next", params: { all: true, limit: 2, max_bytes: 4096, status: ["completed"], cursor } };
       const next = await list.execute("list-next", { all: true, limit: 2, max_bytes: 4096, status: ["completed"], cursor }, undefined, undefined, ctx);
       assert.notEqual(page.details.snapshot.rows[0].meta.id, next.details.snapshot.rows[0].meta.id);
       assert.equal(localConnections, 0, "actual list handler consumes the server index without opening local SQLite");
       let detail;
+      phase = "cached-detail";
       for (let attempt = 0; attempt < 100; attempt++) {
         detail = hooks.renderDetail("sa_shared_0").detail;
         if (detail.status !== "rebuilding") break;
@@ -183,26 +248,33 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(registryIo.getRegistryIoMetrics().metadataFileReads, 0, "registered detail draws consume the cached server snapshot");
       assert.equal(localConnections, 0, "registered detail draws never open a local coordinator");
       assert.ok(displayed.facts.some((fact: string) => /long bash/.test(fact)));
+      phase = "health-threshold-publication";
       writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthLongToolMs: 600000 } } }));
       const thresholdDeadline = Date.now() + 10000;
       while (hooks.listRows().find((row: any) => row.id === "sa_shared_0").facts.some((fact: string) => /long (bash|read)/.test(fact))) {
         assert.ok(Date.now() < thresholdDeadline, "Navigator did not observe new health thresholds");
         await new Promise(resolve => setTimeout(resolve, 20));
       }
+      phase = "health-list";
+      lastToolRequest = { tool: "subagent_list", call: "health-list", params: { all: true, limit: 100 } };
       const refreshed = await tools.get("subagent_list").execute("health-list", { all: true, limit: 100 }, undefined, undefined, ctx);
       assert.ok(refreshed.details.snapshot.rows.length > 0);
       assert.ok(refreshed.details.snapshot.rows.every((row: any) => row.health.thresholds.longToolMs === 600000), "tool and Navigator share the updated judgment");
     } finally {
       sqlite.DatabaseSync = OriginalDatabase;
+      await goalHandlers.get("session_shutdown")?.({}, ctx);
       await handlers.get("session_shutdown")?.({}, ctx);
       for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
+    phase = "explicit-replay-resync";
     const replay = await first.request("runtime_subscribe", { scope: { cwd: root }, sinceSeq: -1, instanceId: first.snapshot!.instanceId });
     assert.equal(replay.resyncRequired, true);
     assert.equal(replay.resyncReason, "replay-truncated");
+    phase = "explicit-instance-resync";
     const epoch = await first.request("runtime_subscribe", { scope: { cwd: root }, sinceSeq: 0, instanceId: "old-instance" });
     assert.equal(epoch.resyncReason, "instance-changed");
     await first.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
+    phase = "external-assignment-publication";
     const changed = new Promise<void>(resolve => {
       const stop = first.onChange(snapshot => {
         if (snapshot.rows.find(row => row.meta.id === "sa_shared_0")?.assignment.state === "waiting") { stop(); resolve(); }
@@ -241,7 +313,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       downstream.on("error", () => upstream.destroy());
     });
     const proxyPath = join(transport, "gap.sock"); proxy.listen(proxyPath); await once(proxy, "listening");
-    const gapped = new WorkClient(proxyPath, agent); clients.push(gapped);
+    phase = "dropped-event-subscribe";
+    const gapped = track(new WorkClient(proxyPath, agent)); clients.push(gapped);
     await gapped.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     let observedGap = false;
     const stopGapObservation = gapped.onChange(snapshot => {
@@ -256,24 +329,32 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const { readFileSync } = await import("node:fs");
     const original = JSON.parse(readFileSync(path, "utf8"));
     dropNext = true;
+    phase = "dropped-event-gap-one";
     const intermediate = waitName(first, "gap-one");
     writeFileSync(path, JSON.stringify({ ...original, name: "gap-one" })); await intermediate;
+    phase = "dropped-event-gap-two";
     const resumed = waitName(gapped, "gap-two");
     writeFileSync(path, JSON.stringify({ ...original, name: "gap-two" })); await resumed;
     assert.equal(dropped, true);
     assert.equal(observedGap, true, "the first complete snapshot after the dropped event reports the gap");
     stopGapObservation();
+    phase = "disconnect-and-reconnect";
     const disconnected = clients.at(-1)!;
     disconnected.close();
     assert.equal(disconnected.snapshot!.status, "degraded");
     assert.ok(disconnected.snapshot!.rows.length > 0, "disconnect preserves stale observations rather than faking an empty scope");
     await assert.rejects(disconnected.resync(), /disconnected/);
-    const reconnected = new WorkClient(socket, agent); clients.push(reconnected);
+    const reconnected = track(new WorkClient(socket, agent)); clients.push(reconnected);
     const fresh = await reconnected.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     assert.equal(fresh.status, "ready");
     assert.equal(fresh.instanceId, first.snapshot!.instanceId);
     assert.equal(fresh.seq, first.snapshot!.seq, "a new transport takes a fresh atomic snapshot after disconnect");
     assert.equal(fresh.rows.find(row => row.meta.id === "sa_shared_0")!.meta.name, "gap-two");
+  } catch (error) {
+    console.error(`Runtime work cursor failure: ${JSON.stringify({ phase, error: String(error), lastToolRequest,
+      requests, suppliedCursor: cursorIdentity(suppliedCursor), capturedPage,
+      cachedClients: clients.slice(0, 12).map(client => snapshotIdentity(client.snapshot)) })}`);
+    throw error;
   } finally {
     await Promise.all(readers.map(async reader => {
       if (reader.exitCode !== null) return;
@@ -288,21 +369,37 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   }
 });
 
-test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 30000 }, async () => {
+// Two graceful daemon shutdowns and reconnects share this end-to-end budget.
+test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 60000 }, async t => {
+  let child: ReturnType<typeof fork> | undefined, launching: ReturnType<typeof fork> | undefined, observation: any;
+  let replacement = "initial";
+  const phase = runtimeWorkFailureState(t, "navigator-replacement", () => {
+    const cached = observation?.workObservation();
+    const process = launching ?? child;
+    return { replacement, child: process && { pid: process.pid, exitCode: process.exitCode, signalCode: process.signalCode, connected: process.connected },
+      observation: cached && { status: cached.status, reason: cached.reason, instanceId: cached.instanceId, seq: cached.seq,
+        active: cached.activity?.active, rows: cached.rows?.length, sample: cached.rows?.slice(0, 8).map((row: any) => ({ id: row.meta.id, status: row.meta.status })) } };
+  });
   const root = fixtureRoot("consumer");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
-  const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE"].map(key => [key, process.env[key]]));
+  const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE", "PI_SERVER_COMMAND"].map(key => [key, process.env[key]]));
+  // The fixture owns both daemon launches. During the gap, consumers must
+  // reconnect to the replacement without staging a competing managed runtime.
+  process.env.PI_SERVER_COMMAND = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   process.env.PI_CODING_AGENT_DIR = agent; process.env.TMPDIR = root; process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
   const launch = async () => {
+    phase(`daemon:${replacement}:ready-message`);
     const worker = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
       env: { ...process.env, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
-    await once(worker, "message"); return worker;
+    launching = worker;
+    await once(worker, "message"); launching = undefined; return worker;
   };
-  let child = await launch();
-  const stop = async () => { if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
-  const until = async (check: () => boolean | Promise<boolean>) => {
+  child = await launch();
+  const stop = async () => { phase(`daemon:${replacement}:exit`); if (child!.exitCode === null) { const exited = once(child!, "exit"); child!.send("stop"); await exited; } };
+  const until = async (label: string, check: () => boolean | Promise<boolean>) => {
+    phase(label);
     const deadline = Date.now() + 10000;
     while (!await check()) { assert.ok(Date.now() < deadline, "production observation did not converge"); await new Promise(resolve => setTimeout(resolve, 10)); }
   };
@@ -312,19 +409,29 @@ test("registered Navigator preserves older active rows and the same consumers re
     ui: { theme: { fg: (_c: string, s: string) => s }, notify() {}, setStatus() {}, setWidget() {}, getEditorComponent() {}, setEditorComponent() {} } };
   try {
     register(new URL("../../pi-better-subagents/tests/pi_host_stub_hooks.mjs", import.meta.url));
+    phase("extension:import");
     const { default: extension } = await import(new URL("../../pi-better-subagents/index.ts", import.meta.url).href);
-    const observation = await import(new URL("../../pi-better-subagents/work-observation.ts", import.meta.url).href);
+    observation = await import(new URL("../../pi-better-subagents/work-observation.ts", import.meta.url).href);
     extension({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} });
+    phase("extension:session-start");
     await handlers.get("session_start")!({}, ctx);
     for (let i = 0; i < 201; i++) {
       const id = `sa_review_${i}`; mkdirSync(join(runs, id));
       writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `worker-${i}`,
         callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
         status: i === 0 ? "running" : "completed", startedAt: i, ...(i ? { endedAt: 1 } : {}) }));
+      writeFileSync(join(runs, id, "output.log"), [
+        { type: "message_end", message: { role: "assistant", usage: { input: 120, cost: { total: 0.01 } } } },
+        { type: "tool_execution_start", toolCallId: "recovery", toolName: "bash", at: Date.now() },
+        { type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } },
+      ].map(event => JSON.stringify(event) + "\n").join(""));
     }
-    await until(() => observation.workObservation()?.activity.active === 1);
-    await until(async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
+    await until("initial:active-observation", () => observation.workObservation()?.activity.active === 1);
+    await until("initial:201-history-list", async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
+    phase("initial:201-history-list-confirmation");
     assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
+    // History can still report indexed rows while Navigator shows a degraded warning.
+    await until("initial:navigator-ready", () => observation.workObservation()?.status === "ready");
     const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
     assert.equal(hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status, "running");
@@ -334,65 +441,131 @@ test("registered Navigator preserves older active rows and the same consumers re
       writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `active-${i}`,
         callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid, status: "running", startedAt: 1000 + i }));
     }
-    await until(() => observation.workObservation()?.activity.active === 202);
+    await until("initial:202-active-pages", () => observation.workObservation()?.activity.active === 202);
     assert.equal(provider.visibleCount(), 202, "active pages are complete beyond the transport page size");
     assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
     for (const mode of ["tool-retry", "subscription-only"]) {
+      replacement = mode;
       const previous = observation.workObservation().instanceId;
       await stop();
-      await until(() => observation.workObservation()?.status === "degraded");
+      await until(`${mode}:disconnect-observed`, () => observation.workObservation()?.status === "degraded");
+      const syncRow = hooks.listRows().find((row: any) => row.id === "runtime-observation");
+      assert.equal(syncRow.name, "Status sync");
+      assert.equal(syncRow.readOnly, true);
+      assert.match(syncRow.primary, /Task status unconfirmed/);
+      const syncDetail = provider.detail("runtime-observation", Date.now());
+      assert.equal(syncDetail.title, "Subagent status sync");
+      assert.match(syncDetail.evidence.text, /disconnect|unavailable|ENOENT/);
+      assert.equal(provider.close("runtime-observation").action, "not-closable");
       assert.ok(observation.workObservation().rows.some((row: any) => row.meta.id === "sa_review_0"));
       child = await launch();
       if (mode === "tool-retry") {
+        phase(`${mode}:active-list`);
         const listed = await observation.observedList({ cwd: root, active: true });
         assert.equal(listed.totalMatching, 202);
+        phase(`${mode}:older-active-assignment`);
         const assignment = await observation.observedAssignment("sa_review_0");
         assert.equal(assignment.assignment.state, "running");
       }
-      await until(() => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
+      await until(`${mode}:same-consumer-new-instance`, () => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
       assert.equal(provider.visibleCount(), 202);
       assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
+      const restored = hooks.listRows().find((row: any) => row.id === "sa_review_0");
+      assert.equal(restored.tool, "bash");
+      assert.match(restored.tokens, /120/);
+      phase(`${mode}:result-tool`);
       const result = await tools.get("subagent_result").execute("review", { id: "sa_review_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.state, "running");
       assert.equal(result.details.snapshot.instanceId, observation.workObservation().instanceId);
+      phase(`${mode}:list-tool`);
+      let listed = await tools.get("subagent_list").execute("recovered-list", { all: true, limit: 100 }, undefined, undefined, ctx);
+      let row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
+      while (!row && listed.details.snapshot.nextCursor) {
+        phase(`${mode}:list-tool-next-page`);
+        listed = await tools.get("subagent_list").execute("recovered-page", { all: true, limit: 100, cursor: listed.details.snapshot.nextCursor }, undefined, undefined, ctx);
+        row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
+      }
+      assert.ok(row, "the recovered list contains the older active task across pages");
+      assert.ok(row.display.spend.includes("0.01"));
+      assert.equal(row.health.facts.activeTools.length, 1);
     }
     writeFileSync(join(runs, "sa_review_0", "meta.json"), JSON.stringify({ id: "sa_review_0", cwd: root, sessionId: "worker-0",
       callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
       status: "completed", startedAt: 0, endedAt: Date.now() }));
-    await until(() => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
+    await until("final:older-active-completion", () => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
     assert.equal(provider.visibleCount(), 201, "recent completion remains visible without counting it as active");
     const beforeClose = observation.workObservation().seq;
     assert.equal(provider.close("sa_review_0").action, "dismissed");
     assert.equal(observation.workObservation().seq, beforeClose, "the server snapshot has not advanced synchronously");
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "confirmed dismissal must hide a stale cached row before the next server observation");
-    await until(() => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
+    await until("final:dismissal-observed", () => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "the acknowledged dismissal must not reappear");
+    assert.equal(existsSync(join(agent, "managed-runtime")), false, "the fixture owns runtime replacement");
   } finally {
+    phase("cleanup:session-shutdown");
     await handlers.get("session_shutdown")?.({}, ctx); await stop();
     for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
 });
 
-test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async () => {
+test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async t => {
+  let model: WorkReadModel | undefined;
+  const phase = runtimeWorkFailureState(t, "10000-history", () => {
+    const state = model as any;
+    return state && { pending: Boolean(state.pending), imported: state.imported, dirty: state.dirty, repair: Boolean(state.repair),
+      hints: state.hints.size, files: state.files.size, projected: state.projected.size, status: state.state, reason: state.reason,
+      sourceErrors: state.sourceErrors.size, counters: state.counters, scheduling: state.scheduling, sourceWork: state.sourceWork,
+      checkpoints: state.checkpoints.metrics };
+  });
+  const started = performance.now();
+  let archivesWritten = 0, activeWritten = 0, reported = false;
+  const phases: { phase: string; elapsedMs: number; metrics: unknown }[] = [];
+  const mark = (phase: string) => {
+    phases.push({ phase, elapsedMs: Math.round(performance.now() - started), metrics: historyPhaseMetrics(model) });
+    if (phases.length > 32) phases.shift();
+  };
+  const report = (cause: "abort" | "failure") => {
+    if (reported) return;
+    reported = true;
+    const state = model as any;
+    console.error(JSON.stringify({ historyDeadlineFailure: { cause, elapsedMs: Math.round(performance.now() - started),
+      archivesWritten, activeWritten, phases, metrics: historyPhaseMetrics(model),
+      model: state && { state: state.state, imported: state.imported, pending: Boolean(state.pending), repair: Boolean(state.repair) } } }));
+  };
+  const aborted = () => report("abort");
+  t.signal.addEventListener("abort", aborted, { once: true });
+  t.after(() => t.signal.removeEventListener("abort", aborted));
+  mark("fixture-setup");
   const root = fixtureRoot("history");
   const durable = join(root, "durable"), archives = join(durable, "attempts"), sessions = join(durable, "sessions");
   mkdirSync(archives, { recursive: true });
   const meta = (i: number) => ({ id: `sa_history_${i}`, sessionId: `conversation-${i}`, cwd: root, status: "completed", startedAt: i,
     assignment: { assignmentId: `history-assignment-${i}` },
     recipe: { version: 1, sessionId: `conversation-${i}`, cwd: root, sessionDir: sessions } });
-  for (let i = 0; i < 10000; i++) writeFileSync(join(archives, `sa_history_${i}.json`), JSON.stringify({ version: 1, meta: meta(i) }));
+  phase("seed:10000-archives");
+  for (let i = 0; i < 10000; i++) {
+    writeFileSync(join(archives, `sa_history_${i}.json`), JSON.stringify({ version: 1, meta: meta(i) }));
+    archivesWritten++;
+    if (archivesWritten % 1000 === 0) mark("archive-setup-progress");
+  }
   const runs = join(root, "runs"); mkdirSync(runs);
   for (let i = 0; i < 7; i++) {
     const id = `sa_active_${i}`; mkdirSync(join(runs, id));
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, status: "running", startedAt: 20000 + i }));
+    activeWritten++;
   }
+  mark("coordinator-import-and-open");
   const coordinatorPath = new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href;
   const { openStore } = await import(coordinatorPath);
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
-  const model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
+  mark("model-construction");
+  model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
   try {
+    phase("reconcile:first-import");
+    mark("initial-reconcile");
     await model.reconcile();
+    mark("indexed-history-queries");
     assert.equal(model.snapshot().status, "ready");
     const before = { ...model.metrics };
     for (let i = 0; i < 60; i++) assert.equal(model.snapshot({ active: true }).rows.length, 7);
@@ -403,15 +576,23 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     assert.deepEqual(next.rows.map(row => row.meta.id), ["sa_history_9996", "sa_history_9995", "sa_history_9994"]);
     assert.deepEqual(model.metrics, before, "indexed queries perform no inventory, metadata reads or projections");
     const changed = { ...meta(9999), name: "external replacement" };
+    phase("archive:external-replacement-process");
+    mark("external-process-archive-replacement");
     execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", join(archives, "sa_history_9999.json"), JSON.stringify({ version: 1, meta: changed })]);
+    phase("reconcile:one-archive-replacement");
+    mark("archive-replacement-reconcile");
     await model.reconcile();
+    mark("archive-family-and-cursor-checks");
     assert.equal(model.snapshot({ id: changed.id }).rows[0]!.meta.name, "external replacement");
     assert.equal(model.metrics.metadataReads - before.metadataReads, 1);
     assert.equal(model.metrics.projections - before.projections, 1);
     assert.throws(() => model.snapshot({ cwd: root, statuses: ["completed"], limit: 3, cursor: first.nextCursor }), /resync_required/);
     const markers = join(durable, "session-state"); mkdirSync(markers);
     writeFileSync(join(markers, "conversation-9999.json"), JSON.stringify({ version: 1, sessionId: "conversation-9999", attemptId: "sa_newer_failed", status: "failed", startedAt: 30000, at: Date.now() }));
+    phase("reconcile:conversation-marker");
+    mark("conversation-marker-reconcile");
     await model.reconcile();
+    mark("coordinator-wait-registration");
     assert.equal(model.snapshot({ id: changed.id }).rows.length, 0, "a later failed conversation marker hides the stale completed archive");
     const projected = model.metrics.projections;
     const owner = { kind: "worker-conversation" as const, sessionId: "conversation-9998", workspace: root };
@@ -419,7 +600,10 @@ test("10000 durable records use bounded indexed history pages; a single archive 
       observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "history-host", runnerId: "history-runner" }, authorityRef: "scope" });
     writer.registerWait({ waitId: "history-wait", owner, dependencies: [{ operationId: "history-op" }],
       origin: { attemptId: "sa_history_9998", assignmentRef: "history-assignment-9998" }, continuationNote: "Interpret evidence." });
+    phase("reconcile:one-assignment-wait");
+    mark("coordinator-wait-reconcile");
     await model.reconcile();
+    mark("coordinator-outcome-registration");
     assert.equal(model.snapshot({ id: "sa_history_9998" }).rows[0]!.assignment.state, "waiting");
     assert.equal(model.metrics.projections - projected, 1, "one coordinator change must not reproject unrelated historical conversations");
     const beforeOutcome = model.metrics.projections;
@@ -428,24 +612,46 @@ test("10000 durable records use bounded indexed history pages; a single archive 
       outcome: "failed", reason: "Retained diagnosis", evidence: [], waits: [], processUncertain: false };
     writer.registerAssignment(decision);
     writer.recordAssignmentOutcome(decision);
+    phase("reconcile:one-assignment-outcome");
+    mark("coordinator-outcome-reconcile");
     await model.reconcile();
+    mark("external-schema-open");
     assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.state, "failed");
     assert.equal(model.metrics.projections - beforeOutcome, 1, "outcome-only changes invalidate their own conversation");
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     const external = new DatabaseSync(join(root, "operation-coordinator.sqlite"));
     try {
       external.exec("UPDATE schema_meta SET value = 'unsupported' WHERE key = 'schema_version'");
+      phase("reconcile:unsupported-schema");
+      mark("unsupported-schema-reconcile");
       await model.reconcile();
+      mark("unsupported-schema-checks");
       assert.equal(model.snapshot().status, "degraded", "a schema-only change invalidates previously verified observations");
       assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.verified, false);
       external.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
+      phase("reconcile:restored-schema");
+      mark("restored-schema-reconcile");
       await model.reconcile();
+      mark("restored-schema-checks");
       assert.equal(model.snapshot().status, "ready", "compatible coordinator state recovers without restarting the read model");
     } finally { external.close(); }
-  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+  } catch (error) { report("failure"); throw error; }
+  finally {
+    phase("cleanup:model-close");
+    mark("model-close"); await model.close();
+    mark("writer-close-and-fixture-removal"); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async () => {
+test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async t => {
+  let observedModel: WorkReadModel | undefined;
+  const trace = (phase: string) => {
+    if (process.env.PI_TEST_RUNTIME_WORK_PHASES === "1") t.diagnostic(JSON.stringify({ case: "coordinator-churn", phase,
+      owner: observedModel && { closed: (observedModel as any).closed, readerInitialized: Boolean((observedModel as any).reader),
+        watchers: (observedModel as any).watchers.size, parentWatchers: (observedModel as any).rootParents.size },
+      resources: process.getActiveResourcesInfo() }));
+  };
+  trace("callback-entered");
   const root = fixtureRoot("coordinator-churn");
   const run = join(root, "runs/sa_churn"); mkdirSync(run, { recursive: true });
   writeFileSync(join(run, "meta.json"), JSON.stringify({ id: "sa_churn", sessionId: "worker", cwd: root,
@@ -457,14 +663,27 @@ test("concurrent coordinator writes cannot starve an initial inventory or hide l
   const external = new DatabaseSync(path);
   external.exec("CREATE TABLE diagnostic_churn(value INTEGER); INSERT INTO diagnostic_churn VALUES(0)");
   const model = new WorkReadModel(root, "churn-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
-  const reader = (model as any).reader;
-  const read = reader.read.bind(reader);
-  reader.read = (owner: any) => {
-    const observation = read(owner);
-    external.exec("UPDATE diagnostic_churn SET value = value + 1");
-    return observation;
-  };
+  observedModel = model;
+  let cleanup: Promise<void> | undefined;
+  const close = () => cleanup ??= (async () => {
+    await model.close(); external.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  })();
+  t.after(async () => { trace("after-callback-before-cleanup"); await close(); trace("after-cleanup"); });
+  trace("model-constructed");
   try {
+    // Install once after ordinary reader acquisition, without a warm-up scan.
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        const observation = read(owner);
+        external.exec("UPDATE diagnostic_churn SET value = value + 1");
+        return observation;
+      };
+      return scan(paths);
+    };
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready", "an unrelated commit during every projection must not discard the whole inventory");
     assert.equal(model.snapshot().rows[0]!.assignment.state, "completed");
@@ -476,7 +695,8 @@ test("concurrent coordinator writes cannot starve an initial inventory or hide l
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready");
     assert.equal(model.snapshot().rows[0]!.assignment.state, "waiting", "a later coordinator snapshot must observe the new wait");
-  } finally { await model.close(); external.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+    trace("assertions-complete");
+  } finally { trace("finally-entered"); await close(); trace("finally-complete"); }
 });
 
 test("source churn retries reuse completed historical parsing without publishing an inconsistent snapshot", async () => {
@@ -490,23 +710,71 @@ test("source churn retries reuse completed historical parsing without publishing
   const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const model = new WorkReadModel(root, "source-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
-  const reader = (model as any).reader;
-  const read = reader.read.bind(reader);
   let changed = false;
-  reader.read = (owner: any) => {
-    if (!changed) {
-      changed = true;
-      assert.equal(model.snapshot().rows.length, 0);
-      writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
-    }
-    return read(owner);
-  };
   try {
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        if (!changed) {
+          changed = true;
+          assert.equal(model.snapshot().rows.length, 0);
+          writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+        }
+        return read(owner);
+      };
+      return scan(paths);
+    };
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready");
     assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
     assert.equal(model.metrics.metadataReads, 3, "unchanged historical metadata survives an abandoned scan");
     assert.equal(model.metrics.projections, 3, "only the changed family needs projection again");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("source retry invalidates cached assignments when a newer journal position arrives", async () => {
+  const root = fixtureRoot("source-journal-churn");
+  const metas = ["history", "changing"].map(name => ({ id: `sa_${name}`, sessionId: name, cwd: root,
+    status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
+  for (const meta of metas) {
+    mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
+  }
+  const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "journal-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let changed = false;
+  try {
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        const result = read(owner);
+        if (!changed) {
+          changed = true;
+          writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+          const owner = { kind: "worker-conversation" as const, sessionId: "history", workspace: root };
+          writer.registerOperation({ operationId: "retry-op", taskId: "retry-task", launchToken: "retry-token", owner,
+            observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "host", runnerId: "runner" }, authorityRef: "scope" });
+          writer.registerWait({ waitId: "retry-wait", owner, dependencies: [{ operationId: "retry-op" }],
+            origin: { attemptId: "sa_history" }, continuationNote: "Interpret evidence." });
+        }
+        return result;
+      };
+      return scan(paths);
+    };
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot({ id: "sa_history" }).rows[0]!.assignment.state, "waiting");
+    assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
+    assert.equal(model.metrics.metadataReads, 3);
+    assert.equal(model.metrics.projections, 4, "the changed file and newer assignment obligation each invalidate their cached family");
+    assert.equal(model.metrics.assignments.pending, 0);
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

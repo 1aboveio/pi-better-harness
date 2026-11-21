@@ -12,14 +12,15 @@ import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgro
 import { BackgroundRequests } from "./background-requests.mjs";
 import { StoreError } from "./errors.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.mjs";
-import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
+import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.mjs";
 import { repairFailedResume } from "./recovery.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.mjs";
 import { describeOwnerDiff, normalizeOwner, requireCounter, requireId, requirePath, } from "./validate.mjs";
 import { ensureSchema } from "./schema.mjs";
-import { createContext, openDatabase } from "./sqlite.mjs";
-import { getOperation as readOperationRecord, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.mjs";
+import { ensureAssignmentChanges } from "./assignment-changes.mjs";
+import { createContext, openDatabase, run } from "./sqlite.mjs";
+import { getOperation as readOperationRecord, listAssignmentCleanupOperations as readAssignmentCleanupOperations, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.mjs";
 import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.mjs";
 import { acknowledgeResult as writeAcknowledgement, cancelWait as writeCancellation, claimResume as writeClaim, findPendingWaitForOwner, getWait as readWait, listDependencies as readDependencies, listEvidencePins as readPins, listEvidenceReads as readReads, listResumeClaims as readClaims, listUnreconciledClaims, listWaits as readWaits, publishResumeAttempt as writeAttemptPublication, recordEvidencePin as writePin, recordEvidenceRead as writeRead, registerWait as writeWait, releaseEvidencePins as writePinRelease, holdFailedResume as writeHoldFailedResume, releaseResumeClaim as writeClaimRelease, transitionWaitPhase as writePhase, } from "./waits.mjs";
 import { claimOutbox as writeOutboxClaim, listDispatchableOutboxRecipients as readDispatchableOutboxRecipients, listOutbox as readOutbox, markOutboxDelivered as writeOutboxDelivery, releaseOutbox as writeOutboxRelease, } from "./outbox.mjs";
@@ -31,6 +32,7 @@ export function openStore(options) {
     const ctx = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     }
     catch (error) {
         try {
@@ -52,6 +54,8 @@ export function openStore(options) {
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
         handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
@@ -109,6 +113,20 @@ export function openStore(options) {
         listOperations(filter = {}) {
             alive();
             return readOperationRecords(ctx, filter);
+        },
+        listAssignmentCleanupOperations(limit, afterOperationId) {
+            alive();
+            return readAssignmentCleanupOperations(ctx, limit, afterOperationId);
+        },
+        verifyAssignmentCleanup(operationId, launchToken, terminalRevision) {
+            alive();
+            if (!Number.isSafeInteger(terminalRevision) || terminalRevision < 1)
+                return false;
+            return run(ctx, `INSERT OR IGNORE INTO coordinator_state (key, value)
+                SELECT 'assignment-cleanup-verified:' || op.operation_id, op.launch_token
+                FROM operations op JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
+                JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+                WHERE op.operation_id = ? AND op.launch_token = ? AND op.terminal_revision = ?`, operationId, launchToken, terminalRevision) > 0;
         },
         listRunningSupervisedBy(hostId) {
             alive();

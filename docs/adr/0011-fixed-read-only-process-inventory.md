@@ -1,5 +1,7 @@
 # Fixed read-only process inventory
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#permission-to-use-a-tool).
+
 ## Status
 
 Accepted. Extends [ADR 0007](0007-trusted-runtime-task-boundary.md)'s fixed task

@@ -73,11 +73,13 @@ export function getOperationRowByTask(
 }
 
 export function mapOperation(row: Record<string, unknown>): OperationRecord {
+    const assignmentAttemptId = columnNullableText(row, "assignment_attempt_id");
     return {
         operationId: columnText(row, "operation_id"),
         taskId: columnText(row, "task_id"),
         launchToken: columnText(row, "launch_token"),
         owner: ownerFromRow(row),
+        ...(assignmentAttemptId === null ? {} : { assignmentAttemptId }),
         observer: {
             kind: columnText(row, "observer_kind"),
             version: columnText(row, "observer_version"),

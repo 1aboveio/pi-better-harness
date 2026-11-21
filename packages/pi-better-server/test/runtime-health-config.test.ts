@@ -9,6 +9,7 @@ import { Worker } from "node:worker_threads";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { HostSourceWatches } from "../src/runtime/source-watch.ts";
 
 test("unchanged health facts advance quiet and stale deadlines for shared readers", { timeout: 10000 }, async t => {
   const parent = resolve("../../.work/797"); mkdirSync(parent, { recursive: true });
@@ -92,23 +93,39 @@ function onceSnapshot(client: WorkClient, deadline: number | null) {
   return { promise, stop: () => stop() };
 }
 
-test("shared query worker expires cached snapshots at each health deadline", { timeout: 10000 }, async () => {
+test("shared query worker expires cached snapshots at each health deadline", { timeout: 10000 }, async t => {
   const parent = resolve("../../.work/797"); mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, "worker-deadline-"));
   writeFileSync(join(root, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthQuietMs: 1000, healthStaleMs: 5000 } } }));
   const dir = join(root, "runs/sa_worker_deadline"); mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "meta.json"), JSON.stringify({ id: "sa_worker_deadline", cwd: root, status: "running", pid: process.pid, spawnPid: process.pid, startedAt: 1000 }));
   writeFileSync(join(dir, "output.log"), "{}\n");
+  const watches = new HostSourceWatches();
   const worker = new Worker(new URL("./support/deadline-query-worker.mjs", import.meta.url), {
     execArgv: [], workerData: { agentDir: root, instanceId: "deadline-worker", modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 } },
   });
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= (async () => {
+    const stopped = watches.revoke(0);
+    try {
+      await Promise.all([worker.terminate(), stopped]);
+      assert.equal(watches.metrics().allocated, 0, "the worker's host-owned subscriptions must drain");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  })();
+  t.after(close);
+  worker.once("exit", () => { void watches.revoke(0).catch(() => {}); });
   const message = (match: (value: any) => boolean) => new Promise<any>((resolve, reject) => {
-    const cleanup = () => { worker.off("message", received); worker.off("error", failed); };
+    const cleanup = () => { worker.off("message", received); worker.off("error", failed); worker.off("exit", exited); };
     const received = (value: any) => { if (match(value)) { cleanup(); resolve(value); } };
     const failed = (error: Error) => { cleanup(); reject(error); };
-    worker.on("message", received); worker.on("error", failed);
+    const exited = (code: number) => { cleanup(); reject(new Error(`deadline query worker exited before reply (code ${code})`)); };
+    worker.on("message", received); worker.on("error", failed); worker.once("exit", exited);
   });
-  worker.on("message", value => { if (value.type === "revision") worker.postMessage({ type: "revision-consumed" }); });
+  worker.on("message", value => {
+    if (watches.handle(0, value, reply => worker.postMessage(reply))) return;
+    if (value.type === "revision") worker.postMessage({ type: "revision-consumed" });
+    if (value.type === "heartbeat") worker.postMessage({ type: "heartbeat-consumed" });
+  });
   let serial = 0;
   const snapshot = async () => {
     const id = ++serial, reply = message(value => value.type === "reply" && value.id === id);
@@ -129,7 +146,7 @@ test("shared query worker expires cached snapshots at each health deadline", { t
       assert.equal(result.metrics.healthRecomputations, first.metrics.healthRecomputations);
       assert.equal(result.snapshot.scopeRevision, first.snapshot.scopeRevision, "read-time expiry does not manufacture a source change");
     }
-  } finally { await worker.terminate(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await close(); }
 });
 
 for (const count of [48, 96]) test(`${count} same-group tasks share content-based health invalidation over sockets`, { timeout: 20000 }, async t => {

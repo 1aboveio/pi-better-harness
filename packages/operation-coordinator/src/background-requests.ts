@@ -11,6 +11,9 @@ export interface BackgroundRequest {
         token: string;
     }>;
     result?: unknown;
+    acceptedAt?: number;
+    lastProgressAt?: number;
+    writerFence?: { instance: string; pid: number; start: string };
 }
 const prefix = 'background-request-v1:';
 // A partial index excludes returned history. CASE protects other coordinator
@@ -35,7 +38,7 @@ export class BackgroundRequests {
     private write(value: BackgroundRequest) {
         this.context.db.prepare('INSERT OR REPLACE INTO coordinator_state (key,value) VALUES (?,?)').run(storageKey(value.owner, value.key), JSON.stringify(value));
     }
-    accept(owner: string, key: string, digest: string) {
+    accept(owner: string, key: string, digest: string, writerFence?: BackgroundRequest['writerFence']) {
         this.alive();
         return this.context.transaction(() => {
             const prior = this.read(owner, key);
@@ -44,7 +47,7 @@ export class BackgroundRequests {
                     throw new Error('request-conflict: Background request key changed content');
                 return { prior: true, record: prior };
             }
-            const record: BackgroundRequest = { owner, key, digest, state: 'accepted', operations: [] };
+            const record: BackgroundRequest = { owner, key, digest, state: 'accepted', operations: [], acceptedAt: Date.now(), lastProgressAt: Date.now(), writerFence };
             this.write(record);
             return { prior: false, record };
         });
@@ -64,7 +67,15 @@ export class BackgroundRequests {
     private update(owner: string, key: string, change: (value: BackgroundRequest) => void) {
         this.alive();
         this.context.transaction(() => { const value = this.read(owner, key); if (!value)
-            throw new Error('Background request not admitted'); change(value); this.write(value); });
+            throw new Error('Background request not admitted'); change(value); value.lastProgressAt = Date.now(); this.write(value); });
+    }
+    lifecycleReasons() {
+        return this.pending().map(record => ({ kind: 'task', id: storageKey(record.owner, record.key),
+            owner: record.owner, state: record.state, acceptedAt: record.acceptedAt ?? null,
+            writerFence: record.writerFence ?? null,
+            lastProgressAt: record.lastProgressAt ?? null, executionDeadline: null, nextDeadline: null,
+            operations: record.operations.map(({ operationId, taskId }) => ({ operationId, taskId })),
+            recovery: 'drain-accepted-background-request-until-journal-return-or-authoritative-handoff' }));
     }
     hasPending(): boolean {
         this.alive();

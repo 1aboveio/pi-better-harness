@@ -1,0 +1,100 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "primary-failures-corrected-in-handoff-diagnostic-only-source-change",
+  "testedHead": "647b137bfd0071835cc2288b0e9beeb620cad9d5",
+  "sourceCommit": "b6a76736502522efdf44ba7a539c6a79d951fb32",
+  "standingOrders": [],
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "evidence": "Actual session JSONL model_change and thinking_level_change records read this turn." },
+  "run": {
+    "id": 44223782369,
+    "attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "counts": { "success": 29, "failure": 2, "cancelled": 1, "total": 32 },
+    "evidence": [".private-805/logs/ci647b-run.json", ".private-805/logs/ci647b-jobs.json"]
+  },
+  "importantCorrection": "Primary job API/logs do NOT establish an original SSH scripts2 PASS on647b. Scripts2 job134531957170 is CANCELLED after10minutes; case94 has no result. The previous terminal callback-body failure no longer describes its last observed phase. The scripts3 readiness case explicitly passes. Do not merge these outcomes or infer full CI success.",
+  "server1": {
+    "job": 134531957117,
+    "lane": "server-tests (1/3)",
+    "step": "Server test shard",
+    "firstFailure": {
+      "suite": "on-demand Pi startup",
+      "case": "bounds readiness and reports a startup failure with its log path",
+      "subtest": 3,
+      "durationMs": 4247.298946,
+      "error": "Expected values to be strictly equal: true !== false",
+      "assertion": "existsSync(join(setup.serverDir, 'daemon-owner')) must be false",
+      "location": "packages/pi-better-server/test/startup-ensure.test.ts:174:12",
+      "evidenceDir": ".private-805/logs",
+      "evidence": ".private-805/logs/ci647b-server1.log:2533-2554"
+    },
+    "sourceAndEvidenceFacts": [
+      "Original test writes a corrupt sessions index and invokes ensure with --timeout-ms2500. Its code1, empty stdout, expected readiness-timeout stderr and correct daemon.log path assertions precede the failing owner-absence assertion and passed.",
+      "ensureDaemon starts a detached daemon and does not terminate it when its own caller deadline expires; source comment explicitly retains daemon lifetime independently of the ensure client. A separate existing test verifies survival after ensure-parent cancellation.",
+      "startDaemon claims its exact owner before constructing/restoring SessionRegistry and releases it only after awaited cleanupStartup on failure. The retained TAP does not include the daemon tail/phase at the failed owner-absence observation.",
+      "An owner present at caller timeout does not alone identify delayed initialization, delayed cleanup, or leaked ownership. No exact daemon phase/holder lifetime is established by this assertion."
+    ],
+    "diagnosticChange": "Pass the already-captured result.stderr as the assertion message on owner absence. ensureDaemon already bounds its daemon log tail to2000bytes. No extra read, RPC, wait, probe, signal, retry or cleanup behavior introduced; original expected false and2500ms deadline unchanged.",
+    "whyNoRuntimeRepair": "Primary source/evidence does not establish a supported production cause. Do not make caller timeout kill an independently owned daemon, extend the timeout, poll until green, remove the owner fence or declare the original test obsolete without proof.",
+    "notSQLite": "This exact647b server1 failure has no LogCheckpoints ATTACH stack; it is a startup owner-presence assertion. It must not be patched using an unrelated SQLite acquisition policy."
+  },
+  "scripts2": {
+    "job": 134531957170,
+    "lane": "workspace-ci (scripts-2)",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "annotation": "The job has exceeded the maximum execution time of 10m0s",
+    "lastCompletedCase": "ok93 exit-child cleanup is bounded with failed-reload",
+    "actualPhases": [
+      { "phase": "open-session", "at": "2026-11-18T02:33:26.5082258Z" },
+      { "phase": "start-session", "at": "2026-11-18T02:33:26.9207637Z" },
+      { "phase": "launch-watch", "at": "2026-11-18T02:33:26.9320389Z" }
+    ],
+    "laterObservation": "At02:34:27.053 the frontend receives an URGENT background-failure notification for bg_36g_mwlibk59_5, queues it for an active recipient, reports delivered=true, and gets receipt-return by02:34:27.123. This is not the normal terminal completion for the original watch scenario and not case94 PASS.",
+    "cancelledAt": "2026-11-18T02:41:09.5206968Z",
+    "notObserved": "No launch-task, completion-callback, teardown/complete, case94 result or suite completion before cancellation. Underlying blocked watch-launch request cause remains unproven; do not call this the prior completion-body defect or infer teardown.",
+    "evidence": [".private-805/logs/ci647b-scripts2.log:891-906", ".private-805/logs/ci647b-scripts2-annotations.json"]
+  },
+  "readinessFixQualification": {
+    "job": 134531957119,
+    "lane": "workspace-ci (scripts-3)",
+    "jobStatus": "success",
+    "case": "cancelling a parked assignment after the production continuation CLI is published stops the held real child and never acknowledges",
+    "caseNumber": 43,
+    "caseStatus": "ok",
+    "durationMs": 12775.471053,
+    "evidence": ".private-805/logs/ci647b-scripts3.log:570-575",
+    "meaning": "Exact original native readiness/cancellation case executed and passed on647b with8830df86's structured successful-read and exact trace checkpoint predicate. Historical3252 failure retained; no waiver or counter reset."
+  },
+  "coordination": {
+    "802": "Read results/802-ci3e-fix.json and current sibling source. Its exact exclusive-writer SQLite ATTACH reproduction establishes zero-wait acquisition refusal and recovery after rollback, not this647b owner assertion. Architect136/continuation163 owns compatible bootstrap-budget policy; no duplicate writer or timeout policy invented here.",
+    "807": "Owner154 composition remains independent; no807 source/branch/service changed or merged in this turn.",
+    "803": "Causal8b6 parent and existing handoff capture retained, but no native SSH PASS inferred from its review or current647b cancellation. Actual last launch-watch phase returned to coordinator for attribution."
+  },
+  "commands": [
+    { "command": "gh api 'repos/1aboveio/pi-better-harness/actions/runs/44223782369/jobs?per_page=100'", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/runs/44223782369", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/jobs/134531957117/logs", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/jobs/134531957170/logs", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/jobs/134531957119/logs", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/check-runs/134531957170/annotations", "exit": 0 },
+    { "command": "gh api repos/1aboveio/pi-better-harness/actions/runs/44223782369/artifacts", "exit": 0, "result": "No startup-ensure failed fixture/daemon tail artifact listed; unrelated resources/sandbox/navigator artifacts cannot supply missing producer phase." },
+    { "command": "npm run typecheck --workspace packages/pi-better-server", "exit": 0, "evidence": ".private-805/logs/ci647b-types.log" },
+    { "command": "node .private-805/status-log-premise-check.mjs", "exit": 0, "evidence": ".private-805/logs/ci647b-readiness-check.log" },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "progress": {
+    "newNativeCheckpoint": "Original scripts3 readiness/cancellation case now explicitPASS647b.",
+    "diagnosticAdvanceOnly": "Startup owner failure located to actual final assertion; bounded original readiness stderr will be retained if it recurs. This is not a runtime fix or acceptance progress.",
+    "notPassed": "Scripts2 original SSH case and startup owner cleanup; whole run remains failed with a cancelled mandatory lane.",
+    "history": "All original assertions/deadlines,77 SSH calls,writer/source/token/recipient/cancellation fences,16/8/8-total32 and physical2/2/2 unchanged. HistoricalSQLite/04375/3252/nonconvergence records retained."
+  },
+  "remaining": [
+    "Need actual daemon readiness stderr/phase at original startup owner assertion before selecting production repair or classifying a fixture synchronization issue. No native retry or relaxed owner assertion performed.",
+    "Original SSH scenario remains unqualified on647b: last observed phase launch-watch and separate urgent failure delivery, then mandatory job-budget cancellation. Coordinator owns follow-up routing and any approved qualification.",
+    "802/Architect retain ownership of separately proven SQLite bootstrap contention policy;807 composition remains independent."
+  ],
+  "boundaries": "No push/PR/CI dispatch/external wait, new timeout policy, shared-runtime/settings/guard change, speculative runtime fix, restricted native CLI/socket/process/probe/admission replay or assertion/deadline weakening."
+}

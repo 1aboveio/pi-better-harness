@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
+import { readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
 import { setNavigatorPanel, type NavigatorPanelLayout } from "./shared-navigator-panels.ts";
@@ -9,11 +10,32 @@ export default function navigatorExtension(): void {
   // for sibling relative imports; loading it directly should be harmless.
 }
 
+export type NavigatorView = "tree" | "flatten";
+export function getNavigatorView(): NavigatorView { return state().view ?? "flatten"; }
+export function loadNavigatorView(): void {
+  const value = readHarnessSetting("navigatorView");
+  state().view = value === "tree" ? "tree" : "flatten";
+}
+export function setNavigatorView(value: string): void {
+  if (value !== "tree" && value !== "flatten") throw new Error("View must be tree or flatten.");
+  updateHarnessSetting("navigatorView", () => value);
+  state().view = value;
+  refreshBackgroundWorkNavigator();
+}
+
 export type BackgroundWorkStatusTone = "running" | "success" | "failed" | "warning" | "muted";
 
 export type BackgroundWorkRow = {
   providerId: string;
   id: string;
+  /** Stable worker conversation identity, independent of execution attempts. */
+  agentId?: string;
+  parentAgentId?: string;
+  readOnly?: boolean;
+  treeDepth?: number;
+  lastChild?: boolean;
+
+  ownerGroupLabel?: string;
   name?: string;
   model?: string;
   effort?: string;
@@ -70,8 +92,64 @@ export type BackgroundWorkProvider = {
   close(id: string): BackgroundWorkCloseOutcome;
   /** Return true when this detail handled the key. The navigator refreshes the sheet. */
   handleDetailInput?(id: string, data: string): boolean;
+  /** An explicit navigator interaction may attach a deferred work subscription. */
+  onOpen?(): void;
   onVisibleChanged?(notify: () => void): () => void;
 };
+
+/** UI time is independent of worker time; repeated refreshes never renew it. */
+export function createTerminalRowRetention(retentionMs = 30_000) {
+  const held = new Map<string, { row: BackgroundWorkRow; until: number }>();
+  const dismissed = new Set<string>();
+  return {
+    clear() { held.clear(); dismissed.clear(); },
+    dismiss(id: string) { held.delete(id); dismissed.add(id); },
+    merge(rows: BackgroundWorkRow[], now: number): BackgroundWorkRow[] {
+      const result: BackgroundWorkRow[] = [];
+      const present = new Set(rows.map(row => row.id));
+      for (const id of dismissed) if (!present.has(id)) dismissed.delete(id);
+      for (const row of rows) {
+        if (dismissed.has(row.id)) continue;
+        const terminal = ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status);
+        if (!terminal) { held.delete(row.id); result.push(row); continue; }
+        let entry = held.get(row.id);
+        if (!entry) { entry = {row, until: now + retentionMs}; held.set(row.id, entry); }
+        entry.row = {...row, expiresAt: entry.until};
+        if (now < entry.until) result.push(entry.row);
+      }
+      for (const [id, entry] of held) {
+        if (present.has(id)) continue;
+        if (now < entry.until) result.push(entry.row);
+        else held.delete(id);
+      }
+      return result;
+    },
+  };
+}
+
+/** A frontend-only diagnostic, never an execution record or authority to retry. */
+export async function observeNavigatorLaunch<T>(ctx: ExtensionContext, providerId: string, key: string, name: string, launch: () => Promise<T>): Promise<T> {
+  const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+  const report = (error: unknown) => {
+    const s = state();
+    if (!isNavigatorUiAvailable(s.uiCtx) || s.observationScope !== scope) return;
+    const id = `launch-error-${key}`;
+    const primary = error instanceof Error ? error.message : String(error);
+    const failures = s.launchFailures ??= new Map();
+    const identity = rowKey(providerId, id);
+    failures.set(identity, {providerId, id, name, status: "failed", statusTone: "failed", kind: "launch-error", elapsed: "", primary,
+      secondary: "Launch failed or was not confirmed; inspect before retrying.", sortStartedAt: Date.now()});
+    // Diagnostics are session-local and bounded, including expired tombstones.
+    if (failures.size > 128) failures.delete(failures.keys().next().value!);
+    refreshBackgroundWorkNavigator();
+  };
+  try {
+    const result = await launch();
+    const response = result as {isError?: boolean; content?: {type: string; text?: string}[]};
+    if (response?.isError) report(response.content?.filter(item => item.type === "text").map(item => item.text).join("\n") || "Launch request failed");
+    return result;
+  } catch (error) { report(error); throw error; }
+}
 
 type HostDeps = {
   createDefaultEditor: (tui: unknown, theme: unknown, keybindings: unknown) => unknown;
@@ -83,6 +161,10 @@ type HostDeps = {
 
 type NavigatorState = {
   providers: Map<string, BackgroundWorkProvider>;
+  view?: NavigatorView;
+  terminalRows?: Map<string, ReturnType<typeof createTerminalRowRetention>>;
+  launchFailures?: Map<string, BackgroundWorkRow>;
+  observationScope?: string;
   registrationTokens?: Map<string, symbol>;
   unsubscribers: Map<string, () => void>;
   uiCtx?: ExtensionContext;
@@ -202,6 +284,10 @@ export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: stri
 export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps, owner?: symbol): void {
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
+  if (s.view === undefined) { try { loadNavigatorView(); } catch { s.view = "flatten"; } }
+  const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+  if (s.observationScope !== scope) { s.terminalRows?.clear(); s.launchFailures?.clear(); }
+  s.observationScope = scope;
   s.uiCtx = ctx;
   s.uiOwner = owner;
   s.deps = {
@@ -239,6 +325,9 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext, owner?: s
   stopMainListWidget();
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
+  s.terminalRows?.clear();
+  s.launchFailures?.clear();
+  s.observationScope = undefined;
   s.uiOwner = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
     try { setNavigatorPanel(activeCtx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
@@ -498,10 +587,14 @@ function listRows(now = Date.now()): InternalRow[] {
   for (const provider of providers()) {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
+    providerRows = [...providerRows, ...[...(state().launchFailures?.values() ?? [])].filter(row => row.providerId === provider.id)];
+    const retention = state().terminalRows ??= new Map();
+    if (!retention.has(provider.id)) retention.set(provider.id, createTerminalRowRetention());
+    if (isNavigatorUiAvailable(state().uiCtx)) providerRows = retention.get(provider.id)!.merge(providerRows, now);
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
     let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
     try { showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection; } catch { showSection = false; }
-    if (!showSection) continue;
+    if (!showSection && !(getNavigatorView() === "tree" && provider.parentRow)) continue;
     let parentRow: BackgroundWorkRow | null = null;
     try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
     if (parentRow) {
@@ -516,7 +609,48 @@ function listRows(now = Date.now()): InternalRow[] {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
   }
-  return rows;
+  const conversations = mergeAgentAttempts(rows);
+  return getNavigatorView() === "tree" ? treeRows(conversations) : conversations;
+}
+
+/** A resumed execution is still the same agent in either layout. */
+export function mergeAgentAttempts<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const row of rows) {
+    if (row.providerId !== "subagents" || !row.agentId) continue;
+    const previous = latest.get(row.agentId);
+    if (!previous || row.sortStartedAt > previous.sortStartedAt
+        || (row.sortStartedAt === previous.sortStartedAt && row.id > previous.id)) latest.set(row.agentId, row);
+  }
+  return rows.filter(row => row.providerId !== "subagents" || !row.agentId || latest.get(row.agentId) === row);
+}
+
+/** Two levels only: agents are peers, tasks attach by captured conversation. */
+export function treeRows<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const agents = new Map<string, T>();
+  for (const row of rows.filter(row => row.providerId === "subagents")) {
+    const key = row.agentId ?? row.id;
+    const prior = agents.get(key);
+    if (!prior || row.sortStartedAt > prior.sortStartedAt) agents.set(key, row);
+  }
+  const tasks = rows.filter(row => row.providerId !== "subagents");
+  const ordered = [...agents.entries()].sort(([a], [b]) => a === "main" ? -1 : b === "main" ? 1 : 0);
+  const result: T[] = [], attached = new Set<T>();
+  for (const [key, agent] of ordered) {
+    const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
+    result.push({...agent, treeDepth: 0});
+    children.forEach((row, i) => { result.push({...row, treeDepth: 1, lastChild: i === children.length - 1}); attached.add(row); });
+  }
+  // Never hide live work when its owner's observation has not arrived yet.
+  const missing = new Map<string, T[]>();
+  for (const row of tasks) if (!attached.has(row)) {
+    const key = row.parentAgentId ?? "main";
+    missing.set(key, [...(missing.get(key) ?? []), row]);
+  }
+  for (const [key, children] of missing) children.forEach((row, i) => result.push({...row,
+    treeDepth: 1, lastChild: i === children.length - 1,
+    ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined}));
+  return result;
 }
 
 function rowDisplayName(row: Pick<BackgroundWorkRow, "name" | "id">): string {
@@ -597,6 +731,15 @@ function buildMainListLayout(
     lines.push(line);
     owners.push(owner);
   };
+  if (getNavigatorView() === "tree") {
+    push(providerGroupLabel("work", fg));
+    for (const row of rows) {
+      if (row.ownerGroupLabel) push(`  ${dim(row.ownerGroupLabel, fg)}`);
+      push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
+    }
+    push(""); push(shortcutsLine(options.focused === true, fg));
+    return {lines: lines.map(line => safeTruncate(line, width, truncate)), owners};
+  }
   const grouped = new Map<string, InternalRow[]>();
   for (const row of rows) {
     const existing = grouped.get(row.providerLabel) ?? [];
@@ -621,8 +764,9 @@ function buildMainListLayout(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
+  const selected = state().mainListRows?.find(row => row.navigatorId === state().mainListSelectedId);
   const keys = focused
-    ? "↑↓ switch · Enter detail · x stop · Esc unfocus"
+    ? `↑↓ switch · Enter detail${selected?.readOnly || selected?.parentRow ? "" : " · x stop"} · Esc unfocus`
     : "← work navigator";
   return dim(keys, fg);
 }
@@ -633,7 +777,7 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
-  const prefix = selected ? fg("accent", "› ") : "  ";
+  const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
   const name = row.name || row.id;
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
@@ -663,17 +807,21 @@ function statusGlyph(row: InternalRow): string {
 function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
   void now;
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-  return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
+  const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
+  return { glyph, color: "accent" };
 }
 
 function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {
   return JSON.stringify({
+    view: getNavigatorView(),
     focused: options.focused === true,
     closeHint: options.closeHint ?? null,
     selectedId: options.focused === true ? options.selectedId ?? null : null,
     rows: rows.map((row) => ({
       navigatorId: row.navigatorId,
       providerLabel: row.providerLabel,
+      parentAgentId: row.parentAgentId,
+      agentId: row.agentId,
       parentRow: row.parentRow === true,
       providerId: row.providerId,
       id: row.id,
@@ -699,6 +847,9 @@ function stableFacts(facts: string[] | undefined): string[] {
 }
 
 function rowSummary(row: InternalRow): string {
+  if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
+    return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
+  }
   if (row.providerId === "subagents") {
     const attention = row.facts?.map(singleLine).filter(Boolean);
     if (attention?.length) return `${singleLine(row.status)} · ${attention.join(" · ")}`;
@@ -751,20 +902,33 @@ function prepareDetail(navigatorId: string, options?: {logTailLines?: number}): 
 
 function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   const { providerId, id } = splitRowKey(navigatorId);
+  const failed = state().launchFailures?.get(navigatorId);
+  if (failed) return {providerId, id, title: failed.name ?? "Launch failed", status: "failed", statusTone: "failed", metadata: [], evidence: {label: "Launch error", text: failed.primary}};
   const provider = state().providers.get(providerId);
   if (!provider) return null;
   try { return provider.detail(id, now, options); } catch { return null; }
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
-  if (row.parentRow) return { action: "not-closable", providerId: row.providerId, id: row.id };
+  if (row.parentRow || row.readOnly) return { action: "not-closable", providerId: row.providerId, id: row.id };
   const provider = state().providers.get(row.providerId);
+  if (state().launchFailures?.delete(row.navigatorId)) {
+    state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+    return {action: "dismissed", providerId: row.providerId, id: row.id};
+  }
   if (!provider) return { action: "missing", providerId: row.providerId, id: row.id };
-  try { return provider.close(row.id); } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
+  try {
+    const outcome = provider.close(row.id);
+    if (["dismissed", "stopped-and-dismissed"].includes(outcome.action)
+      || outcome.action === "requested" && ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status)) {
+      state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+    }
+    return outcome;
+  } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
 }
 
 function closeHintFor(row: InternalRow | undefined): string | null {
-  if (!row || row.parentRow) return null;
+  if (!row || row.parentRow || row.readOnly) return null;
   const provider = state().providers.get(row.providerId);
   if (!provider) return null;
   try { return `${provider.armCloseLabel(row)} ${row.name || row.id}`; } catch { return null; }
@@ -822,6 +986,9 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
 
 function handleMainListInput(data: string, deps: HostDeps): boolean {
   const s = state();
+  if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+    for (const provider of s.providers.values()) provider.onOpen?.();
+  }
   const rows = listRows();
   if (rows.length === 0) {
     // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
@@ -891,7 +1058,7 @@ function dismissOverlay(): void {
 
 function handleMainListCloseKey(): void {
   const row = selectedMainListRow();
-  if (!row || row.parentRow) return;
+  if (!row || row.parentRow || row.readOnly) return;
   const s = state();
   const now = Date.now();
   const arm = s.mainListCloseArm;
@@ -932,6 +1099,7 @@ function openNavigator(): void {
   const ctx = s.uiCtx;
   const deps = s.deps;
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
+  for (const provider of s.providers.values()) provider.onOpen?.();
   const rows = listRows();
   if (rows.length === 0) return;
   const selectedId = selectedMainListRow()?.navigatorId ?? rows[0]!.navigatorId;
@@ -1006,6 +1174,8 @@ function createOverlayComponent(
   onClosed: () => void,
   initialDetailId: string,
 ) {
+  let editorRendersSeen = state().editorRenders ?? 0;
+  let sawLiveEditor = liveEditorMounted(tui) === true;
   // The overlay only ever shows one row's detail; the rail below it is the list.
   const overlayState: OverlayState = { rows: initialRows, selected: 0 };
   let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
@@ -1128,7 +1298,7 @@ function createOverlayComponent(
 
   function handleCloseKey(): void {
     const row = selectedRow();
-    if (!row || row.parentRow) return;
+    if (!row || row.parentRow || row.readOnly) return;
     const now = Date.now();
     if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {
       clearCloseArm();
@@ -1163,19 +1333,23 @@ function createOverlayComponent(
     requestRender();
   }
 
-  let editorRendersSeen: number | undefined;
   /**
-   * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
-   * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
-   * its own non-container component still renders ours, so the wrapper also counts as live while it
-   * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+   * Close when a replacement editor takes over while the sheet is open (#332).
+   * A wrapper inside another extension's editor still counts as live if it rendered since
+   * the last overlay frame. Pi renders the editor before it composites overlays.
    */
   function closeIfEditorReplaced(): void {
-    const rendersBefore = editorRendersSeen;
     const renders = state().editorRenders ?? 0;
+    const rendered = renders !== editorRendersSeen;
     editorRendersSeen = renders;
-    state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
-    if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore) return;
+    state().editorRenderedLastFrame = rendered;
+    if (closed) return;
+    const mounted = liveEditorMounted(tui);
+    if (rendered || mounted === true) {
+      sawLiveEditor = true;
+      return;
+    }
+    if (mounted !== false || !sawLiveEditor) return;
     // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
     queueMicrotask(() => {
       if (closed) return;

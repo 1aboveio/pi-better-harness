@@ -124,6 +124,11 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         writeMeta(terminal);
         await eventually(() => list().find(r => r.id === first.id)?.status === "failed");
         assert.equal(list().find(r => r.id === first.id).status, "failed");
+        refreshBackgroundWorkNavigator(ctx);
+        const terminalWidget = widgets.get(MAIN_LIST_WIDGET_KEY);
+        const terminalComponent = typeof terminalWidget === 'function' ? terminalWidget({requestRender(){}}, ctx.ui.theme) : undefined;
+        assert.ok(terminalComponent, 'the last failed worker must leave the subagent section mounted');
+        assert.match(terminalComponent.render(120).join('\n'), /failed/i, 'failure remains visible even with no active workers');
         writeMeta({ ...terminal, endedAt: Date.now() - 30_000 });
         await eventually(() => !list().some(r => r.id === first.id));
         assert.ok(!list().some(r => r.id === first.id), "terminal row expires at the retention boundary");
