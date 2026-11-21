@@ -244,6 +244,28 @@ test("real process start evidence retains a worker; a running label alone does n
   assert.deepEqual(model.livenessReasons(), []);
 });
 
+test("a rejected first socket path allows startup with a shorter PI_SERVER_DIR", async t => {
+  const env = makeEnv();
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousServerDir = process.env.PI_SERVER_DIR;
+  t.after(() => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousServerDir === undefined) delete process.env.PI_SERVER_DIR;
+    else process.env.PI_SERVER_DIR = previousServerDir;
+  });
+  process.env.PI_CODING_AGENT_DIR = env.agentDir;
+  process.env.PI_SERVER_DIR = join(env.root, "x".repeat(104));
+  const registrationPath = join(env.agentDir, "server-registration-v1.json");
+
+  await assert.rejects(startDaemon(), /Set PI_SERVER_DIR to a shorter directory/);
+  process.env.PI_SERVER_DIR = env.serverDir;
+  const daemon = await startDaemon();
+  t.after(() => daemon.stop());
+  assert.equal(daemon.serverDir, env.serverDir);
+  assert.equal(JSON.parse(readFileSync(registrationPath, "utf8")).serverDir, env.serverDir);
+});
+
 test("registered work connection retains runtime without hosted ownership; probes do not renew idle", async t => {
   const env = makeEnv(); Object.assign(process.env, env.vars);
   let now = 1000;
