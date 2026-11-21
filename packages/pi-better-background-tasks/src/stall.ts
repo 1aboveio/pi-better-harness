@@ -48,7 +48,7 @@ export function observeBackgroundTaskStall(meta: BackgroundTaskMeta, now = Date.
 }
 
 /** Silence is an observation, not proof that the process is hung. */
-export function formatBackgroundTaskStall(observation: StallObservation): string | undefined {
+export function formatBackgroundTaskStall(observation: Pick<StallObservation, "state" | "ageMs">): string | undefined {
   if (observation.state !== "quiet" && observation.state !== "stalled") return undefined;
   const seconds = Math.max(0, Math.round((observation.ageMs ?? 0) / 1000));
   const duration = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${(seconds % 60).toString().padStart(2, "0")}s`;

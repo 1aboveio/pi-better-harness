@@ -17,6 +17,7 @@ import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { getObservedWaitHost } from "./observed-wait-client.js";
+import { describeSupervisedProgress } from "./supervised-progress.js";
 import type { DurableTaskProjection } from "./observed-waits.js";
 import type { BackgroundTaskRuntime } from "./runtime.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
@@ -191,6 +192,8 @@ function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWor
   const command = durableCommandLabel(task);
   const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
   const facts: string[] = [];
+  const progress = task.progress && describeSupervisedProgress(task.progress, now);
+  if (progress) facts.push(progress);
   if (task.attention && task.reason) facts.push(task.reason);
   else if (task.attention) facts.push(task.status);
   if (task.kind === "watch" && task.intervalSeconds) facts.push(`every ${formatDuration(task.intervalSeconds * 1000)}`);
@@ -228,6 +231,7 @@ function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines
     { label: "kind", value: task.kind },
     ...(task.parentAgentId ? [{label: "agent", value: task.parentAgentId}] : []),
     { label: "operation", value: task.operationId },
+    ...(task.progress ? [{ label: "last progress", value: new Date(task.progress.observedAt).toISOString() }] : []),
     { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
     { label: "started", value: new Date(task.startedAt).toISOString() },
     ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),

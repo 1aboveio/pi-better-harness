@@ -7,6 +7,7 @@ import { failurePath, failureView } from "./failures.domain.mjs";
 import { readLog } from "./logs.domain.mjs";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.domain.mjs";
 import { getObservedWaitHost } from "./observed-wait-client.domain.mjs";
+import { describeSupervisedProgress } from "./supervised-progress.domain.mjs";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.domain.mjs";
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 const DURABLE_ROW_CACHE_MS = 1_000;
@@ -175,6 +176,9 @@ export function createBackgroundTasksNavigator(runtime, managed) {
         const command = durableCommandLabel(task);
         const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
         const facts = [];
+        const progress = task.progress && describeSupervisedProgress(task.progress, now);
+        if (progress)
+            facts.push(progress);
         if (task.attention && task.reason)
             facts.push(task.reason);
         else if (task.attention)
@@ -216,6 +220,7 @@ export function createBackgroundTasksNavigator(runtime, managed) {
             { label: "kind", value: task.kind },
             ...(task.parentAgentId ? [{ label: "agent", value: task.parentAgentId }] : []),
             { label: "operation", value: task.operationId },
+            ...(task.progress ? [{ label: "last progress", value: new Date(task.progress.observedAt).toISOString() }] : []),
             { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
             { label: "started", value: new Date(task.startedAt).toISOString() },
             ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),

@@ -1,5 +1,7 @@
 # Background tasks stop when their assignment ends
 
+> Decision history. The current Background task ownership and cleanup policy is maintained in [ADR 0028](0028-background-task-policy.md#execution-and-ownership).
+
 Status: accepted decision; implementation pending.
 
 ## Decision

@@ -170,6 +170,22 @@ afterEach(() => {
 });
 
 describe("supervised local process", () => {
+  it("records fresh output after its retained log reaches the byte cap", async () => {
+    const directory = supervisorDirectory("capped-progress");
+    const supervisor = createLocalSupervisor({ directory });
+    const started = await supervisor.start({ token: "process-capped-progress", cwd: directory, maxLogBytes: 8,
+      argv: [process.execPath, "-e", "const fs=require('node:fs');process.stdout.write('12345678');const t=setInterval(()=>{if(fs.existsSync('next')){clearInterval(t);console.log('discarded');setTimeout(()=>{},10000)}},50)"] });
+    const paths = supervisorPaths(directory, started.taskId);
+    try {
+      await waitFor("full retained log", () => existsSync(paths.stdout) && readFileSync(paths.stdout, "utf8") === "12345678");
+      const afterFull = Date.now();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      writeFileSync(join(directory, "next"), "go");
+      await waitFor("progress from discarded output", () => JSON.parse(readFileSync(join(paths.dir, "progress.json"), "utf8")).observedAt > afterFull);
+      expect(readFileSync(paths.stdout, "utf8")).toBe("12345678");
+    } finally { await supervisor.stop(started.taskId); }
+  });
+
   // @covers observed-waits.runner-outlives-caller
   // @level integration
   it("keeps executing and records terminal evidence after the launching process exits", async () => {
@@ -398,6 +414,31 @@ describe("supervised local process", () => {
 });
 
 describe("supervised local command watch", () => {
+  it("advances the progress checkpoint only when a poll observes a changed result", async () => {
+    const directory = supervisorDirectory("watch-progress");
+    const value = join(directory, "value");
+    writeFileSync(value, '{"b":2,"a":1}');
+    const supervisor = createLocalSupervisor({ directory });
+    const started = await supervisor.start({
+      token: "watch-progress-0001", kind: "watch", cwd: directory,
+      argv: [process.execPath, "-e", "console.log(require('node:fs').readFileSync('value', 'utf8'))"],
+      intervalSeconds: 0.15, timeoutSeconds: 20,
+      successWhen: { type: "stdout_contains", value: "done" },
+    });
+    const paths = supervisorPaths(directory, started.taskId);
+    const checkpoint = join(paths.dir, "progress.json");
+    const progress = () => existsSync(checkpoint) ? JSON.parse(readFileSync(checkpoint, "utf8")) : undefined;
+    try {
+      const first = await waitFor("first watch result", () => { const p = progress(); return p?.fingerprint && p; });
+      writeFileSync(value, '{"a":1, "b":2}');
+      await waitFor("equivalent poll written to stdout", () => readFileSync(paths.stdout, "utf8").includes('{"a":1, "b":2}'));
+      expect(progress()).toEqual(first);
+      writeFileSync(value, '{"a":3}');
+      const next = await waitFor("changed result checkpoint", () => { const p = progress(); return p.fingerprint !== first.fingerprint && p; });
+      expect(next.observedAt).toBeGreaterThan(first.observedAt);
+    } finally { await supervisor.stop(started.taskId); }
+  });
+
   // @covers observed-waits.watch-cadence-and-success
   // @level integration
   it("polls on its own cadence and ends on the production success condition", async () => {

@@ -52,6 +52,10 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()!();
 });
 
+// These RPC journeys advance the coordinator explicitly. A delayed OS notification
+// for creation of the fixture's runs directory would measure an unrelated inventory.
+const manualSourceWatch = () => Object.assign(new EventEmitter(), { ready: Promise.resolve(), close() {} });
+
 function workspace(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `observed-waits-${name}-`));
   cleanups.push(() => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
@@ -105,13 +109,14 @@ function startHost(options: {
   supervisor?: LocalSupervisor;
   notifyParent?: (notification: ParentNotification) => void;
   ctx?: ExtensionContext;
+  now?: () => number;
 }): { host: ObservedWaitHost; pi: ExtensionAPI; notifications: ParentNotification[] } {
   const harness = options.harness ?? createHarness();
   const notifications: ParentNotification[] = [];
   const host = createObservedWaitHost(harness.pi, {
     storePath: options.storePath ?? join(options.root, "operations.sqlite"),
     supervisorDirectory: join(options.root, "supervisor"),
-    pollMs: 0,
+    pollMs: 0, now: options.now,
     ...(options.supervisor ? { supervisor: options.supervisor } : {}),
     notifyParent: options.notifyParent ?? ((notification) => { notifications.push(notification); }),
   });
@@ -228,6 +233,36 @@ describe("parent durable launches", () => {
       expect(notifications).toHaveLength(1);
     },
   );
+
+  it("receipts each continuous period of silence separately", async () => {
+    const root = workspace("stall-receipts"), ctx = createCtx(root);
+    let now = Date.now();
+    const { host } = startHost({ root, ctx, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "process", params: { shell: false, callback: true,
+      argv: nodeCommand("const fs=require('node:fs');const t=setInterval(()=>{if(fs.existsSync('resume')){clearInterval(t);console.log('new output');setTimeout(()=>{},20000)}},50)") } });
+    const origin = { cwd: root, sessionId: ctx.sessionManager.getSessionId() };
+    const checkpoint = join(root, "supervisor", "tasks", launch.id, "progress.json");
+    const progressTime = () => JSON.parse(readFileSync(checkpoint, "utf8")).observedAt as number;
+    const alert = () => host.pendingStallAlert(origin, launch.id, []);
+    try {
+      await until(host, () => existsSync(checkpoint));
+      const firstTime = progressTime();
+      now = firstTime + 360_000;
+      const first = alert();
+      expect(first).toBeDefined();
+      first!.delivery.delivered();
+      expect(alert()).toBeUndefined();
+      writeFileSync(join(root, "resume"), "go");
+      await until(host, () => progressTime() > firstTime);
+      now = progressTime();
+      expect(alert()).toBeUndefined();
+      now += 360_000;
+      const second = alert();
+      expect(second).toBeDefined();
+      expect(second!.delivery.receiptId).not.toBe(first!.delivery.receiptId);
+      expect(second!.notification.event.content).toContain("new output");
+    } finally { await host.stopDurableTask(origin, launch.id); }
+  });
 
   it("retries reconciliation after coordinator write contention", async () => {
     const root = workspace("store-busy");
@@ -1393,7 +1428,7 @@ describe("Subagents request/reply surface", () => {
     const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
     mkdirSync(join(root, "runs", "attempt-rpc"), { recursive: true });
     writeFileSync(join(root, "runs", "attempt-rpc", "meta.json"), JSON.stringify({ id: "attempt-rpc", sessionId: "conv-rpc", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-rpc", workspace: root } }));
-    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
     cleanups.push(() => model.close());
     await model.reconcile();
     const inventories = model.metrics.inventories;
@@ -1533,7 +1568,7 @@ describe("Subagents request/reply surface", () => {
     const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
     mkdirSync(join(root, "runs", "attempt-resume"), { recursive: true });
     writeFileSync(join(root, "runs", "attempt-resume", "meta.json"), JSON.stringify({ id: "attempt-resume", sessionId: "conv-resume", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-resume", workspace: root } }));
-    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
     cleanups.push(() => model.close());
     await model.reconcile();
     const inventories = model.metrics.inventories;

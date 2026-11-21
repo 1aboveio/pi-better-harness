@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
 import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, observationRevisionForOrigin, belongsToOrigin, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
+// @ts-expect-error Generated canonical progress policy.
+import { supervisedProgress } from "./domain/background-service/supervised-progress.domain.mjs";
 import { BackgroundHistory } from "./background-history.ts";
 import type { WorkScope } from "./read-model.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
@@ -141,6 +143,8 @@ export class BackgroundObservation {
     try {
       const watcher = watch(directory, { recursive: true }, (_event, file) => {
         if (this.closed) return;
+        // Progress changes only the active overlay. Historical rows and wait inputs stay cached.
+        if (file && /^tasks[/\\][^/\\]+[/\\]progress\.json$/.test(String(file))) { this.schedule(); return; }
         const match = file && /^(?:observed[/\\]([^/\\]+)\.json|tasks[/\\]([^/\\]+)[/\\](?:launch|claim|command|result|lost|stop|cleanup)\.json)$/.exec(String(file));
         if (match) {
           const op = this.db?.prepare("SELECT operation_id FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").get(match[1] ?? match[2]);
@@ -310,10 +314,14 @@ export class BackgroundObservation {
       this.dirtyOperations.clear();
       if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
       if (this.expiry) clearTimeout(this.expiry);
-      const deadlines = [...this.recent.map(op => op.terminal_at + 30000), ...[...this.legacy.values()].flatMap(entry => [
+      const deadlines = [...rows.flatMap(row => row.progress?.nextDeadline ?? []), ...this.recent.map(op => op.terminal_at + 30000), ...[...this.legacy.values()].flatMap(entry => [
         ...entry.recent.map(row => row.endedAt + 30000), ...recentMetaDeadline(entry.origin),
         ...(entry.origin.sessionId ? recentMetaDeadline({ cwd: entry.origin.cwd }) : [])])].filter(Number.isFinite);
-      if (deadlines.length) { this.expiry = setTimeout(() => this.schedule(), Math.max(1, Math.min(...deadlines) - Date.now())); this.expiry.unref(); }
+      if (deadlines.length) {
+        const delay = Math.max(1, Math.min(2_147_483_647, Math.min(...deadlines) - Date.now()));
+        this.expiry = setTimeout(() => this.schedule(), delay);
+        this.expiry.unref();
+      }
       observation?.commit();
       return changed;
     } catch (error) {
@@ -404,7 +412,7 @@ export class BackgroundObservation {
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
         const row = { ...parent, durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
-          status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
+          callback: Boolean(context.kind && context.callback !== false), status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
           terminalRevision: op.terminal_revision, terminalOutcome: op.terminal_outcome,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace, branchId: op.owner_branch_id ?? null },
           startedAt: inspection?.result?.startedAt ?? inspection?.launch.createdAt ?? op.created_at,
@@ -417,7 +425,11 @@ export class BackgroundObservation {
         if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
         return row;
         } catch (error) { this.dirtyOperations.add(op.operation_id); throw error; }
-      }).filter(Boolean);
+      }).filter(Boolean).map(row => {
+        if (!row.active) return row;
+        const inspection = this.terminalProjections.get(row.operationId)?.inspection;
+        return { ...row, progress: supervisedProgress(inspection) };
+      });
   }
   private pendingRows(entry: BackgroundScope): any[] { return entry.pending; }
   private refreshPending(entry: BackgroundScope, revision: number): void {
