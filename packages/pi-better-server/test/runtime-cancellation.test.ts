@@ -138,7 +138,7 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
       const launchToken = JSON.parse(readFileSync(paths.launch, "utf8")).token;
       const crashedAfterStop = stage === "after-stop-file" || stage === "after-process-action";
       const claim = crashedAfterStop ? createLocalSupervisor({ directory }).snapshot(taskId)?.claim : undefined;
-      if (crashedAfterStop) assert.ok(claim, "the post-stop crash must target a claimed runner");
+      if (crashedAfterStop) assert.ok(claim?.pidStartTime, "the post-stop crash must target a runner with a recorded process identity");
       const first = await start(stage);
       const credential = host.authorizeCancellationForParent(ctx, taskId, "crash-key");
       const exited = once(first.child, "exit");
