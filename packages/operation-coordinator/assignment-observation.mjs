@@ -1,11 +1,22 @@
 import { createRequire } from "node:module";
+import { AssignmentInbox } from "./assignment-inbox.mjs";
+import { pathToFileURL } from "node:url";
+
+// Only first-party source SQL passes this facade; quoted values stay untouched.
+const sourceTables = new Set(["schema_meta", "sqlite_master", "sqlite_schema", "assignment_change_source", "assignment_changes",
+    "waits", "wait_dependencies", "resume_claims", "operations", "coordinator_state", "assignment_outcomes",
+    "subagent_launch_intents", "background_input_versions", "background_parent_callbacks", "assignments", "assignment_bindings", "assignment_attempts"]);
+function sourceSQL(sql) {
+    if (/^PRAGMA\s+data_version\s*$/i.test(sql)) return "PRAGMA coordinator_source.data_version";
+    return sql.replace(/'(?:''|[^'])*'|\b[A-Za-z_][A-Za-z_0-9]*\b/g, token => sourceTables.has(token) ? `coordinator_source.${token}` : token);
+}
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
-export function readAssignmentWaits(path, owner) {
+export function readAssignmentWaits(path, owner, connection) {
     let db;
     try {
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-        db = new DatabaseSync(path, { readOnly: true });
+        db = connection ?? new DatabaseSync(path, { readOnly: true });
         // v4 adds repair accounting; the observed wait/outcome fields are unchanged.
         if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
             return { verified: false, waits: [], reason: "Unsupported coordinator schema; assignment state is unverified." };
@@ -37,6 +48,110 @@ export function readAssignmentWaits(path, owner) {
     } catch {
         return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
     } finally {
-        db?.close();
+        if (!connection) db?.close();
     }
+}
+
+/** A root read model owns this connection; ordinary observers remain one-shot. */
+export function createAssignmentReader(path, inboxPath = ":memory:", derivedConnection, options = {}) {
+    const inbox = new AssignmentInbox(inboxPath, derivedConnection);
+    let db;
+    let identity;
+    let snapshot = false;
+    const composed = options.composed === true;
+    const owner = derivedConnection;
+    const dropSource = () => {
+        if (composed) { if (db) owner.exec("DETACH DATABASE coordinator_source"); }
+        else db?.close();
+        db = undefined; statements.clear();
+    };
+    const statements = new Map();
+    const reader = {
+        revision() {
+            const { statSync } = createRequire(import.meta.url)("node:fs");
+            const stat = statSync(path, { bigint: true });
+            const next = `${stat.dev}:${stat.ino}`;
+            if (identity !== next) {
+                if (snapshot) throw new Error("Coordinator identity changed during observation");
+                dropSource();
+                identity = next;
+            }
+            const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+            if (!db) {
+                if (composed) {
+                    const uri = pathToFileURL(path); uri.searchParams.set("mode", "ro");
+                    owner.prepare("ATTACH DATABASE ? AS coordinator_source").run(uri.href);
+                    db = { prepare: sql => owner.prepare(sourceSQL(sql)), get observationActive() { return snapshot; }, beginSnapshot: () => reader.beginSnapshot() };
+                } else db = new DatabaseSync(path, { readOnly: true });
+            }
+            return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
+        },
+        connection(refresh = true) { if (refresh) this.revision(); return db; },
+        changes() { this.revision(); return inbox.receive(db, identity); },
+        acknowledgeChanges(batch, complete) { inbox.acknowledge(batch, complete); },
+        get changeMetrics() { return inbox.metrics; },
+        get snapshotActive() { return snapshot; },
+
+        beginSnapshot() {
+            this.revision();
+            if (snapshot) throw new Error("Coordinator snapshot already open");
+            const transaction = composed ? owner : db;
+            transaction.exec("BEGIN");
+            snapshot = true;
+            const release = () => {
+                if (!snapshot) return;
+                try { transaction.exec("ROLLBACK"); } finally { snapshot = false; }
+            };
+            try {
+                // Pin the WAL read view before recording its revision; other writers keep advancing.
+                db.prepare("SELECT count(*) FROM sqlite_schema").get();
+                return { revision: this.revision(), release, commit: () => {
+                    if (!snapshot) return;
+                    transaction.exec("COMMIT");
+                    snapshot = false;
+                } };
+            } catch (error) { release(); throw error; }
+        },
+
+        read(owner) {
+            try {
+                this.revision();
+                return readAssignmentWaits(path, owner, { prepare(sql) {
+                    if (!statements.has(sql)) statements.set(sql, db.prepare(sql));
+                    return statements.get(sql);
+                } });
+            } catch {
+                return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
+            }
+        },
+        upgradeObligations() {
+            try { this.revision(); } catch (error) {
+                if (error.code === "ENOENT") return [];
+                throw error;
+            }
+            const version = db.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
+            if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema during upgrade");
+            const obligations = db.prepare("SELECT operation_id, task_id, observer_kind FROM operations WHERE phase='running' AND terminal_revision=0").all()
+                .map(row => ({ kind: "unsettled-operation", id: row.task_id, operationId: row.operation_id, observer: row.observer_kind }));
+            const reasons = db.prepare("SELECT claim_id AS id, state FROM resume_claims WHERE state IN ('claimed', 'published')").all()
+                .map(row => ({ kind: "resume-claim", id: row.id, state: row.state }));
+            for (const row of db.prepare("SELECT wait_id, generation, phase FROM waits WHERE owner_kind='worker-conversation' AND phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed=0").all()) {
+                reasons.push({ kind: "worker-wait", id: row.wait_id, generation: row.generation, phase: row.phase });
+            }
+            if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_launch_intents'").get()) {
+                for (const row of db.prepare("SELECT owner, request_key, attempts FROM subagent_launch_intents WHERE state='accepted'").all()) {
+                    reasons.push({ kind: "launch-intent", id: row.request_key, owner: row.owner, attempts: JSON.parse(row.attempts).map(attempt => attempt.id) });
+                }
+            }
+            for (const row of db.prepare("SELECT value FROM coordinator_state WHERE key LIKE 'background-request-v1:%'").all()) {
+                const request = JSON.parse(row.value);
+                if (request.state !== 'returned') reasons.push({kind:'background-request', id:request.key, owner:request.owner});
+            }
+            return [...obligations, ...reasons];
+        },
+
+        close() { if (snapshot) { (composed ? owner : db).exec("ROLLBACK"); snapshot = false; } dropSource(); identity = undefined; inbox.close(); },
+
+    };
+    return reader;
 }

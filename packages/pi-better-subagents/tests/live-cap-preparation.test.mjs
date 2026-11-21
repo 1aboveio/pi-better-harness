@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 import { after, beforeEach, test } from "node:test";
 import { EventEmitter } from "node:events";
@@ -11,6 +12,7 @@ const original = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, PI_CODING
 process.env.TMPDIR = root;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 mkdirSync(process.env.PI_CODING_AGENT_DIR);
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 const bin = join(root, "bin");
 mkdirSync(bin);
 writeFileSync(join(bin, "pi"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
@@ -38,6 +40,7 @@ const loader = `export async function resolve(specifier, context, nextResolve) {
 }`;
 register("data:text/javascript," + encodeURIComponent(loader));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension } = await import("../index.ts");
 const registry = await import("../registry.ts");
 const capacity = await import("../capacity.mjs");
@@ -61,7 +64,7 @@ function harness(t) {
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         on(name, handler) { handlers[name] = handler; },
         sendMessage() {},
-    });
+    }, managedDomainPort());
     const model = { provider: "local", id: "fixture", reasoning: true };
     const ctx = { cwd: root, model, hasUI: false, isProjectTrusted: () => false,
         sessionManager: { getBranch: () => entries }, modelRegistry: { getAvailable: () => [model] },
@@ -101,7 +104,10 @@ beforeEach(() => {
     save(6);
 });
 
-after(() => {
+after(async () => {
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
     config.setConfigPathForTests(undefined);
     for (const [key, value] of Object.entries(original)) {
         if (value === undefined) delete process.env[key];

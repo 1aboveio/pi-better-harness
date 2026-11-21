@@ -1,10 +1,12 @@
 {
   "name": "pi-better-background-tasks",
-  "version": "0.15.4",
+  "version": "0.19.0",
   "description": "Pi extension for durable background shell tasks, watchers, logs, and status inspection.",
   "license": "MIT",
   "type": "module",
-  "bin": { "pi-background-runtime-status": "./runtime-client/src/runtime/status-cli.mjs" },
+  "bin": {
+    "pi-background-runtime-status": "./runtime-client/src/runtime/status-cli.mjs"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -47,6 +49,7 @@
     "runtime-client/**",
     "src/**/*.ts",
     "src/shared-operation-coordinator/assignment-observation.mjs",
+    "src/shared-work-client.mjs",
     "src/supervisor/**/*.mjs",
     "src/supervisor/**/*.js",
     "!src/**/*.test.ts",

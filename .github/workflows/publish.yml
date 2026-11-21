@@ -28,15 +28,17 @@ concurrency:
 jobs:
   publish:
     name: publish ${{ inputs.package }}
-    runs-on: ubuntu-latest
+    # Same image as CI: ubuntu-26.04 fails the confinement proofs that
+    # `npm run verify` runs, so a release must not be the first to find out.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
     environment: npm-publish
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.1
           registry-url: https://registry.npmjs.org
@@ -116,30 +118,6 @@ jobs:
             echo "${PACKAGE}@${VERSION} is not published yet."
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Verify existing package provenance
-        if: steps.registry.outputs.published == 'true'
-        env:
-          PACKAGE: ${{ steps.package.outputs.name }}
-          VERSION: ${{ steps.package.outputs.version }}
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error \
-            "https://registry.npmjs.org/-/npm/v1/attestations/${PACKAGE}@${VERSION}" \
-            > /tmp/attestations.json
-          node -e '
-            const { attestations = [] } = require("/tmp/attestations.json");
-            const expected = process.env.GITHUB_SHA;
-            const matches = attestations.some(({ bundle }) => {
-              const encoded = bundle?.dsseEnvelope?.payload;
-              if (!encoded) return false;
-              const statement = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-              return statement.predicate?.buildDefinition?.resolvedDependencies?.some(
-                ({ digest }) => digest?.gitCommit === expected,
-              );
-            });
-            if (!matches) throw new Error("published package provenance does not match " + expected);
-          '
 
       - name: Pack dry run
         env:
@@ -285,6 +263,8 @@ jobs:
               # Presence is not version: a stale staged component would ship a bundle that
               # declares one version and carries another. Compare the Harness manifest and the
               # packed tree against each workspace manifest.
+              # JavaScript template literals must reach Node without shell expansion.
+              # shellcheck disable=SC2016
               node -e '
                 const { readFileSync } = require("node:fs");
                 const harness = JSON.parse(readFileSync("packages/pi-better-harness/package.json", "utf8"));
@@ -332,6 +312,34 @@ jobs:
           PACKAGE: ${{ steps.package.outputs.name }}
           VERSION: ${{ steps.package.outputs.version }}
         run: node scripts/npm-version-visible.mjs "$PACKAGE" "$VERSION" --wait-seconds 600
+
+      - name: Verify existing package provenance
+        # Check every visible version, including one found by the second registry lookup.
+        # Attestations can become visible after the version document.
+        timeout-minutes: 3
+        env:
+          PACKAGE: ${{ steps.package.outputs.name }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 120 --connect-timeout 10 --max-time 15 \
+            "https://registry.npmjs.org/-/npm/v1/attestations/${PACKAGE}@${VERSION}" \
+            > /tmp/attestations.json
+          node -e '
+            const { attestations = [] } = require("/tmp/attestations.json");
+            const expected = process.env.GITHUB_SHA;
+            const matches = attestations.some(({ bundle }) => {
+              const encoded = bundle?.dsseEnvelope?.payload;
+              if (!encoded) return false;
+              const statement = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+              return statement.predicate?.buildDefinition?.resolvedDependencies?.some(
+                ({ digest }) => digest?.gitCommit === expected,
+              );
+            });
+            if (!matches) throw new Error("published package provenance does not match " + expected);
+          '
 
       - name: Create GitHub release
         env:

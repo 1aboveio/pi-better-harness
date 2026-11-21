@@ -9,6 +9,7 @@ import { inspectDaemonOwner } from "../daemon-owner.ts";
 import type { RunRemote, ServerArtifact } from "../startup/managed-types.ts";
 import { runtimeRoot } from "./root.ts";
 import { socketPathFor } from "./socket.ts";
+export { WorkClient } from "./work-client.mjs";
 
 export interface RuntimeOptions {
   agentDir: string;
@@ -87,11 +88,12 @@ export async function ensureRuntime(options: RuntimeOptions): Promise<any> {
   catch (error) {
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
   }
-  const owner = inspectDaemonOwner(root.serverDir);
-  if (owner.status === "live" || owner.status === "ambiguous") throw new Error(`runtime-unhealthy: existing ${owner.status} owner at ${root.serverDir}; no replacement was started`);
+  const recovered = await waitForRuntimeOwner(root.serverDir, query, timeoutMs, options.signal);
+  if (recovered !== undefined) return recovered;
   let runtime;
   try { runtime = await stageRuntime({ run: runLocal, artifact, installRoot: options.installRoot ?? join(root.agentDir, "managed-runtime"), signal: options.signal, onProgress: options.onProgress, offline: options.offline }); }
   catch (error) { throw new Error(`runtime-unavailable: ${String(error)}. Connect to the network to cache the pinned runtime, or repair the reported corrupt cache; no fallback manager was started.`); }
+  options.signal?.throwIfAborted();
   const fd = openSync(join(root.serverDir, "daemon.log"), "a", 0o600);
   try {
     const env = { ...process.env, PI_SERVER_DIR: root.serverDir, PI_CODING_AGENT_DIR: root.agentDir, PI_SERVER_AGENT: "pi" };
@@ -107,4 +109,23 @@ export async function ensureRuntime(options: RuntimeOptions): Promise<any> {
     await delay(50, undefined, { signal: options.signal });
   }
   throw new Error(`runtime-unavailable: startup timed out; inspect ${join(root.serverDir, "daemon.log")}; owner was not replaced`);
+}
+
+/** Wait for the current owner to listen or release ownership; never replace it. */
+export async function waitForRuntimeOwner(serverDir: string, query: () => Promise<any>, timeoutMs: number, signal?: AbortSignal): Promise<any | undefined> {
+  // A draining owner can outlive its listening socket. Wait for it rather than
+  // treating the handoff window as failure or starting a competing writer.
+  const ownerDeadline = Date.now() + timeoutMs;
+  let backoff = 100;
+  for (;;) {
+    const owner = inspectDaemonOwner(serverDir);
+    if (owner.status === "ambiguous") throw new Error(`runtime-unhealthy: existing ambiguous owner at ${serverDir}; no replacement was started`);
+    if (owner.status !== "live") return undefined;
+    signal?.throwIfAborted();
+    if (Date.now() >= ownerDeadline) throw new Error("runtime-unavailable: reconnect deadline exceeded waiting for existing live owner");
+    await delay(Math.min(backoff, ownerDeadline - Date.now()), undefined, { signal });
+    backoff = Math.min(1000, backoff * 2);
+    try { return await query(); }
+    catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+  }
 }

@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { LaunchRecipe, RunMeta } from "./registry.ts";
 
 /**
@@ -150,9 +151,10 @@ export function archivePublicationPending(meta: RunMeta): boolean {
 /**
  * Publish the compact record for a completed attempt, atomically.
  *
- * Returns true when this call published (or re-published) the record and false
- * when the attempt is not archivable at all. Rewriting an existing record is how
- * a failed publication is retried, so the call is idempotent. IO failures throw:
+ * Returns true when this call published or verified an identical record and
+ * false when the attempt is not archivable at all. Missing, corrupt or changed
+ * records are atomically replaced; redundant retries preserve source identity.
+ * IO failures throw:
  * the caller decides whether the volatile record is retained.
  */
 export function archiveCompletedAttempt(meta: RunMeta): boolean {
@@ -162,14 +164,25 @@ export function archiveCompletedAttempt(meta: RunMeta): boolean {
     const directory = durableAttemptsDir();
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = attemptPath(meta.id);
-    const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
     const record: ArchivedAttemptRecord = { version: ARCHIVE_VERSION, meta: compactAttempt(meta) };
-    try {
-        writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
-        renameSync(temp, path);
-    } catch (error) {
-        try { unlinkSync(temp); } catch { /* best effort */ }
-        throw error;
+    const payload = JSON.stringify(record);
+    let previous: string | undefined;
+    try { previous = readFileSync(path, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    let identical = false;
+    if (previous !== undefined) {
+        try { identical = isDeepStrictEqual(JSON.parse(previous), JSON.parse(payload)); }
+        catch { /* A corrupt record must be repaired by the real writer. */ }
+    }
+    if (!identical) {
+        const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
+        try {
+            writeFileSync(temp, payload, { mode: 0o600, flag: "wx" });
+            renameSync(temp, path);
+        } catch (error) {
+            try { unlinkSync(temp); } catch { /* best effort */ }
+            throw error;
+        }
     }
     // The published record now speaks for this conversation, so a marker left by
     // an older non-completing attempt no longer applies.
@@ -182,7 +195,7 @@ export function archiveCompletedAttempt(meta: RunMeta): boolean {
  * that does not match is treated as absent: guessing a conversation identity
  * from a damaged or foreign record would continue the wrong history.
  */
-function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
+export function parseArchivedAttempt(raw: string, id: string, sessionRoot = durableSessionsDir()): RunMeta | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -204,7 +217,7 @@ function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
     const recipe = meta.recipe as Partial<LaunchRecipe> | undefined;
     if (!recipe || typeof recipe !== "object" || recipe.version !== 1) return undefined;
     if (recipe.sessionId !== meta.sessionId) return undefined;
-    if (typeof recipe.sessionDir !== "string" || !isDurableSessionsPath(recipe.sessionDir)) return undefined;
+    if (typeof recipe.sessionDir !== "string" || !(recipe.sessionDir === sessionRoot || recipe.sessionDir.startsWith(sessionRoot.endsWith(sep) ? sessionRoot : `${sessionRoot}${sep}`))) return undefined;
     if (typeof recipe.cwd !== "string" || recipe.cwd === "") return undefined;
     return meta as RunMeta;
 }
@@ -350,7 +363,7 @@ function stateSignature(path: string): string {
 }
 
 /** Anything that does not match the requested conversation is treated as absent. */
-function parseState(raw: string, sessionId: string): ArchivedSessionState | undefined {
+export function parseArchivedSessionState(raw: string, sessionId: string): ArchivedSessionState | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -378,7 +391,7 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     if (cached && cached.signature === signature) return cached.state;
     let state: ArchivedSessionState | undefined;
     try {
-        state = parseState(readFileSync(path, "utf-8"), sessionId);
+        state = parseArchivedSessionState(readFileSync(path, "utf-8"), sessionId);
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         state = undefined;

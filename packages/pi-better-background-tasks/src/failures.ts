@@ -103,7 +103,7 @@ export function recoverDeclaredOperation(meta: BackgroundTaskMeta, at = Date.now
   }
 }
 
-export function createFailureAttention() {
+export function createFailureAttention(deliverUrgent?: (origin: BackgroundTaskMeta["callbackOrigin"], event: Parameters<ReturnType<typeof getCallbackBatcher>["deliverUrgent"]>[0]) => boolean | Promise<boolean>) {
 const attentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let attentionSuspended = false;
 /** Session shutdown: stop this instance's attention timers; the next session_start reschedules (#324). */
@@ -159,7 +159,9 @@ function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession
   const state = readFailureState(failurePath(id));
   const pending = pendingFailureAttention(state, Date.now());
   if (pending) {
-    const delivery = getCallbackBatcher(pi).deliverUrgent({
+    const deliver = (event: Parameters<ReturnType<typeof getCallbackBatcher>["deliverUrgent"]>[0]) => deliverUrgent ? deliverUrgent(meta.callbackOrigin,event) : getCallbackBatcher(pi).deliverUrgent(event);
+    const delivery = deliver({
+      receiptId: `background-failure:${meta.id}:${pending.key}`,
       ...failureAttentionFields(meta, state, pending),
       isDelivered: () => {
         const current = readMeta(id);
@@ -190,7 +192,7 @@ function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession
     return;
   }
   const due = Object.values(state.observations)
-    .filter((x) => x.status === "unresolved" && x.category !== "stall" && state.delivered[x.id] === undefined)
+    .filter((x) => x.status === "unresolved" && state.delivered[x.id] === undefined)
     .map((x) => x.firstObservedAt + 60_000 - Date.now());
   if (due.length) {
     const timer = setTimeout(() => scheduleFailureAttention(pi, id, getActiveSession), Math.max(1, Math.min(...due)));

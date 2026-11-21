@@ -1,0 +1,88 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "reviewed-fixtures-integrated-focused-checks-pass-workspace1-residuals-retained",
+  "head": "0325a760e5e0040dcde790249602ea044dc756cb",
+  "headKind": "Tested integration merge; subsequent report-only commit does not change implementation or tests.",
+  "standingOrders": [],
+  "merges": [
+    { "head": "ef2bb5083c020077da7c6bf6fa7573a7e1ffaddf", "parents": ["21809e118970519354dbcb3cfcbceb84e817b0a1", "ba623bac8c4d80de20f89958352fed56b87bfebc"], "method": "Ordinary no-ff merge of exact fetched reviewed803 commit.", "result": "Conflicts resolved per intent; canonical coordinator/domain copies regenerated. Reviewed ancestry also carries Background acquisition deferral, cold-bootstrap mailbox retention, initial Background source publication fixture and bounded diagnostics. No duplicate implementation of these policies." },
+    { "head": "0325a760e5e0040dcde790249602ea044dc756cb", "parents": ["ef2bb5083c020077da7c6bf6fa7573a7e1ffaddf", "7dec7f163cdedf5b6b10c925a5b062b5c8240321"], "method": "Ordinary no-ff merge of exact fetched reviewed802 commit.", "result": "Clean merge; only runtime-archive-publication.test.ts changed in this merge, byte-identical to reviewed802." }
+  ],
+  "resolution": [
+    "Canonical inbox conflict was comment-only: retain805 explanation and existing entity aliases, read-only initialized-schema fast path and owned constructor cleanup; regenerate all copies, no whole-side file replacement.",
+    "Adopt reviewed readiness requiring checkpoints, assignment reader AND Background initialization, and reviewed source-schema rejection ordering. Keep805 expanded Background registry/change metrics, bounded scheduling, source/writer/recipient/outcome fences and explicit unverified Goal coverage.",
+    "Keep805 constructor acquisitionAttempts0, same-owner, exact alias set and checkpoint-table assertions; add reviewed Background-ready=false and exact main-only pre-acquisition state. Keep805 initial rebuilding history assertion and await ordinary reconciliation. No original recovery assertion removed.",
+    "Assignment-inbox contention/corruption alias expectations now exclude Background because the reviewed ordered deferral has not acquired that later participant. Exact main/log_checkpoints required, not a relaxed subset or extra physical connection.",
+    "Cached factory setup imports factories/theme before starting the existing worker watchdog. Archive publication hook is installed at scan after deferred reader acquisition, still forcing the real writer during first source-signature verification. No timeout/deadline enlargement."
+  ],
+  "preserved": {
+    "byteIdenticalTo218": ["Goal activity.ts/index.ts/types.ts unknown coverage and cache fences", "admission-scheduler.test.ts corrected marker and bounded verdict diagnostics", "goal-recovery-readiness.test.ts", "standalone readiness fixture/helper", "observed-waits readiness fixture", "SSH lifecycle diagnostics", "startup-owner stderr assertion diagnostic"],
+    "evidence": ".private-805/logs/causal-fixture-preserved.log",
+    "assertions": "All77 original SSH assertion/wait ASTs unchanged; no Goal/admission or standalone assertion/deadline weakening.",
+    "sync": "Repeated existing sync-operation-coordinator and sync-runtime-domain left all integration files byte-identical.",
+    "ancestry": "Both exact reviewed ba623bac8c4d80de20f89958352fed56b87bfebc and7dec7f163cdedf5b6b10c925a5b062b5c8240321 verified ancestors of final integration head."
+  },
+  "focusedProof": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/background-inbox-deferral.test.ts packages/pi-better-server/test/checkpoint-deferral.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts packages/pi-better-server/test/cached-factory-startup.test.ts packages/pi-better-server/test/cold-bootstrap.test.ts packages/pi-better-server/test/background-source-ready.test.ts packages/pi-better-server/test/goal-recovery-readiness.test.ts packages/pi-better-server/test/runtime-archive-publication.test.ts",
+      "exit": 0, "passed": 26, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/causal-fixture-integrated-components.log",
+      "meaning": "Real SQLite checkpoint/assignment/Background deferral, exact owned cleanup/recovery, existing caller400ms controls, Background inputs and authority. Actual cached-factory setup guard simulates4200ms cold import against unchanged4000ms watchdog without starting worker. Cold mailbox test retains expired query/cancel and rejects late readiness. Real archive writer hook still runs in source verification. Goal previous active tracker survives unverified initial read and drains once on SAME subscription's ready publication."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch releases|^one wait changes exactly|^active and incremental history' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 0, "passed": 4, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/causal-fixture-history.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts packages/pi-better-goal/test/admission-scheduler.test.ts",
+      "exit": 0, "passed": 38, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/causal-fixture-goal-admission.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/runtime-unsupported-schema.test.ts packages/pi-better-server/test/query-bootstrap.test.ts",
+      "exit": 0, "passed": 6, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/causal-fixture-schema-bootstrap.log"
+    },
+    { "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-goal --workspace packages/pi-better-background-tasks --workspace packages/pi-better-subagents", "exit": 0, "evidence": ".private-805/logs/causal-fixture-types-final.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "evidence": ".private-805/logs/causal-fixture-ssh-guard.log" },
+    { "command": "Repeat existing coordinator/domain sync with byte comparison", "exit": 0, "evidence": ".private-805/logs/causal-fixture-sync-check.log" },
+    { "command": "git diff --check; git diff --cached --check; exact reviewed ancestry checks", "exit": 0 }
+  ],
+  "retainedInitialFailure": {
+    "command": "Initial803 component set before final alias expectation composition",
+    "exit": 1, "passed": 23, "failed": 1,
+    "error": "inbox corruption case expected background_inbox alias from the earlier eager805 contract; actual main/log_checkpoints because assignment failure prevents later Background acquisition.",
+    "evidence": ".private-805/logs/causal-fixture-803-components.log",
+    "resolution": "Exact expectation updated to reviewed ordered-participant lifecycle, not subset matching. Final26-case run passes; original failed log retained."
+  },
+  "workspace1": {
+    "head": "d90486820ad75445c1ed10ab2f956ef80daf7e45",
+    "providedPrimary": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/results/805-d904-workspaces1.log",
+    "retainedPrimaryExcerpt": ".private-805/logs/causal-fixture-workspace-primary-excerpt.log",
+    "actualLane": "workspace-ci (workspaces-1); failing npm workspace pi-better-background-tasks@0.18.0, NOT the264-case Goal suite.",
+    "totals": "Background Tests5failed/579passed/5skipped of589; files6failed/36passed/1skipped of43. Separate startup hook and secondary cleanup diagnostic in golden-path file.",
+    "actualFailures": [
+      { "case": "golden-path.test.ts beforeAll startWorkRuntime", "error": "Hook timed out in10000ms at8:1", "classification": "Primary startup hook failure; afterAll TypeError stopRuntime is not a function at9:30 is secondary because initialization never assigned it." },
+      { "case": "retains the requester identity with all:true (other workspace=true)", "location": "durable-all-scope.test.ts:14", "error": "5000ms test timeout" },
+      { "case": "projects only the exact parent origin, never a worker or foreign session", "location": "observed-waits.test.ts:1906", "error": "5000ms test timeout" },
+      { "case": "always shows a row or a usable cursor on a default list led by a long incident", "location": "output.test.ts:879 -> tools.ts:761", "error": "Unverified background task bg_output_1794981561381_xqshfe: invalid metadata: id null does not match its directory id", "classification": "Concrete malformed-source validation failure before pagination assertions. Not cached-factory cold-import watchdog or archive-reader-hook failure; not fixed merely by Goal unknown-coverage/admission marker fixes." },
+      { "case": "marks a same-process task lost only after the grace period when nobody records its exit", "location": "reload-handoff.test.ts:61", "error": "15000ms test timeout" },
+      { "case": "keeps a running watch on its launch policy after the sandbox is turned off", "location": "sandbox-kernel.test.ts:374", "error": "5000ms test timeout" }
+    ],
+    "sourceInspection": "output.test.ts includes a preceding intentional metadata={} corruption case; afterEach closes observation clients and removes created task directories. The failed native log does not establish whether that exact path still existed, was partially written, or which cleanup/revalidation publication had completed at the failing query. No unproven timing attribution or suppression of malformed-source errors added.",
+    "supportedInprocessProof": {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test .private-805/causal-fixture-workspace-metadata.test.ts",
+      "exit": 0, "passed": 1,
+      "evidence": ".private-805/logs/causal-fixture-workspace-metadata.log",
+      "meaning": "Actual BackgroundObservation and generated registry: valid scoped record ready -> write{} -> refresh yields exact id-null/unverified metadata signature even AFTER integration -> remove actual record and ordinary refresh restores ready. No daemon, runner, SDK, socket or sandbox replay. This proves validation remains truthful, not that the original full tool/cleanup race is fixed."
+    },
+    "alreadyFixedVersusNew": "The reviewed archive/cached-factory causal cases now pass focused checks. This workspace1 lane contains different residual native signatures. Direct malformed metadata is still correctly rejected; its test-isolation/source-revalidation ordering is unqualified. Timeouts may involve initialization or other runtime work, but the primary log has no discriminating producer phase, so they cannot be declared repaired by the reviewed bootstrap/Background ancestry without original exact-head qualification."
+  },
+  "remaining": [
+    "Coordinator qualifies original workspace1 cases on the integrated head; retain all original errors/timeouts and counts, do not infer PASS from component checks.",
+    "If output metadata failure recurs, capture exact malformed path existence/source signature and cleanup/observation phase at the original trigger; do not accept corrupt records as ready or add arbitrary waits.",
+    "No whole264-case loop or restricted native replay performed. No push, PR, CI dispatch or external wait. LocalNode24.21.0 is not canonical24.14.1 qualification."
+  ]
+}

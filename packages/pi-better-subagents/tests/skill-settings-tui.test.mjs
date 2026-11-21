@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 /**
  * The global skill setting through the real settings page, config store, and
  * launch argv.
@@ -20,7 +21,12 @@ import { createEventBus } from "@earendil-works/pi-coding-agent";
 const root = mkdtempSync(join(tmpdir(), "skill-settings-tui-"));
 const agentDir = join(root, "agent");
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 
+const catalogHost = await import("../catalog-host-admission.ts");
+let activeRuntime;
+function withHostContext(context) { catalogHost.noteCatalogHostContext(context, () => ({})); return context; }
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension } = await import("../index.ts");
 const config = await import("../config.ts");
 const registry = await import("../registry.ts");
@@ -68,10 +74,10 @@ function reloadedConfig() {
 }
 
 function ctx() {
-    return {
+    return withHostContext({
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
         getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
-        sessionManager: { getBranch: () => [] },
+        sessionManager: { getBranch: () => activeRuntime?.entries ?? [] },
         ui: {
             notify() {},
             setWidget() {}, setStatus() {},
@@ -92,7 +98,7 @@ function ctx() {
                 });
             },
         },
-    };
+    });
 }
 
 function selectedRowText(page) {
@@ -141,6 +147,7 @@ async function inspectRole(runtime) {
 
 async function agentsView(runtime) {
     const components = [];
+    let visibleScreen;
     const host = {
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
         getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
@@ -158,6 +165,7 @@ async function agentsView(runtime) {
                         component.handleInput("\r");
                         screen = component.render(100).join("\n");
                     }
+                    visibleScreen = screen;
                     if (!settled) done(undefined);
                 });
             },
@@ -165,7 +173,7 @@ async function agentsView(runtime) {
     };
     await runtime.commands.get("agents").handler("show role.work", host);
     assert.ok(components.length > 0, "the /agents view must open");
-    return components.at(-1).render(100).join("\n");
+    return visibleScreen;
 }
 
 function skill(name) {
@@ -196,10 +204,10 @@ function createRuntime() {
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         sendMessage() {},
         sendUserMessage() {},
-    });
+    }, managedDomainPort());
     const contribution = registrations.find((item) => item.id === "subagents");
     assert.equal(contribution.command, "/subagents settings", "the harness-settings link points at this page");
-    return { events, registrations, tools, commands, entries, contribution };
+    return activeRuntime = { events, registrations, tools, commands, entries, contribution };
 }
 
 async function openSettings(keysOrLabel, runtime = createRuntime()) {
@@ -209,14 +217,14 @@ async function openSettings(keysOrLabel, runtime = createRuntime()) {
 }
 
 function toolCtx() {
-    return {
+    return withHostContext({
         cwd: root,
         model: { provider: "test", id: "model" },
         hasUI: false,
         isProjectTrusted: () => false,
         ui: { notify() {}, setWidget() {} },
-        sessionManager: { getBranch: () => [] },
-    };
+        sessionManager: { getBranch: () => activeRuntime?.entries ?? [] },
+    });
 }
 
 function clearRuns() {
@@ -248,7 +256,11 @@ async function spawn(runtime, params = {}) {
     return { id, meta, argv, text: res.content[0].text };
 }
 
-test.after(() => {
+test.after(async () => {
+    catalogHost.closeCatalogHost();
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
     config.setConfigPathForTests(undefined);
     config.setConfigForTests(undefined);
     rmSync(root, { recursive: true, force: true });

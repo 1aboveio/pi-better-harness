@@ -1,0 +1,275 @@
+// Generated fixed launch domain from packages/pi-better-subagents/batch.mjs. Do not edit directly.
+/**
+ * Pure helpers for subagent_spawn_batch.
+ *
+ * Planning, option merging, validation, and response formatting live here so
+ * they are unit-testable without mocking the spawn seam. The batch tool in
+ * index.ts calls these helpers and then reuses the same internal spawn path
+ * as subagent_spawn so behavior cannot drift.
+ */
+import { BUILTIN_TOOLS } from "./extensions.mjs";
+import { SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
+import { assertThinkingLevel } from "./thinking.domain.mjs";
+import { assertTimingParams } from "./timing.domain.mjs";
+import { normalizeSkillExposure } from "./skills.domain.mjs";
+const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
+/** Public codemode receipt; details alone are not returned to nested callers. */
+export const batchLaunchOutputSchema = {
+    type: "object",
+    properties: {
+        status: { type: "string", enum: ["launched", "partial", "not-launched", "clarification-needed"] },
+        batchId: { type: "string" },
+        batchName: { type: "string" },
+        launched: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" }, id: { type: "string" }, sessionId: { type: "string" }, continuedFrom: { type: "string" }, modelNote: { type: "string" } },
+                required: ["job", "name", "id"],
+                additionalProperties: false,
+            },
+        },
+        failed: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" }, reason: { type: "string" } },
+                required: ["job", "name", "reason"],
+                additionalProperties: false,
+            },
+        },
+        skipped: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" } },
+                required: ["job", "name"],
+                additionalProperties: false,
+            },
+        },
+        message: { type: "string" },
+        choices: { type: "array", items: { type: "string" } },
+    },
+    required: ["status", "launched", "failed", "skipped"],
+    additionalProperties: false,
+};
+/** Launch success is not run completion; partial receipts retain every created run. */
+export function batchLaunchResult({ batchId, batchName, launched, skipped, failed }) {
+    const receipt = {
+        status: launched.length === 0 ? "not-launched" : failed.length || skipped.length ? "partial" : "launched",
+        batchId,
+        ...(batchName !== undefined ? { batchName } : {}),
+        launched,
+        failed,
+        skipped,
+    };
+    return {
+        content: [{ type: "text", text: formatBatchLaunchResponse(receipt) }],
+        details: receipt,
+        structuredContent: receipt,
+    };
+}
+/**
+ * Overlay per-job options on top of shared options. Only defined keys are
+ * inherited; booleans keep their false values.
+ */
+export function mergeJobOptions(shared, job) {
+    return {
+        prompt: job.prompt,
+        name: job.name ?? shared?.name,
+        model: job.model ?? shared?.model,
+        thinking: job.thinking ?? shared?.thinking,
+        tools: job.tools ?? shared?.tools,
+        exclude_tools: job.exclude_tools ?? shared?.exclude_tools,
+        // `[]` is a real choice ("no skills"), so only a missing value inherits.
+        skills: job.skills ?? shared?.skills,
+        clean: job.clean ?? shared?.clean,
+        sandbox: job.sandbox ?? shared?.sandbox,
+        sandbox_dir: job.sandbox_dir ?? shared?.sandbox_dir,
+        callback: job.callback ?? shared?.callback,
+        cwd: job.cwd ?? shared?.cwd,
+        // Same semantics as subagent_spawn: shared and per-job values must reach
+        // spawnSubagentRun so batch jobs can request disposable clone workspaces.
+        git_clone_workspace: job.git_clone_workspace ?? shared?.git_clone_workspace,
+        approve: job.approve ?? shared?.approve,
+        allow_nested: job.allow_nested ?? shared?.allow_nested,
+        // Native session id selected for this JOB only. A shared value would make
+        // every job contend for the same conversation writer, so it is not inherited.
+        session_id: typeof job.session_id === "string" ? job.session_id : undefined,
+        session_name: typeof job.session_name === "string" ? job.session_name : undefined,
+        // Harness timing; an explicit null means "not set", so it falls through to shared.
+        deadline_minutes: job.deadline_minutes ?? shared?.deadline_minutes,
+        grace_minutes: job.grace_minutes ?? shared?.grace_minutes,
+        max_minutes: job.max_minutes ?? shared?.max_minutes,
+        tool_wait_minutes: job.tool_wait_minutes ?? shared?.tool_wait_minutes,
+        stuck_minutes: job.stuck_minutes ?? shared?.stuck_minutes,
+        // A per-job agent or role replaces the shared selector pair. Mixing
+        // shared.agent with job.role would invent an ambiguous run.
+        ...catalogSelector(shared, job),
+    };
+}
+function catalogText(value) {
+    return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+function jobSelectsCatalog(job) {
+    return catalogText(job?.agent) !== undefined || catalogText(job?.role) !== undefined || Array.isArray(job?.role);
+}
+function catalogSelector(shared, job) {
+    const source = jobSelectsCatalog(job) ? job : (shared ?? {});
+    const selector = {};
+    if (Object.prototype.hasOwnProperty.call(source, "agent") || jobSelectsCatalog(job))
+        selector.agent = source?.agent;
+    if (Object.prototype.hasOwnProperty.call(source, "role") || jobSelectsCatalog(job))
+        selector.role = source?.role;
+    if (job?.alias !== undefined || shared?.alias !== undefined)
+        selector.alias = job?.alias ?? shared?.alias;
+    return selector;
+}
+/**
+ * Validate a batch plan before any job is launched. Throws a clear error for
+ * malformed input or invalid option combinations.
+ */
+export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
+    if (!Array.isArray(jobs)) {
+        throw new Error("jobs must be an array.");
+    }
+    if (jobs.length === 0) {
+        throw new Error("jobs must contain at least one job.");
+    }
+    if (onCapacity !== undefined && !VALID_CAPACITY_MODES.has(onCapacity)) {
+        throw new Error(`onCapacity must be "reject" or "launch-available"; got ${JSON.stringify(onCapacity)}.`);
+    }
+    const seenPrompts = new Set();
+    for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        if (!job || typeof job !== "object") {
+            throw new Error(`job ${i + 1} must be an object.`);
+        }
+        if (typeof job.prompt !== "string" || job.prompt.trim() === "") {
+            throw new Error(`job ${i + 1} is missing a non-empty prompt.`);
+        }
+        if (job.session_id !== undefined && job.session_name !== undefined)
+            throw new Error(`job ${i + 1}: pass either session_id or session_name, not both.`);
+        if (job.session_name !== undefined && (typeof job.session_name !== "string" || job.session_name.trim() === ""))
+            throw new Error(`job ${i + 1} session_name must be a non-empty name.`);
+        if (job.session_id !== undefined && (typeof job.session_id !== "string" || job.session_id.trim() === "")) {
+            throw new Error(`job ${i + 1} session_id must be a non-empty native session id.`);
+        }
+        if (seenPrompts.has(job.prompt)) {
+            // Duplicate prompts are allowed, but a batch with every prompt
+            // identical is a common mistake; warn via the error path only when
+            // ALL prompts are the same (still launchable if intentional).
+            if (i === jobs.length - 1 && seenPrompts.size === 1) {
+                // Not a hard error; callers may choose to warn.
+            }
+        }
+        seenPrompts.add(job.prompt);
+        const merged = mergeJobOptions(shared, job);
+        assertThinkingLevel(merged.thinking, `job ${i + 1} thinking`);
+        assertTimingParams(merged, `job ${i + 1} `);
+        // Validate every job's skill exposure before any job launches, so a bad
+        // path list cannot leave a half-launched batch behind.
+        normalizeSkillExposure(merged.skills, `job ${i + 1} (${merged.name ?? i + 1}) skills`);
+        if (merged.clean === true) {
+            // Validate the effective tool allowlist, which resolves in this order:
+            // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.
+            // Note: we intentionally do NOT reject clean:true + allow_nested:true here;
+            // single-spawn accepts that combination, so batch validation must match it exactly.
+            const rawTools = merged.tools ?? config?.defaultTools ?? SAFE_CLEAN_TOOLS;
+            const toolList = rawTools
+                .split(",")
+                .map((t) => t.trim())
+                .filter(Boolean);
+            for (const tool of toolList) {
+                if (!BUILTIN_TOOLS.includes(tool)) {
+                    throw new Error(`job ${i + 1} (${merged.name ?? i + 1}): clean:true with ` +
+                        `extension-provided tool "${tool}" is invalid — the tool will not exist in a clean child.`);
+                }
+            }
+        }
+    }
+}
+/**
+ * Assign a globally-unique display name to every job.
+ *   - missing name -> job-{index}
+ *   - duplicate name -> name-2, name-3, ... (skipping any already-used suffix)
+ *
+ * Suffixes are checked against the full set of assigned names so a raw name
+ * like "reviewer-2" cannot collide with the suffix generated for "reviewer".
+ */
+export function assignBatchJobNames(jobs) {
+    const used = new Set();
+    const names = [];
+    for (let i = 0; i < jobs.length; i++) {
+        let raw = jobs[i]?.name ?? `${BATCH_JOB_NAME_DEFAULT}-${i + 1}`;
+        let name = raw;
+        if (used.has(name)) {
+            let suffix = 2;
+            name = `${raw}-${suffix}`;
+            while (used.has(name)) {
+                suffix += 1;
+                name = `${raw}-${suffix}`;
+            }
+        }
+        used.add(name);
+        names.push(name);
+    }
+    return names;
+}
+export const BATCH_JOB_NAME_DEFAULT = "job";
+let batchSeq = 0;
+/** Generate a collision-free batch ID distinct from run IDs. */
+export function nextBatchId() {
+    batchSeq += 1;
+    return `batch_${Date.now().toString(36)}_${batchSeq}`;
+}
+/**
+ * Decide which jobs launch and which are skipped based on available capacity.
+ *
+ * Capacity = maxConcurrent - runningCount - pendingCount. pendingCount covers
+ * in-process reservations held by concurrent single/batch spawns so a stale
+ * snapshot cannot oversubscribe after an async yield.
+ *
+ *   onCapacity === "reject" (default): throw if the whole batch does not fit.
+ *   onCapacity === "launch-available": launch up to the available slots.
+ */
+export function planBatchLaunches({ jobs, runningCount, pendingCount = 0, maxConcurrent, onCapacity, }) {
+    const available = Math.max(0, maxConcurrent - runningCount - pendingCount);
+    if (onCapacity === "launch-available") {
+        const toLaunch = jobs.slice(0, available);
+        const skipped = jobs.slice(available);
+        return { toLaunch, skipped };
+    }
+    if (jobs.length > available) {
+        throw new Error(`Batch of ${jobs.length} jobs exceeds available capacity ` +
+            `(${available}/${maxConcurrent} subagent slots free). ` +
+            "Stop some runs or set onCapacity to \"launch-available\".");
+    }
+    return { toLaunch: jobs, skipped: [] };
+}
+/**
+ * Format the launch response for subagent_spawn_batch.
+ */
+export function formatBatchLaunchResponse({ batchId, batchName, launched, skipped, failed }) {
+    const lines = [];
+    const label = batchName ? `${batchName} (${batchId})` : batchId;
+    if (launched.length === 0) {
+        const reason = skipped.length ? " — capacity full" : "";
+        lines.push(`Batch ${label}: no jobs launched${reason}.`);
+    }
+    else {
+        lines.push(`Batch ${label} launched ${launched.length} subagent(s):`);
+        for (const { name, id, sessionId, modelNote } of launched) {
+            lines.push(`• ${name} → ${id}${sessionId && sessionId !== id ? ` (session ${sessionId})` : ""}${modelNote ? ` · ${modelNote}` : ""}`);
+        }
+    }
+    if (failed?.length) {
+        lines.push(`Failed (${failed.length}): ${failed
+            .map((f) => `${f.name}: ${f.reason}`)
+            .join("; ")}`);
+    }
+    if (skipped.length) {
+        lines.push(`Skipped (capacity): ${skipped.map((j) => j.name).join(", ")}`);
+    }
+    return lines.join("\n");
+}

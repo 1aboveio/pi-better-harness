@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.ts";
 import { claimDaemonOwner, inspectDaemonOwner, ownerIsAlive, validateDaemonOwnerIdentity, type DaemonOwnerIdentity } from "../daemon-owner.ts";
-import { socketPathFor } from "../paths.ts";
+import { socketPathFor } from "../runtime/socket.ts";
 import type { Readiness } from "./ensure.ts";
 import type { ActivationResult, IdleSessionsLease, ServerBuild, StagedRuntime, UpgradeRequest } from "./managed-types.ts";
 import { homedir } from "node:os";
@@ -273,6 +273,15 @@ export const defaultActivationPorts: ActivationPorts = {
     finally { clearTimeout(timer); client.close(); }
   },
   async launch(request, options = { adopt: true }) {
+    // Server owner release precedes its process exit and the guardian's release.
+    // Preserve the old recovery owner until it observes that exact clean exit.
+    const deadline = Date.now() + 5000;
+    while (inspectDaemonOwner(request.serverDir, "guardian-owner").status === "live") {
+      const owner = inspectDaemonOwner(request.serverDir);
+      if (owner.status === "live" || owner.status === "ambiguous") throw new Error("runtime-unhealthy: existing server owner still prevents activation");
+      if (Date.now() >= deadline) throw new Error("runtime-unhealthy: previous guardian has not released ownership; no replacement launched");
+      await delay(25);
+    }
     const env: NodeJS.ProcessEnv = { ...process.env, PI_SERVER_AGENT: "pi", PI_SERVER_DIR: request.serverDir, PI_CODING_AGENT_DIR: request.agentDir,
       PI_SERVER_RUNTIME_MANIFEST: request.runtime.manifestPath };
     delete env.PI_SERVER_ACTIVATION_ID;
@@ -399,6 +408,16 @@ export async function runActivationWorker(request: UpgradeRequest, ports: Activa
         journal.reason = "Activation cancelled before stop commitment";
         save(journal);
         return result(journal);
+      }
+      // Once scheduled, this exact daemon owns the durable stop transition.
+      // Repeated hellos can time out during activity observation and abandon its coordinator.
+      if (scheduled && journal.phase === "prepared") {
+        const owner = inspectDaemonOwner(serverDir);
+        if (owner.status === "live" && sameOwner(owner.owner, journal.previousOwner)) {
+          await ports.pause();
+          journal = readActivationJournal(serverDir)!;
+          continue;
+        }
       }
       const probe = await ports.probe(serverDir);
       journal = readActivationJournal(serverDir)!;

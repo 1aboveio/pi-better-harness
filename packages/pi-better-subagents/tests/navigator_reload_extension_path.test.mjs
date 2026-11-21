@@ -24,13 +24,27 @@ import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { requestWorkDetail } from "../work-observation.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
 const RUNTIME = mkdtempSync(join(tmpdir(), "nav-reload-ext-"));
 process.env.TMPDIR = RUNTIME;
+process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
+process.env.PI_SUBAGENT_DURABLE_DIR = join(RUNTIME, "durable");
+const navigators = [];
+let stopRuntime;
+
+async function eventually(predicate) {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+        assert.ok(Date.now() < deadline, "shared runtime detail did not arrive");
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+}
 
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
 const CHECKOUT_NODE_MODULES = join(REPO_ROOT, "node_modules");
@@ -165,7 +179,8 @@ function assertCheckoutNodeModulesUntouched() {
 
 /**
  * Track production overlay timers that index.ts does not inject (real
- * setTimeout/setInterval). Excludes the test harness's own waits.
+ * setTimeout/setInterval). RPC deadlines belong to the observation transport,
+ * so they must not be counted as UI reload deadlines.
  */
 function installTimerSpies() {
     const liveTimeouts = new Set();
@@ -180,7 +195,7 @@ function installTimerSpies() {
             liveTimeouts.delete(id);
             fn(...a);
         }, ms, ...args);
-        liveTimeouts.add(id);
+        if (ms !== 5000) liveTimeouts.add(id);
         return id;
     };
     globalThis.clearTimeout = (id) => {
@@ -220,6 +235,7 @@ function installTimerSpies() {
  * session_start handler so reload can be fired a second time.
  */
 function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
+    const seededIds = [];
     const handlers = {};
     const statusCalls = [];
     const widgetCalls = [];
@@ -254,8 +270,10 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     const ctx = {
         mode: "tui",
         hasUI: true,
+        isIdle: () => true,
         ui,
         cwd: RUNTIME,
+        sessionManager: { getSessionId: () => "reload-recipient" },
         model: { provider: "test", id: "model" },
     };
 
@@ -268,7 +286,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
     mod.default(pi);
     assert.equal(typeof handlers.session_start, "function", "extension must register session_start");
 
-    return {
+    const navigator = {
         handlers,
         statusCalls,
         widgetCalls,
@@ -278,6 +296,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
         get overlayComponent() { return overlayComponent; },
         async start() {
             await handlers.session_start({}, ctx);
+            await eventually(() => seededIds.every(id => requestWorkDetail(id)?.detail));
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -288,6 +307,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             // Host reload / session switch without a guaranteed shutdown first.
             await handlers.session_start({}, ctx);
         },
+        async shutdown() { await handlers.session_shutdown?.({}, ctx); },
         focusViaLeftKey() {
             editor.handleInput("left");
         },
@@ -332,9 +352,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
                 id,
                 ...overrides,
             });
+            seededIds.push(id);
             return id;
         },
     };
+    navigators.push(navigator);
+    return navigator;
 }
 
 describe("registered extension path: session_start reload cleanup", () => {
@@ -344,6 +367,7 @@ describe("registered extension path: session_start reload cleanup", () => {
     let timerSpies;
 
     before(async () => {
+        stopRuntime = await startWorkRuntimeFixture();
         setupStubs();
         assertCheckoutNodeModulesUntouched();
         mod = await import("../index.ts");
@@ -353,6 +377,7 @@ describe("registered extension path: session_start reload cleanup", () => {
             pid: 0,
             spawnPid: THIS_PID,
             cwd: RUNTIME,
+            callbackOrigin: { cwd: RUNTIME, sessionId: "reload-recipient" },
             promptPreview: "reload-ext",
             startedAt: 1,
             logPath: join(RUNTIME, "reload.log"),
@@ -361,8 +386,14 @@ describe("registered extension path: session_start reload cleanup", () => {
         assertCheckoutNodeModulesUntouched();
     });
 
-    after(() => {
+    afterEach(async () => {
+        for (const navigator of navigators.splice(0)) await navigator.shutdown();
+        timerSpies?.restore(); timerSpies = undefined;
+    });
+
+    after(async () => {
         try { timerSpies?.restore(); } catch { /* best-effort */ }
+        await stopRuntime?.();
         for (const id of diskIds) {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
@@ -432,7 +463,7 @@ describe("registered extension path: session_start reload cleanup", () => {
         nav.pressEditor("down");
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 2, "health and assignment reconciliation each retain one interval");
+        assert.equal(timerSpies.pendingIntervals(), 1, "foreground retains only recipient reconciliation");
         const intervalsBeforeReload = new Set(timerSpies.intervalIds());
         assert.equal(timerSpies.pendingTimeouts(), 3, "main-list polling, detail refresh and close-arm deadlines are live");
         const deadlinesBeforeReload = new Set(timerSpies.timeoutIds());
@@ -447,9 +478,9 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator).
-        assert.equal(timerSpies.pendingIntervals(), 2, "reload keeps exactly health and assignment reconciliation");
-        assert.equal(timerSpies.intervalIds().filter((id) => intervalsBeforeReload.has(id)).length, 1,
-            "health remains attached while the previous outcome reconciliation interval is replaced");
+        assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps exactly recipient reconciliation");
+        assert.equal(timerSpies.intervalIds().filter((id) => intervalsBeforeReload.has(id)).length, 0,
+            "reload replaces the prior recipient reconciliation interval");
         assert.equal(timerSpies.pendingTimeouts(), 1, "reload keeps only the new session's main-list poll");
         assert.ok(timerSpies.timeoutIds().every(id => !deadlinesBeforeReload.has(id)), "reload clears every old session deadline");
         assert.deepEqual(nav.statusCalls, []);
@@ -478,7 +509,5 @@ describe("registered extension path: session_start reload cleanup", () => {
             "reload must not dismiss the open run",
         );
 
-        timerSpies.restore();
-        timerSpies = undefined;
     });
 });

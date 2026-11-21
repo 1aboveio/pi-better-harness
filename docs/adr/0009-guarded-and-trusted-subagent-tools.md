@@ -1,5 +1,7 @@
 # Guarded and trusted extension tools for confined subagents
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#tool-loading).
+
 ## Status
 
 Accepted. Extends [ADR 0007](0007-trusted-runtime-task-boundary.md) (the task boundary admits only verified tool implementations) and [ADR 0005](0005-sandbox-permission-table.md) (the `/sandbox` table). Issue #351.

@@ -65,6 +65,7 @@ export const DEFAULT_TIMING_MINUTES = Object.freeze({
 
 /** Durable timing policy and one-shot markers, stored on RunMeta at launch. */
 export interface RunTiming {
+    pendingWakes?: import("./timing-notifications.ts").PendingTimingWake[];
     /** Soft deadline (epoch ms): the child is told to wrap up. Absent = none. */
     deadlineAt?: number;
     /** Grace after the soft deadline before the run is stopped. */
@@ -349,7 +350,7 @@ function isProgressResult(name: string, command: string | undefined, afterFailur
 /** Cheap pre-filter: only these rows can change progress state. */
 export function isProgressRelevantLine(line: string): boolean {
     const head = line.slice(0, 160);
-    return head.includes('"tool_execution_start"') || head.includes('"message_end"');
+    return head.includes('"tool_execution_start"') || head.includes('"tool_execution_end"') || head.includes('"message_end"');
 }
 
 /** Fold one parsed child event into the progress state. */
@@ -387,6 +388,15 @@ export function foldProgress(state: ProgressState, event: Record<string, unknown
             novel: remember(state, callKey(name, event.args)),
             startedAt,
         });
+        return;
+    }
+    if (type === "tool_execution_end" && typeof event.parentToolCallId === "string") {
+        // Nested calls do not get a transcript toolResult. The outer call still
+        // owns progress accounting through its timestamped result message.
+        const id = event.toolCallId;
+        if (typeof id === "string" && state.open.delete(id) && state.open.size === 0) {
+            state.inFlightSince = undefined;
+        }
         return;
     }
     if (type !== "message_end") return;

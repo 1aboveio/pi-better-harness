@@ -5,7 +5,7 @@ import { failurePath } from "./failures.js";
 import { currentProcessStartToken } from "./process-identity.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { resumeRunningTask, resumeScheduledWork, suspendScheduledWork } from "./runtime.js";
-import { actionableFailures, failureHistory, readFailureState } from "./shared-failure-observations.js";
+import { actionableFailures, readFailureState } from "./shared-failure-observations.js";
 import { observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
@@ -41,14 +41,10 @@ describe("runtime suspected-stall maintenance", () => {
     const task = restoredTask();
     resumeRunningTask(pi, task);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(failureHistory(readFailureState(failurePath(id)))).toEqual([
-      expect.objectContaining({ category: "stall", status: "unresolved" }),
-    ]);
-    expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(0);
+    expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(1);
     const terminal = { ...readMeta(id)!, status: "succeeded" as const, endedAt: Date.now() };
     writeMeta(terminal);
     resumeRunningTask(pi, terminal);
-    expect(failureHistory(readFailureState(failurePath(id)))[0]?.status).toBe("resolved");
     expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(0);
     expect(readMeta(id)?.status).toBe("succeeded");
   });
@@ -60,8 +56,7 @@ describe("runtime suspected-stall maintenance", () => {
     const task = restoredTask();
     resumeRunningTask(pi, task);
     await vi.advanceTimersByTimeAsync(300_000);
-    expect(failureHistory(readFailureState(failurePath(id)))).toHaveLength(1);
-    expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(0);
+    expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(1);
     expect(readMeta(id)?.status).toBe("running");
     const journal = readFileSync(failurePath(id), "utf8");
     await vi.advanceTimersByTimeAsync(5_000);
@@ -69,7 +64,6 @@ describe("runtime suspected-stall maintenance", () => {
     writeFileSync(task.logPath, "new checkpoint\n");
     utimesSync(task.logPath, new Date(Date.now()), new Date(Date.now()));
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(failureHistory(readFailureState(failurePath(id)))[0]?.status).toBe("resolved");
     expect(actionableFailures(readFailureState(failurePath(id)))).toHaveLength(0);
     suspendScheduledWork();
     await vi.advanceTimersByTimeAsync(300_000);

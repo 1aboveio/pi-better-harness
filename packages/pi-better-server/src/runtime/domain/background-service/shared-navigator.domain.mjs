@@ -1,0 +1,1937 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-navigator.ts. Do not edit directly.
+import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
+import { readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.domain.mjs";
+import { createRenderScheduler } from "./shared-render-scheduler.domain.mjs";
+import { setNavigatorPanel } from "./shared-navigator-panels.domain.mjs";
+export default function navigatorExtension() {
+    // Internal shared package. Pi may scan its symlink in the extension directory
+    // for sibling relative imports; loading it directly should be harmless.
+}
+export function getNavigatorView() { return state().view ?? "flatten"; }
+export function loadNavigatorView() {
+    const value = readHarnessSetting("navigatorView");
+    state().view = value === "tree" ? "tree" : "flatten";
+}
+export function setNavigatorView(value) {
+    if (value !== "tree" && value !== "flatten")
+        throw new Error("View must be tree or flatten.");
+    updateHarnessSetting("navigatorView", () => value);
+    state().view = value;
+    refreshBackgroundWorkNavigator();
+}
+/** UI time is independent of worker time; repeated refreshes never renew it. */
+export function createTerminalRowRetention(retentionMs = 30_000) {
+    const held = new Map();
+    const dismissed = new Set();
+    return {
+        clear() { held.clear(); dismissed.clear(); },
+        dismiss(id) { held.delete(id); dismissed.add(id); },
+        merge(rows, now) {
+            const result = [];
+            const present = new Set(rows.map(row => row.id));
+            for (const id of dismissed)
+                if (!present.has(id))
+                    dismissed.delete(id);
+            for (const row of rows) {
+                if (dismissed.has(row.id))
+                    continue;
+                const terminal = ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status);
+                if (!terminal) {
+                    held.delete(row.id);
+                    result.push(row);
+                    continue;
+                }
+                let entry = held.get(row.id);
+                if (!entry) {
+                    entry = { row, until: now + retentionMs };
+                    held.set(row.id, entry);
+                }
+                entry.row = { ...row, expiresAt: entry.until };
+                if (now < entry.until)
+                    result.push(entry.row);
+            }
+            for (const [id, entry] of held) {
+                if (present.has(id))
+                    continue;
+                if (now < entry.until)
+                    result.push(entry.row);
+                else
+                    held.delete(id);
+            }
+            return result;
+        },
+    };
+}
+/** A frontend-only diagnostic, never an execution record or authority to retry. */
+export async function observeNavigatorLaunch(ctx, providerId, key, name, launch) {
+    const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+    const report = (error) => {
+        const s = state();
+        if (!isNavigatorUiAvailable(s.uiCtx) || s.observationScope !== scope)
+            return;
+        const id = `launch-error-${key}`;
+        const primary = error instanceof Error ? error.message : String(error);
+        const failures = s.launchFailures ??= new Map();
+        const identity = rowKey(providerId, id);
+        failures.set(identity, { providerId, id, name, status: "failed", statusTone: "failed", kind: "launch-error", elapsed: "", primary,
+            secondary: "Launch failed or was not confirmed; inspect before retrying.", sortStartedAt: Date.now() });
+        // Diagnostics are session-local and bounded, including expired tombstones.
+        if (failures.size > 128)
+            failures.delete(failures.keys().next().value);
+        refreshBackgroundWorkNavigator();
+    };
+    try {
+        const result = await launch();
+        const response = result;
+        if (response?.isError)
+            report(response.content?.filter(item => item.type === "text").map(item => item.text).join("\n") || "Launch request failed");
+        return result;
+    }
+    catch (error) {
+        report(error);
+        throw error;
+    }
+}
+const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
+const FACTORY_MARK = "__piBetterHarnessNavigatorFactory";
+const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
+export const NAVIGATOR_STATUS_KEY = "background-work-nav";
+export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
+export const MAIN_LIST_WIDGET_KEY = "background-work-list";
+export const DETAIL_TICK_MS = 10_000;
+export const MAIN_LIST_REFRESH_MS = 1_000;
+export const CLOSE_ARM_MS = 3000;
+export const DEFAULT_LOG_TAIL_ROWS = 25;
+export const LOG_TAIL_ROW_CHOICES = [10, 25];
+const MAIN_LIST_FALLBACK_WIDTH = 100;
+const DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS = 0;
+const EVIDENCE_SECTION_ID = "__evidence__";
+const RUNNING_DOT_GLYPH = "●";
+function state() {
+    const g = globalThis;
+    if (!g[GLOBAL_KEY]) {
+        g[GLOBAL_KEY] = { providers: new Map(), unsubscribers: new Map() };
+    }
+    return g[GLOBAL_KEY];
+}
+export function registerBackgroundWorkProvider(provider) {
+    const s = state();
+    const token = Symbol(provider.id);
+    (s.registrationTokens ??= new Map()).set(provider.id, token);
+    const previousUnsub = s.unsubscribers.get(provider.id);
+    if (previousUnsub) {
+        try {
+            previousUnsub();
+        }
+        catch { /* ignore */ }
+    }
+    s.providers.set(provider.id, provider);
+    if (typeof provider.onVisibleChanged === "function") {
+        try {
+            s.unsubscribers.set(provider.id, provider.onVisibleChanged(() => refreshBackgroundWorkNavigator()));
+        }
+        catch {
+            s.unsubscribers.delete(provider.id);
+        }
+    }
+    else {
+        s.unsubscribers.delete(provider.id);
+    }
+    refreshBackgroundWorkNavigator();
+    // A stale factory must not unregister its replacement from another cached module.
+    return () => {
+        if (state().registrationTokens?.get(provider.id) === token)
+            unregisterBackgroundWorkProvider(provider.id);
+    };
+}
+export function unregisterBackgroundWorkProvider(id) {
+    const s = state();
+    const unsub = s.unsubscribers.get(id);
+    if (unsub) {
+        try {
+            unsub();
+        }
+        catch { /* ignore */ }
+    }
+    s.unsubscribers.delete(id);
+    s.providers.delete(id);
+    s.registrationTokens?.delete(id);
+    refreshBackgroundWorkNavigator();
+}
+export function isNavigatorUiAvailable(ctx) {
+    if (!ctx)
+        return false;
+    try {
+        return Boolean(ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+    }
+    catch {
+        return false;
+    }
+}
+export function navigatorFooterHint(_count) {
+    // Retain the compatibility helper without publishing a badge.
+    return null;
+}
+export function applyNavigatorFooter(ui, count) {
+    return navigatorFooterHint(count);
+}
+export function applyCloseConfirmFooter(ui, hint) {
+    return hint ?? null;
+}
+export function ensureBackgroundWorkNavigator(ctx, deps, owner) {
+    if (!isNavigatorUiAvailable(ctx))
+        return;
+    const s = state();
+    if (s.view === undefined) {
+        try {
+            loadNavigatorView();
+        }
+        catch {
+            s.view = "flatten";
+        }
+    }
+    const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+    if (s.observationScope !== scope) {
+        s.terminalRows?.clear();
+        s.launchFailures?.clear();
+    }
+    s.observationScope = scope;
+    s.uiCtx = ctx;
+    s.uiOwner = owner;
+    s.deps = {
+        ...deps,
+        createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
+    };
+    try {
+        setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined);
+    }
+    catch { /* ignore */ }
+    s.mainListWidgetInstalled = false;
+    s.mainListRequestRender = undefined;
+    s.mainListRows = undefined;
+    s.mainListDeadlineScheduler?.dispose();
+    s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
+    installNavigatorEditor(ctx.ui, deps);
+    s.lastHint = undefined;
+    refreshBackgroundWorkNavigator(ctx);
+    refreshMainListWidget();
+}
+export function disposeBackgroundWorkNavigator(ctx, owner) {
+    const s = state();
+    if (owner !== undefined) {
+        // Only the factory that installed the current navigator may dispose it.
+        if (s.uiOwner !== owner)
+            return;
+    }
+    else if (s.uiOwner !== undefined) {
+        // Ownership is never inferred: an omitted owner must not clear a navigator
+        // another cached factory (or a headless child) owns.
+        return;
+    }
+    else if (ctx !== undefined) {
+        // Unowned navigators stay releasable by a live, matching UI context.
+        if (!isNavigatorUiAvailable(ctx) || (s.uiCtx && ctx.ui !== s.uiCtx.ui))
+            return;
+    }
+    try {
+        s.dispose?.();
+    }
+    catch { /* ignore */ }
+    s.dispose = undefined;
+    s.overlay = undefined;
+    stopMainListWidget();
+    const activeCtx = ctx ?? s.uiCtx;
+    s.uiCtx = undefined;
+    s.terminalRows?.clear();
+    s.launchFailures?.clear();
+    s.observationScope = undefined;
+    s.uiOwner = undefined;
+    if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
+        try {
+            setNavigatorPanel(activeCtx, MAIN_LIST_WIDGET_KEY, undefined);
+        }
+        catch { /* ignore */ }
+    }
+    s.lastHint = undefined;
+    s.lastMainListLines = undefined;
+    s.lastMainListSignature = undefined;
+    s.mainListRows = undefined;
+    s.mainListDeadlineScheduler?.dispose();
+    s.mainListDeadlineScheduler = undefined;
+    s.mainListWidgetInstalled = false;
+    s.mainListRequestRender = undefined;
+    s.editorComponent = undefined;
+    s.detailOverlayRows = undefined;
+    s.mainListSelectedId = undefined;
+    s.mainListFocused = false;
+}
+export function refreshBackgroundWorkNavigator(ctx) {
+    const s = state();
+    const activeCtx = isNavigatorUiAvailable(ctx) ? ctx : s.uiCtx;
+    if (!isNavigatorUiAvailable(activeCtx))
+        return;
+    try {
+        refreshMainListWidget();
+        s.overlay?.refreshDetail();
+    }
+    catch { /* ignore */ }
+}
+function providers() {
+    return [...state().providers.values()].sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
+}
+function visibleCount() {
+    return providers().reduce((sum, provider) => {
+        try {
+            return sum + Math.max(0, provider.visibleCount());
+        }
+        catch {
+            return sum;
+        }
+    }, 0);
+}
+function stopMainListWidget() {
+    clearMainListCloseArm();
+}
+function clearMainListCloseArm() {
+    const s = state();
+    if (s.mainListCloseArmTimer)
+        clearTimeout(s.mainListCloseArmTimer);
+    s.mainListCloseArmTimer = undefined;
+    if (!s.mainListCloseArm)
+        return;
+    s.mainListCloseArm = undefined;
+}
+function refreshMainListWidget() {
+    const s = state();
+    const ctx = s.uiCtx;
+    const deps = s.deps;
+    if (!ctx || !deps || !isNavigatorUiAvailable(ctx))
+        return;
+    const now = Date.now();
+    const rows = listRows(now);
+    s.mainListRows = rows;
+    s.mainListDeadlineScheduler?.cancel();
+    const nextExpiry = rows.reduce((next, row) => {
+        if (row.expiresAt === undefined || row.expiresAt <= now)
+            return next;
+        return next === undefined ? row.expiresAt : Math.min(next, row.expiresAt);
+    }, undefined);
+    if (rows.length) {
+        // External writers cannot notify this host. Refresh independently of paint frequency.
+        s.mainListDeadlineScheduler?.schedule(Math.min(MAIN_LIST_REFRESH_MS, nextExpiry === undefined ? Infinity : nextExpiry - now));
+    }
+    syncMainListSelection(rows);
+    const nextSignature = rows.length ? mainListSignature(rows, {
+        selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
+        focused: s.mainListFocused === true,
+        closeHint: closeHintFor(rows.find((row) => row.navigatorId === s.mainListCloseArm?.id)),
+    }) : undefined;
+    const changed = nextSignature !== s.lastMainListSignature;
+    s.lastMainListSignature = nextSignature;
+    s.lastMainListLines = rows.length ? ["", ...buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
+            selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
+            focused: s.mainListFocused === true,
+        })] : undefined;
+    if (!rows.length) {
+        if (!s.mainListWidgetInstalled)
+            return;
+        try {
+            setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined);
+        }
+        catch { /* ignore */ }
+        s.mainListWidgetInstalled = false;
+        s.mainListRequestRender = undefined;
+        s.lastMainListSignature = undefined;
+        return;
+    }
+    if (!s.mainListWidgetInstalled) {
+        try {
+            setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui, theme, layout) => createMainListWidget(tui, theme, deps, layout), { placement: "aboveEditor" });
+            s.mainListWidgetInstalled = true;
+        }
+        catch { /* ignore */ }
+    }
+    if (changed) {
+        try {
+            s.mainListRequestRender?.();
+        }
+        catch { /* ignore */ }
+    }
+}
+function themeFg(ctx) {
+    return themeFgFromTheme(ctx.ui.theme);
+}
+function themeFgFromTheme(theme) {
+    const maybeTheme = theme;
+    return (color, value) => maybeTheme?.fg ? maybeTheme.fg(color, value) : value;
+}
+const BACK_TO_MAIN = "← main (Esc)";
+const BACK_TARGET = "back-to-main";
+function highlightPointerTarget(theme, line, width) {
+    const colors = theme;
+    return colors?.bg?.("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))))
+        ?? themeFgFromTheme(theme)("accent", line);
+}
+function createPointerNavigation(targetAt, activate) {
+    let hovered;
+    let pressed;
+    return {
+        get hovered() { return hovered; },
+        reset() { hovered = undefined; pressed = undefined; },
+        handleMouse(event) {
+            if (event.type === "move" || event.type === "leave") {
+                const target = event.type === "leave" ? undefined : targetAt(event);
+                const changed = hovered !== target;
+                hovered = target;
+                return changed || target ? { handled: true, render: changed } : undefined;
+            }
+            if (event.button !== "left" || event.shift || event.alt || event.ctrl) {
+                pressed = undefined;
+                return undefined;
+            }
+            if (event.type === "press") {
+                const target = targetAt(event);
+                pressed = target ? { target, y: event.y } : undefined;
+                return target ? { handled: true, render: false } : undefined;
+            }
+            if (event.type !== "click")
+                return undefined;
+            const claim = pressed;
+            pressed = undefined;
+            if (!claim || claim.y !== event.y || targetAt(event) !== claim.target || !activate(claim.target))
+                return undefined;
+            return { handled: true, render: true };
+        },
+    };
+}
+function createMainListWidget(tui, theme, deps, panelLayout = { availableRows: () => Infinity }) {
+    const requestRender = () => tui.requestRender?.();
+    state().mainListRequestRender = requestRender;
+    // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
+    let lineOwners = [];
+    let lineWidth = MAIN_LIST_FALLBACK_WIDTH;
+    const rowAt = (event) => {
+        const width = Number.isFinite(event.width) && event.width > 0 ? Math.floor(event.width) : lineWidth;
+        if (!Number.isFinite(event.x) || event.x < 0 || event.x >= width)
+            return undefined;
+        if (!Number.isInteger(event.y) || event.y < 0 || event.y >= lineOwners.length)
+            return undefined;
+        const id = lineOwners[event.y];
+        return id && state().mainListRows?.some((row) => row.navigatorId === id) ? id : undefined;
+    };
+    const pointer = createPointerNavigation(rowAt, openNavigatorRow);
+    return {
+        render(width) {
+            const rows = state().mainListRows ?? [];
+            syncMainListSelection(rows);
+            if (!rows.length) {
+                state().lastMainListLines = undefined;
+                lineOwners = [];
+                pointer.reset();
+                return [];
+            }
+            const layout = buildMainListLayout(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+                selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
+                focused: state().mainListFocused === true,
+            });
+            const armedRow = rows.find((row) => row.navigatorId === state().mainListCloseArm?.id);
+            const hint = closeHintFor(armedRow);
+            if (hint) {
+                layout.lines.push(deps.truncate(`   ${hint}`, renderWidth(width)));
+                layout.owners.push(undefined);
+            }
+            lineWidth = renderWidth(width);
+            // The leading gap line belongs to the widget too, so its slot stays ownerless.
+            let rawLines = ["", ...layout.lines];
+            lineOwners = [undefined, ...layout.owners];
+            const budget = Math.max(0, Math.floor(panelLayout.availableRows()));
+            if (rawLines.length > budget) {
+                const selected = state().mainListFocused ? lineOwners.indexOf(state().mainListSelectedId) : -1;
+                const count = Math.max(0, budget - 1);
+                const start = selected >= 0 ? Math.max(0, Math.min(selected - Math.floor(count / 2), rawLines.length - count)) : 2;
+                rawLines = rawLines.slice(start, start + count);
+                lineOwners = lineOwners.slice(start, start + count);
+                const visible = new Set(lineOwners.filter(Boolean));
+                if (budget > 0) {
+                    const hidden = rows.length - visible.size;
+                    rawLines.push(deps.truncate(hidden ? `   +${hidden} tasks` : `   ${rows.length} tasks`, renderWidth(width)));
+                    lineOwners.push(undefined);
+                }
+            }
+            const lines = rawLines.map((line, index) => pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
+            state().lastMainListLines = lines;
+            return lines;
+        },
+        handleMouse(event) {
+            return pointer.handleMouse(event);
+        },
+        invalidate() {
+            state().lastMainListLines = undefined;
+            lineOwners = [];
+            pointer.reset();
+        },
+        dispose() {
+            const s = state();
+            if (s.mainListRequestRender === requestRender)
+                s.mainListRequestRender = undefined;
+            lineOwners = [];
+            pointer.reset();
+        },
+    };
+}
+function renderWidth(width) {
+    return Number.isFinite(width) && width > 0 ? Math.floor(width) : MAIN_LIST_FALLBACK_WIDTH;
+}
+function rowKey(providerId, id) {
+    return `${providerId}:${id}`;
+}
+function splitRowKey(key) {
+    const idx = key.indexOf(":");
+    if (idx < 0)
+        return { providerId: "", id: key };
+    return { providerId: key.slice(0, idx), id: key.slice(idx + 1) };
+}
+function listRows(now = Date.now()) {
+    const rows = [];
+    for (const provider of providers()) {
+        let providerRows = [];
+        try {
+            providerRows = provider.listRows(now) ?? [];
+        }
+        catch {
+            providerRows = [];
+        }
+        providerRows = [...providerRows, ...[...(state().launchFailures?.values() ?? [])].filter(row => row.providerId === provider.id)];
+        const retention = state().terminalRows ??= new Map();
+        if (!retention.has(provider.id))
+            retention.set(provider.id, createTerminalRowRetention());
+        if (isNavigatorUiAvailable(state().uiCtx))
+            providerRows = retention.get(provider.id).merge(providerRows, now);
+        const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
+        let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
+        try {
+            showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection;
+        }
+        catch {
+            showSection = false;
+        }
+        if (!showSection && !(getNavigatorView() === "tree" && provider.parentRow))
+            continue;
+        let parentRow = null;
+        try {
+            parentRow = provider.parentRow?.(now) ?? null;
+        }
+        catch {
+            parentRow = null;
+        }
+        if (parentRow) {
+            rows.push({
+                ...parentRow,
+                navigatorId: rowKey(parentRow.providerId, parentRow.id),
+                providerLabel: provider.label,
+                parentRow: true,
+            });
+        }
+        for (const row of orderedProviderRows) {
+            rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
+        }
+    }
+    const conversations = mergeAgentAttempts(rows);
+    return getNavigatorView() === "tree" ? treeRows(conversations) : conversations;
+}
+/** A resumed execution is still the same agent in either layout. */
+export function mergeAgentAttempts(rows) {
+    const latest = new Map();
+    for (const row of rows) {
+        if (row.providerId !== "subagents" || !row.agentId)
+            continue;
+        const previous = latest.get(row.agentId);
+        if (!previous || row.sortStartedAt > previous.sortStartedAt
+            || (row.sortStartedAt === previous.sortStartedAt && row.id > previous.id))
+            latest.set(row.agentId, row);
+    }
+    return rows.filter(row => row.providerId !== "subagents" || !row.agentId || latest.get(row.agentId) === row);
+}
+/** Two levels only: agents are peers, tasks attach by captured conversation. */
+export function treeRows(rows) {
+    const agents = new Map();
+    for (const row of rows.filter(row => row.providerId === "subagents")) {
+        const key = row.agentId ?? row.id;
+        const prior = agents.get(key);
+        if (!prior || row.sortStartedAt > prior.sortStartedAt)
+            agents.set(key, row);
+    }
+    const tasks = rows.filter(row => row.providerId !== "subagents");
+    const ordered = [...agents.entries()].sort(([a], [b]) => a === "main" ? -1 : b === "main" ? 1 : 0);
+    const result = [], attached = new Set();
+    for (const [key, agent] of ordered) {
+        const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
+        result.push({ ...agent, treeDepth: 0 });
+        children.forEach((row, i) => { result.push({ ...row, treeDepth: 1, lastChild: i === children.length - 1 }); attached.add(row); });
+    }
+    // Never hide live work when its owner's observation has not arrived yet.
+    const missing = new Map();
+    for (const row of tasks)
+        if (!attached.has(row)) {
+            const key = row.parentAgentId ?? "main";
+            missing.set(key, [...(missing.get(key) ?? []), row]);
+        }
+    for (const [key, children] of missing)
+        children.forEach((row, i) => result.push({ ...row,
+            treeDepth: 1, lastChild: i === children.length - 1,
+            ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined }));
+    return result;
+}
+function rowDisplayName(row) {
+    return singleLine(row.name || row.id);
+}
+function syncMainListSelection(rows) {
+    const s = state();
+    if (rows.length === 0) {
+        s.mainListSelectedId = undefined;
+        s.mainListFocused = false;
+        return;
+    }
+    if (!s.mainListSelectedId || !rows.some((row) => row.navigatorId === s.mainListSelectedId)) {
+        s.mainListSelectedId = rows[0].navigatorId;
+    }
+}
+function selectedMainListRow() {
+    const rows = listRows();
+    syncMainListSelection(rows);
+    return rows.find((row) => row.navigatorId === state().mainListSelectedId) ?? rows[0];
+}
+function moveMainListSelection(delta) {
+    const rows = listRows();
+    syncMainListSelection(rows);
+    const s = state();
+    const idx = rows.findIndex((row) => row.navigatorId === s.mainListSelectedId);
+    const next = Math.min(Math.max((idx >= 0 ? idx : 0) + delta, 0), Math.max(0, rows.length - 1));
+    const nextId = rows[next]?.navigatorId;
+    if (!nextId || nextId === s.mainListSelectedId)
+        return false;
+    s.mainListSelectedId = nextId;
+    return true;
+}
+function focusMainList() {
+    const rows = listRows();
+    if (rows.length === 0)
+        return;
+    const s = state();
+    s.mainListSelectedId = rows.find((row) => row.parentRow && row.id === "main")?.navigatorId ?? rows[0].navigatorId;
+    s.mainListFocused = true;
+    refreshMainListWidget();
+}
+function unfocusMainList() {
+    const s = state();
+    if (!s.mainListFocused)
+        return;
+    s.mainListFocused = false;
+    clearMainListCloseArm();
+    refreshMainListWidget();
+}
+function buildMainListLines(rows, width, truncate, fg, options = {}) {
+    return buildMainListLayout(rows, width, truncate, fg, options).lines;
+}
+/**
+ * The list's lines plus the navigatorId each line shows, so pointer input maps a rendered row to its
+ * stable row identity. Headers, separators and the shortcut line keep an undefined owner.
+ */
+function buildMainListLayout(rows, width, truncate, fg, options = {}) {
+    const lines = [];
+    const owners = [];
+    const push = (line, owner) => {
+        lines.push(line);
+        owners.push(owner);
+    };
+    if (getNavigatorView() === "tree") {
+        push(providerGroupLabel("work", fg));
+        for (const row of rows) {
+            if (row.ownerGroupLabel)
+                push(`  ${dim(row.ownerGroupLabel, fg)}`);
+            push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
+        }
+        push("");
+        push(shortcutsLine(options.focused === true, fg));
+        return { lines: lines.map(line => safeTruncate(line, width, truncate)), owners };
+    }
+    const grouped = new Map();
+    for (const row of rows) {
+        const existing = grouped.get(row.providerLabel) ?? [];
+        existing.push(row);
+        grouped.set(row.providerLabel, existing);
+    }
+    const orderedLabels = providers().map((provider) => provider.label).filter((label) => grouped.has(label));
+    for (const label of grouped.keys())
+        if (!orderedLabels.includes(label))
+            orderedLabels.push(label);
+    for (let i = 0; i < orderedLabels.length; i += 1) {
+        const label = orderedLabels[i];
+        const group = grouped.get(label);
+        if (i > 0)
+            push("");
+        push(providerGroupLabel(label, fg));
+        for (const row of group) {
+            const selected = options.focused && row.navigatorId === options.selectedId;
+            push(formatMainListRow(row, selected === true, fg, width), row.navigatorId);
+        }
+    }
+    push("");
+    push(shortcutsLine(options.focused === true, fg));
+    return { lines: lines.map((line) => safeTruncate(line, width, truncate)), owners };
+}
+function shortcutsLine(focused, fg) {
+    const selected = state().mainListRows?.find(row => row.navigatorId === state().mainListSelectedId);
+    const keys = focused
+        ? `↑↓ switch · Enter detail${selected?.readOnly || selected?.parentRow ? "" : " · x stop"} · Esc unfocus`
+        : "← work navigator";
+    return dim(keys, fg);
+}
+function providerGroupLabel(label, fg) {
+    const normalized = singleLine(label).toLowerCase();
+    return fg("warning", normalized);
+}
+function formatMainListRow(row, selected, fg, width) {
+    const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
+    const name = row.name || row.id;
+    const indicator = statusIndicator(row);
+    const status = fg(indicator.color, indicator.glyph);
+    const elapsed = singleLine(row.elapsed || "-");
+    const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
+    const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
+    const statusWidth = 2;
+    const leftPrefixWidth = visibleWidth(prefix) + statusWidth + 1;
+    const maxNameWidth = Math.max(8, Math.floor(available * 0.36));
+    const nameWidth = Math.max(8, Math.min(44, maxNameWidth, available - leftPrefixWidth - elapsedWidth - 10));
+    const rightWidth = Math.max(8, available - leftPrefixWidth - nameWidth - 1);
+    const summaryWidth = Math.max(1, rightWidth - elapsedWidth - 1);
+    const left = `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)}`;
+    const right = `${dim(fitRight(rowSummary(row), summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
+    const gap = Math.max(1, available - visibleWidth(left) - visibleWidth(right));
+    return `${left}${" ".repeat(gap)}${right}`;
+}
+function statusGlyph(row) {
+    if (row.statusTone === "success")
+        return "✓";
+    if (row.statusTone === "failed")
+        return "✕";
+    if (row.statusTone === "warning")
+        return "◇";
+    if (row.statusTone === "running")
+        return RUNNING_DOT_GLYPH;
+    return "·";
+}
+function statusIndicator(row, now = Date.now()) {
+    void now;
+    if (row.statusTone !== "running")
+        return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
+    const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
+    return { glyph, color: "accent" };
+}
+function mainListSignature(rows, options = {}) {
+    return JSON.stringify({
+        view: getNavigatorView(),
+        focused: options.focused === true,
+        closeHint: options.closeHint ?? null,
+        selectedId: options.focused === true ? options.selectedId ?? null : null,
+        rows: rows.map((row) => ({
+            navigatorId: row.navigatorId,
+            providerLabel: row.providerLabel,
+            parentAgentId: row.parentAgentId,
+            agentId: row.agentId,
+            parentRow: row.parentRow === true,
+            providerId: row.providerId,
+            id: row.id,
+            name: row.name ?? null,
+            model: row.model ?? null,
+            effort: row.effort ?? null,
+            tool: row.tool ?? null,
+            tokens: row.tokens ?? null,
+            command: row.command ?? null,
+            status: row.status,
+            statusTone: row.statusTone,
+            kind: row.kind,
+            primary: row.primary,
+            secondary: row.secondary ?? null,
+            facts: stableFacts(row.facts),
+            sortStartedAt: row.sortStartedAt,
+        })),
+    });
+}
+function stableFacts(facts) {
+    return (facts ?? []).filter((fact) => !/\bleft$/.test(singleLine(fact)));
+}
+function rowSummary(row) {
+    if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
+        return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
+    }
+    if (row.providerId === "subagents") {
+        const attention = row.facts?.map(singleLine).filter(Boolean);
+        if (attention?.length)
+            return `${singleLine(row.status)} · ${attention.join(" · ")}`;
+        const parts = [];
+        if (row.statusTone !== "running" && row.kind !== "main agent")
+            parts.push(singleLine(row.status));
+        if (row.model)
+            parts.push(row.effort ? `${singleLine(row.model)} ${singleLine(row.effort)}` : singleLine(row.model));
+        if (row.tool)
+            parts.push(singleLine(row.tool));
+        if (row.tokens)
+            parts.push(singleLine(row.tokens));
+        else if (row.primary)
+            parts.push(singleLine(row.primary));
+        if (parts.length)
+            return parts.join(" · ");
+    }
+    const facts = row.facts?.map(singleLine).filter(Boolean).join(" · ");
+    if (facts)
+        return facts;
+    if (row.providerId === "background-tasks") {
+        if (row.statusTone === "running")
+            return row.kind === "watch" ? "watching condition" : "process running";
+        if (row.statusTone === "success")
+            return "completed";
+        if (row.statusTone === "failed")
+            return "failed, inspect log";
+        if (row.statusTone === "warning")
+            return "needs attention";
+        return row.kind || "background task";
+    }
+    if (row.tokens)
+        return row.tokens;
+    if (row.primary)
+        return row.primary;
+    if (row.tool)
+        return row.tool;
+    if (row.secondary)
+        return row.secondary;
+    return row.kind || "work item";
+}
+function fit(value, width) {
+    const str = singleLine(value);
+    const visible = visibleWidth(str);
+    if (visible >= width)
+        return truncateVisible(str, width);
+    return str + " ".repeat(width - visible);
+}
+function fitRight(value, width) {
+    const str = singleLine(value);
+    const visible = visibleWidth(str);
+    if (visible >= width)
+        return truncateVisible(str, width);
+    return " ".repeat(width - visible) + str;
+}
+function singleLine(value) {
+    return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+}
+function prepareDetail(navigatorId, options) {
+    const { providerId, id } = splitRowKey(navigatorId);
+    try {
+        state().providers.get(providerId)?.prepareDetail?.(id, options);
+    }
+    catch { /* observation failure retains cached detail */ }
+}
+function detailFor(navigatorId, now = Date.now(), options) {
+    const { providerId, id } = splitRowKey(navigatorId);
+    const failed = state().launchFailures?.get(navigatorId);
+    if (failed)
+        return { providerId, id, title: failed.name ?? "Launch failed", status: "failed", statusTone: "failed", metadata: [], evidence: { label: "Launch error", text: failed.primary } };
+    const provider = state().providers.get(providerId);
+    if (!provider)
+        return null;
+    try {
+        return provider.detail(id, now, options);
+    }
+    catch {
+        return null;
+    }
+}
+function closeFor(row) {
+    if (row.parentRow || row.readOnly)
+        return { action: "not-closable", providerId: row.providerId, id: row.id };
+    const provider = state().providers.get(row.providerId);
+    if (state().launchFailures?.delete(row.navigatorId)) {
+        state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+        return { action: "dismissed", providerId: row.providerId, id: row.id };
+    }
+    if (!provider)
+        return { action: "missing", providerId: row.providerId, id: row.id };
+    try {
+        const outcome = provider.close(row.id);
+        if (["dismissed", "stopped-and-dismissed"].includes(outcome.action)
+            || outcome.action === "requested" && ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status)) {
+            state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+        }
+        return outcome;
+    }
+    catch {
+        return { action: "missing", providerId: row.providerId, id: row.id };
+    }
+}
+function closeHintFor(row) {
+    if (!row || row.parentRow || row.readOnly)
+        return null;
+    const provider = state().providers.get(row.providerId);
+    if (!provider)
+        return null;
+    try {
+        return `${provider.armCloseLabel(row)} ${row.name || row.id}`;
+    }
+    catch {
+        return null;
+    }
+}
+function installNavigatorEditor(ui, deps) {
+    const prev = typeof ui.getEditorComponent === "function" ? ui.getEditorComponent() : undefined;
+    if (prev && prev[FACTORY_MARK] === true) {
+        prev[FACTORY_REFRESH](deps);
+        return prev;
+    }
+    let currentDeps = deps;
+    const base = prev;
+    const factory = ((tui, theme, keybindings) => {
+        const inner = base ? base(tui, theme, keybindings) : currentDeps.createDefaultEditor(tui, theme, keybindings);
+        return wrapEditor(inner, currentDeps);
+    });
+    factory[FACTORY_MARK] = true;
+    factory[FACTORY_REFRESH] = (next) => { currentDeps = next; };
+    ui.setEditorComponent(factory);
+    return factory;
+}
+function wrapEditor(inner, deps) {
+    if (inner && typeof inner.render === "function")
+        state().editorComponent = inner;
+    const proxy = new Proxy(inner, {
+        get(target, prop) {
+            if (prop === "handleInput") {
+                return (data) => {
+                    if (target.getText?.() === "" && handleMainListInput(data, deps)) {
+                        return;
+                    }
+                    target.handleInput(data);
+                };
+            }
+            if (prop === "render" && typeof target.render === "function") {
+                return (...args) => {
+                    const s = state();
+                    if (s.editorFocusTarget === proxy)
+                        s.editorRenders = (s.editorRenders ?? 0) + 1;
+                    return target.render(...args);
+                };
+            }
+            const value = Reflect.get(target, prop);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+        set(target, prop, value) {
+            return Reflect.set(target, prop, value);
+        },
+    });
+    // Pi mounts and focuses whatever the factory returns; an extension that
+    // re-installs the editor replaces it, so this always names the live one.
+    state().editorFocusTarget = proxy;
+    return proxy;
+}
+function handleMainListInput(data, deps) {
+    const s = state();
+    if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+        for (const provider of s.providers.values())
+            provider.onOpen?.();
+    }
+    const rows = listRows();
+    if (rows.length === 0) {
+        // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
+        if (s.overlay && deps.matchKey(data, "escape")) {
+            unfocusMainList();
+            dismissOverlay();
+            return true;
+        }
+        return false;
+    }
+    if (!s.mainListFocused) {
+        if (!deps.isOpenTrigger(data))
+            return false;
+        focusMainList();
+        return true;
+    }
+    if (deps.matchKey(data, "up")) {
+        clearMainListCloseArm();
+        if (moveMainListSelection(-1)) {
+            refreshMainListWidget();
+            if (!selectedMainListRow()?.parentRow)
+                openNavigator();
+        }
+        return true;
+    }
+    if (deps.matchKey(data, "down")) {
+        clearMainListCloseArm();
+        if (moveMainListSelection(1)) {
+            refreshMainListWidget();
+            if (!selectedMainListRow()?.parentRow)
+                openNavigator();
+        }
+        return true;
+    }
+    if (deps.matchKey(data, "enter")) {
+        openNavigator();
+        return true;
+    }
+    if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
+        handleMainListCloseKey();
+        return true;
+    }
+    if (deps.matchKey(data, "escape") || deps.isOpenTrigger(data)) {
+        unfocusMainList();
+        dismissOverlay();
+        return true;
+    }
+    return false;
+}
+/**
+ * Whether pi-tui has the editor our wrapper returned mounted (#332). Pi mounts whatever the factory
+ * returns, so another extension's `setEditorComponent` (a foreign factory, or `undefined` for Pi's
+ * default editor) unmounts it, and no key reaches our input handler after that. `undefined` means
+ * the host cannot say (no `isComponentMounted`), and callers keep their earlier behaviour.
+ */
+function liveEditorMounted(tui) {
+    const live = state().editorFocusTarget;
+    const check = tui?.isComponentMounted;
+    if (!live || typeof check !== "function")
+        return undefined;
+    try {
+        return check.call(tui, live) === true;
+    }
+    catch {
+        return undefined;
+    }
+}
+/** Close a detail overlay that is still mounted while the editor has focus. */
+function dismissOverlay() {
+    const s = state();
+    if (!s.overlay)
+        return;
+    try {
+        s.dispose?.();
+    }
+    catch { /* ignore */ }
+}
+function handleMainListCloseKey() {
+    const row = selectedMainListRow();
+    if (!row || row.parentRow || row.readOnly)
+        return;
+    const s = state();
+    const now = Date.now();
+    const arm = s.mainListCloseArm;
+    if (arm?.id === row.navigatorId && now >= arm.armedAt && now < arm.armedAt + CLOSE_ARM_MS) {
+        clearMainListCloseArm();
+        closeFor(row);
+        s.mainListSelectedId = undefined;
+        refreshBackgroundWorkNavigator(s.uiCtx);
+        refreshMainListWidget();
+        return;
+    }
+    clearMainListCloseArm();
+    s.mainListCloseArm = { id: row.navigatorId, armedAt: now };
+    s.mainListCloseArmTimer = setTimeout(() => {
+        clearMainListCloseArm();
+        refreshMainListWidget();
+    }, CLOSE_ARM_MS);
+    s.mainListCloseArmTimer.unref?.();
+    refreshMainListWidget();
+}
+/**
+ * Open the shared detail overlay on the row a pointer chose. Setting the selection first keeps the
+ * keyboard path identical: Enter, x and the overlay's own keys then act on the clicked row.
+ */
+function openNavigatorRow(navigatorId) {
+    const rows = listRows();
+    if (!rows.some((row) => row.navigatorId === navigatorId))
+        return false;
+    clearMainListCloseArm();
+    state().mainListSelectedId = navigatorId;
+    refreshMainListWidget();
+    openNavigator();
+    return true;
+}
+function openNavigator() {
+    const s = state();
+    const ctx = s.uiCtx;
+    const deps = s.deps;
+    if (!ctx || !deps || !isNavigatorUiAvailable(ctx))
+        return;
+    for (const provider of s.providers.values())
+        provider.onOpen?.();
+    const rows = listRows();
+    if (rows.length === 0)
+        return;
+    const selectedId = selectedMainListRow()?.navigatorId ?? rows[0].navigatorId;
+    // An overlay that lost focus (another UI took it and handed it to the editor)
+    // is still mounted: switch its detail and focus it rather than stacking a
+    // second overlay over it, whose Esc would only reveal the stale one below.
+    const mounted = s.overlay;
+    if (mounted) {
+        // showDetail may close the overlay (and clear s.overlay); focus() is then a no-op.
+        mounted.showDetail(selectedId);
+        mounted.focus();
+        return;
+    }
+    try {
+        try {
+            s.dispose?.();
+        }
+        catch { /* ignore */ }
+        s.dispose = undefined;
+        s.editorRenderedLastFrame = undefined;
+        let disposeToken;
+        let overlayRef;
+        let handle;
+        const release = () => {
+            if (overlayRef && s.overlay === overlayRef)
+                s.overlay = undefined;
+        };
+        const opened = ctx.ui.custom((tui, theme, _keybindings, done) => {
+            const component = createOverlayComponent(rows, deps, tui, theme, (value) => {
+                release();
+                // Pi restores focus to the editor that was focused when the overlay opened. If an
+                // extension re-installed the editor since, that instance is unmounted and every key
+                // would be lost; hand focus to the live editor before closing.
+                // Only an editor on screen can take focus: after another extension replaced ours, Pi already
+                // focused its replacement, and handing focus to our unmounted wrapper would swallow every key.
+                // An extension that wraps ours mounts its own component, so pi-tui does not find ours, but ours
+                // still renders and handles every key through it: that is still the live editor (#332).
+                const liveEditor = s.editorFocusTarget;
+                if (liveEditor && (liveEditorMounted(tui) !== false || s.editorRenderedLastFrame !== false)) {
+                    try {
+                        handle?.unfocus?.({ target: liveEditor });
+                    }
+                    catch { /* ignore */ }
+                }
+                done(value);
+            }, () => {
+                s.lastHint = undefined;
+                refreshBackgroundWorkNavigator(ctx);
+            }, selectedId);
+            overlayRef = {
+                showDetail: (navigatorId) => component.showDetail(navigatorId),
+                refreshDetail: () => component.refreshDetail(),
+                focus: () => {
+                    if (s.overlay !== overlayRef)
+                        return;
+                    try {
+                        handle?.focus?.();
+                    }
+                    catch { /* ignore */ }
+                },
+            };
+            s.overlay = overlayRef;
+            disposeToken = () => component.dismiss();
+            s.dispose = disposeToken;
+            return component;
+        }, { overlay: true, overlayOptions: detailOverlayOptions, onHandle: (h) => { handle = h; } });
+        const clear = () => {
+            release();
+            if (s.dispose === disposeToken)
+                s.dispose = undefined;
+        };
+        void Promise.resolve(opened).then(clear, clear);
+    }
+    catch { /* keep foreground usable */ }
+}
+function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, initialDetailId) {
+    let editorRendersSeen = state().editorRenders ?? 0;
+    let sawLiveEditor = liveEditorMounted(tui) === true;
+    // The overlay only ever shows one row's detail; the rail below it is the list.
+    const overlayState = { rows: initialRows, selected: 0 };
+    let logTailRows = DEFAULT_LOG_TAIL_ROWS;
+    const expandedSections = new Set();
+    const initializedSections = new Set();
+    let detailId = initialDetailId;
+    const initialRow = initialRows.find((row) => row.navigatorId === detailId);
+    prepareDetail(detailId, { logTailLines: logTailRows });
+    let detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? (initialRow ? fallbackDetail(initialRow) : null);
+    applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+    {
+        const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
+        if (idx >= 0)
+            overlayState.selected = idx;
+    }
+    let closeArm;
+    let closeArmTimer;
+    let closed = false;
+    let transcriptDetail = null;
+    let transcriptComponent = null;
+    let pointerTargets = [];
+    let pointerWidth = 0;
+    const pointer = createPointerNavigation((event) => {
+        if (closed || !Number.isInteger(event.y) || !Number.isFinite(event.x) || event.x < 0 || event.x >= pointerWidth)
+            return undefined;
+        const target = pointerTargets[event.y];
+        if (target === BACK_TARGET)
+            return event.x >= 3 && event.x < 3 + visibleWidth(BACK_TO_MAIN) ? target : undefined;
+        return target && listRows().some((row) => row.navigatorId === target) ? target : undefined;
+    }, (target) => {
+        if (target === BACK_TARGET) {
+            backToMain();
+            return true;
+        }
+        refreshRows();
+        const index = overlayState.rows.findIndex((row) => row.navigatorId === target);
+        if (index < 0)
+            return false;
+        selectOverlayRow(index);
+        openDetail();
+        return true;
+    });
+    const fg = (color, value) => theme?.fg ? theme.fg(color, value) : value;
+    function requestRender() {
+        try {
+            tui.requestRender();
+        }
+        catch { /* ignore */ }
+    }
+    const detailScheduler = createRenderScheduler(() => {
+        if (closed)
+            return;
+        detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+        requestRender();
+        startDetailTimer();
+    });
+    function refreshRows(rows = listRows()) {
+        const selectedId = state().mainListSelectedId ?? overlayState.rows[overlayState.selected]?.navigatorId;
+        overlayState.rows = rows;
+        const nextIdx = selectedId ? overlayState.rows.findIndex((row) => row.navigatorId === selectedId) : -1;
+        overlayState.selected = nextIdx >= 0 ? nextIdx : Math.min(overlayState.selected, Math.max(0, overlayState.rows.length - 1));
+    }
+    function selectOverlayRow(next) {
+        overlayState.selected = Math.min(Math.max(0, overlayState.rows.length - 1), Math.max(0, next));
+        state().mainListSelectedId = overlayState.rows[overlayState.selected]?.navigatorId;
+        clearCloseArm();
+        refreshMainListWidget();
+    }
+    function activateSelectedRow() {
+        openDetail();
+    }
+    function clearCloseArm() {
+        if (closeArmTimer)
+            clearTimeout(closeArmTimer);
+        closeArmTimer = undefined;
+        if (closeArm) {
+            closeArm = undefined;
+        }
+    }
+    function stopDetailTimer() {
+        detailScheduler.cancel();
+    }
+    function startDetailTimer() {
+        detailScheduler.cancel();
+        if (detail?.status === "running" || detail?.status === "orphaned") {
+            detailScheduler.schedule(DETAIL_TICK_MS);
+        }
+    }
+    function selectedRow() {
+        return overlayState.rows[overlayState.selected];
+    }
+    function openDetail() {
+        const row = selectedRow();
+        if (!row)
+            return;
+        clearCloseArm();
+        detailId = row.navigatorId;
+        expandedSections.clear();
+        initializedSections.clear();
+        prepareDetail(detailId, { logTailLines: logTailRows });
+        detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+        startDetailTimer();
+        requestRender();
+    }
+    startDetailTimer();
+    function close() {
+        if (closed)
+            return;
+        closed = true;
+        clearCloseArm();
+        detailScheduler.dispose();
+        try {
+            done(null);
+        }
+        catch { /* ignore */ }
+    }
+    function backToMain() {
+        unfocusMainList();
+        close();
+    }
+    function handleCloseKey() {
+        const row = selectedRow();
+        if (!row || row.parentRow || row.readOnly)
+            return;
+        const now = Date.now();
+        if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {
+            clearCloseArm();
+            const before = overlayState.rows;
+            const closedIdx = overlayState.selected;
+            closeFor(row);
+            stopDetailTimer();
+            const after = listRows();
+            const nextId = neighbourCloseTarget(before, closedIdx, row.navigatorId, after);
+            onClosed();
+            if (!nextId) {
+                // Nothing left to show: hand the keyboard back to the editor.
+                unfocusMainList();
+                close();
+                return;
+            }
+            state().mainListSelectedId = nextId;
+            overlayState.rows = after;
+            overlayState.selected = Math.max(0, after.findIndex((candidate) => candidate.navigatorId === nextId));
+            refreshMainListWidget();
+            openDetail();
+            return;
+        }
+        clearCloseArm();
+        closeArm = { id: row.navigatorId, armedAt: now };
+        closeArmTimer = setTimeout(() => {
+            closeArmTimer = undefined;
+            closeArm = undefined;
+            requestRender();
+        }, CLOSE_ARM_MS);
+        closeArmTimer.unref?.();
+        requestRender();
+    }
+    /**
+     * Close when a replacement editor takes over while the sheet is open (#332).
+     * A wrapper inside another extension's editor still counts as live if it rendered since
+     * the last overlay frame. Pi renders the editor before it composites overlays.
+     */
+    function closeIfEditorReplaced() {
+        const renders = state().editorRenders ?? 0;
+        const rendered = renders !== editorRendersSeen;
+        editorRendersSeen = renders;
+        state().editorRenderedLastFrame = rendered;
+        if (closed)
+            return;
+        const mounted = liveEditorMounted(tui);
+        if (rendered || mounted === true) {
+            sawLiveEditor = true;
+            return;
+        }
+        if (mounted !== false || !sawLiveEditor)
+            return;
+        // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
+        queueMicrotask(() => {
+            if (closed)
+                return;
+            unfocusMainList();
+            close();
+            requestRender();
+        });
+    }
+    return {
+        render(width) {
+            closeIfEditorReplaced();
+            // The main-list refresh owns provider I/O; streaming paints reuse its snapshot.
+            refreshRows(state().mainListRows ?? []);
+            const rail = buildMainListLayout(overlayState.rows, width, deps.truncate, fg, {
+                selectedId: selectedRow()?.navigatorId,
+                focused: true,
+            });
+            const armedRow = overlayState.rows.find((row) => row.navigatorId === closeArm?.id);
+            const hint = closeHintFor(armedRow);
+            if (hint) {
+                rail.lines.push(deps.truncate(`   ${hint}`, renderWidth(width)));
+                rail.owners.push(undefined);
+            }
+            const railLines = rail.lines;
+            const editorLines = renderEditorLines(width);
+            const bottomLines = [...railLines, ...editorLines];
+            const overlayRows = state().detailOverlayRows;
+            const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
+            const backControl = pointer.hovered === BACK_TARGET
+                ? highlightPointerTarget(theme, BACK_TO_MAIN, visibleWidth(BACK_TO_MAIN)) : undefined;
+            let contentLines;
+            if (detail?.transcript && deps.createTranscriptComponent) {
+                if (transcriptDetail !== detail || !transcriptComponent) {
+                    transcriptDetail = detail;
+                    transcriptComponent = deps.createTranscriptComponent(detail, theme);
+                }
+                contentLines = buildTranscriptDetailLines(detail, transcriptComponent.render(width), width, deps.truncate, fg, { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows, backControl });
+            }
+            else {
+                transcriptDetail = null;
+                transcriptComponent = null;
+                contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false, backControl });
+            }
+            const fittedContent = detailRows === undefined ? contentLines : contentLines.slice(0, detailRows);
+            if (detailRows !== undefined)
+                while (fittedContent.length < detailRows)
+                    fittedContent.push("");
+            const contentTargets = fittedContent.map((_, index) => index === 1 ? BACK_TARGET : undefined);
+            const allLines = [...fittedContent, ...bottomLines];
+            const allTargets = [...contentTargets, ...rail.owners, ...editorLines.map(() => undefined)];
+            // Match hit targets to the same viewport clipping as the visible lines.
+            const start = overlayRows === undefined ? 0 : Math.max(0, allLines.length - Math.max(1, overlayRows));
+            pointerTargets = allTargets.slice(start);
+            pointerWidth = renderWidth(width);
+            return allLines.slice(start).map((line, index) => {
+                if (!pointer.hovered || pointerTargets[index] !== pointer.hovered)
+                    return line;
+                if (pointer.hovered === BACK_TARGET)
+                    return line;
+                return highlightPointerTarget(theme, line, width);
+            });
+        },
+        handleMouse(event) {
+            return pointer.handleMouse(event);
+        },
+        handleInput(data) {
+            if (closed)
+                return;
+            if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
+                handleCloseKey();
+                return;
+            }
+            if (deps.matchKey(data, "up")) {
+                selectOverlayRow(overlayState.selected - 1);
+                activateSelectedRow();
+            }
+            else if (deps.matchKey(data, "down")) {
+                selectOverlayRow(overlayState.selected + 1);
+                activateSelectedRow();
+            }
+            else if (deps.matchKey(data, "left")) {
+                const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
+                if (mainIdx >= 0)
+                    selectOverlayRow(mainIdx);
+                backToMain();
+            }
+            else if (deps.matchKey(data, "enter")) {
+                const row = selectedRow();
+                if (row?.parentRow || row?.navigatorId !== detailId)
+                    openDetail();
+                else {
+                    const sectionId = firstToggleableSectionId(detail);
+                    if (!sectionId)
+                        return;
+                    if (expandedSections.has(sectionId))
+                        expandedSections.delete(sectionId);
+                    else
+                        expandedSections.add(sectionId);
+                    requestRender();
+                }
+            }
+            else if (data === "m" || data === "M" || data === "\x13" || deps.matchKey(data, "ctrl+s")) {
+                const row = selectedRow();
+                const provider = row ? state().providers.get(row.providerId) : undefined;
+                const key = data === "m" || data === "M" ? "m" : "ctrl+s";
+                if (!row || !provider?.handleDetailInput?.(row.id, key))
+                    return;
+                detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+                applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+                refreshMainListWidget();
+                requestRender();
+            }
+            else if (data === "l" || data === "L") {
+                logTailRows = cycleLogTailRows(logTailRows);
+                prepareDetail(detailId, { logTailLines: logTailRows });
+                if (detailId)
+                    detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+                applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+                requestRender();
+            }
+            else if (deps.matchKey(data, "escape")) {
+                backToMain();
+            }
+        },
+        /** Observation arrival updates this row without resetting selection or folded sections. */
+        refreshDetail() {
+            if (closed)
+                return;
+            prepareDetail(detailId, { logTailLines: logTailRows });
+            detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+            applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+            startDetailTimer();
+            requestRender();
+        },
+        /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
+        showDetail(navigatorId) {
+            if (closed)
+                return;
+            refreshRows();
+            const idx = overlayState.rows.findIndex((row) => row.navigatorId === navigatorId);
+            if (idx < 0)
+                return;
+            overlayState.selected = idx;
+            state().mainListSelectedId = navigatorId;
+            openDetail();
+        },
+        /** Close the overlay (done), e.g. when the navigator is disposed. */
+        dismiss() { close(); },
+        invalidate() { pointer.reset(); pointerTargets = []; transcriptComponent?.invalidate(); },
+        dispose() {
+            pointer.reset();
+            pointerTargets = [];
+            clearCloseArm();
+            detailScheduler.dispose();
+        },
+    };
+}
+/**
+ * After a confirmed close, the row whose detail the overlay shows next: the
+ * nearest closable row below the closed one in the pre-close order, else the
+ * nearest above it. `undefined` means nothing closable remains.
+ */
+function neighbourCloseTarget(before, closedIdx, closedId, after) {
+    const remaining = new Set(after.filter((row) => !row.parentRow && row.navigatorId !== closedId).map((row) => row.navigatorId));
+    for (let i = closedIdx + 1; i < before.length; i += 1) {
+        const id = before[i]?.navigatorId;
+        if (id && remaining.has(id))
+            return id;
+    }
+    for (let i = Math.min(closedIdx, before.length) - 1; i >= 0; i -= 1) {
+        const id = before[i]?.navigatorId;
+        if (id && remaining.has(id))
+            return id;
+    }
+    // Rows that appeared since the last render.
+    return after.find((row) => remaining.has(row.navigatorId))?.navigatorId;
+}
+function buildTranscriptDetailLines(detail, transcriptLines, width, truncate, fg, options = {}) {
+    const actions = [...(detail.footerActions ?? ["x close"])].join(" · ");
+    const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
+    let shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
+    const lines = [
+        fg("accent", rule(detail.title, width)),
+        `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`,
+        "",
+        `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
+    ];
+    const optionalMetadata = [
+        ...(detail.subtitle ? [`   summary  ${detail.subtitle}`] : []),
+        ...detail.metadata.map((item) => `   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`),
+    ];
+    const transcriptHeader = ["", dim(section(`transcript · latest ${tailRows} rows`, width), fg)];
+    if (detail.transcriptDiagnostic) {
+        for (const diagnosticRow of detail.transcriptDiagnostic.split(/\r\n|\r|\n/)) {
+            transcriptHeader.push(`   ${dim(diagnosticRow, fg)}`);
+        }
+    }
+    // Metadata always renders; the transcript tail takes only the rows left over (the tail size is a cap, not a guarantee).
+    lines.push(...optionalMetadata);
+    if (options.maxRows !== undefined) {
+        const transcriptBudget = Math.max(1, options.maxRows - lines.length - transcriptHeader.length - 1);
+        shownTranscriptLines = shownTranscriptLines.slice(-transcriptBudget);
+    }
+    lines.push(...transcriptHeader);
+    lines.push(...shownTranscriptLines);
+    lines.push("");
+    if (options.bottomFooter === false)
+        return lines.map((line) => safeTruncate(line, width, truncate));
+    const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
+    padBeforeFooter(lines, footerLines.length, options.minRows);
+    lines.push(...footerLines);
+    return lines.map((line) => safeTruncate(line, width, truncate));
+}
+function detailOverlayOptions() {
+    const marginBottom = DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS;
+    return {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
+        margin: {
+            top: 0,
+            right: 0,
+            bottom: marginBottom,
+            left: 0,
+        },
+        visible: (_termWidth, termHeight) => {
+            state().detailOverlayRows = Math.max(1, termHeight - marginBottom);
+            return true;
+        },
+    };
+}
+function renderEditorLines(width) {
+    try {
+        const lines = state().editorComponent?.render(width);
+        if (lines?.length)
+            return lines;
+    }
+    catch { /* use an empty editor-shaped fallback */ }
+    const border = "─".repeat(Math.max(1, width));
+    return [border, "", border];
+}
+function fallbackDetail(row) {
+    return {
+        providerId: row.providerId,
+        id: row.id,
+        title: row.name || row.id,
+        status: row.status,
+        statusTone: row.statusTone,
+        subtitle: row.primary,
+        metadata: [
+            { label: "provider", value: row.providerLabel },
+            { label: "kind", value: row.kind },
+            { label: "elapsed", value: row.elapsed },
+        ],
+        evidence: { label: "details", text: row.secondary || "(no details)" },
+    };
+}
+function buildDetailLines(detail, width, truncate, fg, options = {}) {
+    if (!detail) {
+        const lines = [rule("Work unavailable", width), `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}`, ""];
+        if (options.bottomFooter === false)
+            return lines.map((line) => safeTruncate(line, width, truncate));
+        const footerLines = [dim(rule("", width), fg)];
+        padBeforeFooter(lines, footerLines.length, options.minRows);
+        lines.push(...footerLines);
+        return lines.map((line) => safeTruncate(line, width, truncate));
+    }
+    const lines = [];
+    lines.push(fg("accent", rule(detail.title, width)));
+    const toggleableSectionId = firstToggleableSectionId(detail);
+    const foldedAction = toggleableSectionId
+        ? (options.expandedSections?.has(toggleableSectionId) ? "Enter collapse" : "Enter expand")
+        : null;
+    const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25"].filter(Boolean).join(" · ");
+    lines.push(`   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`);
+    lines.push("");
+    lines.push(`   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`);
+    if (detail.subtitle)
+        lines.push(`   summary  ${detail.subtitle}`);
+    for (const item of detail.metadata) {
+        lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
+    }
+    if (detail.foldedSections?.length) {
+        lines.push("");
+        for (const section of detail.foldedSections) {
+            const expanded = options.expandedSections?.has(section.id) === true;
+            if (!expanded) {
+                const label = section.label.padEnd(8, " ").slice(0, 8);
+                const folded = dim("folded", fg);
+                const previewWidth = Math.max(8, width - visibleWidth(`   ${label}  ${folded}`));
+                const preview = truncateVisible(singleLine(section.collapsedText ?? section.text), previewWidth);
+                lines.push(`   ${label} ${preview} ${folded}`);
+                continue;
+            }
+            lines.push(dim(sectionHeader(section.label, width), fg));
+            for (const raw of wrapDetailText(section.text, width - 6))
+                lines.push(`   ${raw}`);
+        }
+    }
+    lines.push("");
+    const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
+    const body = detail.evidence.text && detail.evidence.text.trim() ? detail.evidence.text : "(no output yet)";
+    if (isFoldableEvidence(detail)) {
+        const expanded = options.expandedSections?.has(EVIDENCE_SECTION_ID) === true;
+        if (!expanded) {
+            lines.push(dim(section(`${detail.evidence.label} · folded`, width), fg));
+            const folded = dim("folded", fg);
+            const previewWidth = Math.max(8, width - visibleWidth(`    ${folded}`));
+            const preview = truncateVisible(singleLine(body), previewWidth);
+            lines.push(`   ${preview} ${folded}`);
+        }
+        else {
+            const wrapped = wrapEvidenceText(body, width - 6);
+            let shown = wrapped.slice(0, tailRows);
+            // Same budget as the tail branch: the header row and the trailing blank come out of maxRows too.
+            if (options.maxRows !== undefined)
+                shown = shown.slice(0, Math.max(1, options.maxRows - lines.length - 2));
+            lines.push(dim(section(`${detail.evidence.label} · showing ${shown.length}/${wrapped.length} rows`, width), fg));
+            for (const raw of shown)
+                lines.push(raw ? `   ${raw}` : "   ");
+        }
+    }
+    else {
+        const tailEvidence = isTailEvidence(detail);
+        const evidenceLabel = tailEvidence ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
+        lines.push(dim(section(evidenceLabel, width), fg));
+        const wrapped = /log/i.test(detail.evidence.label)
+            ? wrapLogText(body, width - 6)
+            : wrapEvidenceText(body, width - 6);
+        let shown = tailEvidence ? wrapped.slice(-tailRows) : wrapped;
+        // Metadata above always renders; a tail that outgrows the remaining rows drops its oldest rows so the newest stay on screen (+1 for the trailing blank).
+        if (tailEvidence && options.maxRows !== undefined)
+            shown = shown.slice(-Math.max(1, options.maxRows - lines.length - 1));
+        for (const raw of shown)
+            lines.push(raw ? `   ${raw}` : "   ");
+    }
+    lines.push("");
+    if (options.bottomFooter === false)
+        return lines.map((line) => safeTruncate(line, width, truncate));
+    const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
+    padBeforeFooter(lines, footerLines.length, options.minRows);
+    lines.push(...footerLines);
+    return lines.map((line) => safeTruncate(line, width, truncate));
+}
+function padBeforeFooter(lines, footerLineCount, minRows) {
+    if (minRows === undefined || !Number.isFinite(minRows))
+        return;
+    const target = Math.max(1, Math.floor(minRows));
+    while (lines.length + footerLineCount < target)
+        lines.push("");
+}
+function firstToggleableSectionId(detail) {
+    const first = detail?.foldedSections?.[0];
+    if (first)
+        return first.id;
+    return detail && isFoldableEvidence(detail) ? EVIDENCE_SECTION_ID : undefined;
+}
+function applyDefaultExpandedSections(detail, expandedSections, initializedSections) {
+    for (const section of detail?.foldedSections ?? []) {
+        if (initializedSections.has(section.id))
+            continue;
+        // Details can arrive after a running row's fallback. Initialize each section
+        // on first arrival, then preserve the user's choice across observations.
+        initializedSections.add(section.id);
+        if (section.expandedByDefault)
+            expandedSections.add(section.id);
+    }
+}
+function isFoldableEvidence(detail) {
+    return !isTailEvidence(detail);
+}
+function isTailEvidence(detail) {
+    return /log|transcript/i.test(detail.evidence.label);
+}
+function sectionHeader(label, width) {
+    return section(label, width);
+}
+function wrapDetailText(text, width) {
+    const max = Math.max(16, width);
+    const words = String(text ?? "").split(/\s+/).filter(Boolean);
+    const lines = [];
+    let line = "";
+    for (const word of words) {
+        if (!line) {
+            line = word;
+        }
+        else if (visibleWidth(`${line} ${word}`) <= max) {
+            line += ` ${word}`;
+        }
+        else {
+            lines.push(line);
+            line = word;
+        }
+    }
+    if (line)
+        lines.push(line);
+    return lines.length ? lines : ["(empty)"];
+}
+function wrapEvidenceText(text, width) {
+    const rows = [];
+    for (const raw of String(text ?? "").split(/\r?\n/)) {
+        if (!raw.trim()) {
+            rows.push("");
+            continue;
+        }
+        rows.push(...wrapDetailText(raw, width));
+    }
+    return rows.length ? rows : ["(no output yet)"];
+}
+/**
+ * Wrap terminal log rows without flattening entries together. Continuations
+ * retain the source indentation, and long paths/JSON tokens are hard-wrapped
+ * so the final width guard never has to discard their suffix.
+ */
+export function wrapLogText(text, width) {
+    const max = Math.max(8, Math.floor(width));
+    const rows = [];
+    for (const source of String(text ?? "").split(/\r?\n/)) {
+        if (!source) {
+            rows.push("");
+            continue;
+        }
+        const sourceIndent = source.match(/^[ \t]*/)?.[0] ?? "";
+        // Leave room for a full-width grapheme even on deeply indented log lines.
+        const indent = sourceIndent.replace(/\t/g, "  ").slice(0, max - 2);
+        let remaining = source.slice(sourceIndent.length);
+        const contentWidth = Math.max(1, max - visibleWidth(indent));
+        if (!remaining) {
+            rows.push(indent);
+            continue;
+        }
+        while (visibleWidth(remaining) > contentWidth) {
+            let [head, tail] = splitVisiblePrefix(remaining, contentWidth);
+            const minSoftBreak = Math.floor(contentWidth * 0.45);
+            const delimiterBreak = lastDelimiterBreak(head);
+            const whitespace = head.match(/\s+\S*$/)?.index;
+            if (delimiterBreak > minSoftBreak) {
+                tail = head.slice(delimiterBreak) + tail;
+                head = head.slice(0, delimiterBreak);
+            }
+            else if (whitespace !== undefined && whitespace > minSoftBreak) {
+                tail = head.slice(whitespace).trimStart() + tail;
+                head = head.slice(0, whitespace).trimEnd();
+            }
+            rows.push(indent + head);
+            remaining = tail.trimStart();
+        }
+        rows.push(indent + remaining);
+    }
+    return rows.length ? rows : [""];
+}
+function lastDelimiterBreak(value) {
+    let last = -1;
+    for (const match of value.matchAll(/[\/,}:]/g))
+        last = match.index + 1;
+    return last;
+}
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+function splitVisiblePrefix(value, width) {
+    const max = Math.max(0, Math.floor(width));
+    let visible = 0;
+    let end = 0;
+    for (const { segment, index } of GRAPHEME_SEGMENTER.segment(value)) {
+        if (index < end)
+            continue;
+        const formatting = value.slice(index).match(FORMATTING_PREFIX_RE);
+        if (formatting) {
+            end = index + formatting[0].length;
+            continue;
+        }
+        const cells = piVisibleWidth(segment);
+        if (visible + cells > max)
+            break;
+        visible += cells;
+        end = index + segment.length;
+    }
+    return [value.slice(0, end), value.slice(end)];
+}
+function cycleLogTailRows(current) {
+    const idx = LOG_TAIL_ROW_CHOICES.findIndex((value) => value === current);
+    return LOG_TAIL_ROW_CHOICES[(idx + 1) % LOG_TAIL_ROW_CHOICES.length];
+}
+function toneColor(tone, status) {
+    if (tone === "success")
+        return "success";
+    if (tone === "failed")
+        return "error";
+    if (tone === "warning")
+        return "warning";
+    if (tone === "running")
+        return "accent";
+    switch (status) {
+        case "completed":
+        case "succeeded":
+            return "success";
+        case "failed":
+        case "lost":
+        case "timed_out":
+            return "error";
+        case "cancelled":
+        case "killed":
+        case "orphaned":
+            return "warning";
+        default:
+            return "dim";
+    }
+}
+function dim(value, fg) {
+    return fg("dim", value);
+}
+function section(label, width) {
+    return fill("─", label, width);
+}
+function rule(label, width) {
+    return fill("━", label, width);
+}
+function fill(glyph, label, width) {
+    const w = Math.max(0, Math.floor(width || 0));
+    if (w <= 0)
+        return "";
+    if (!label)
+        return glyph.repeat(w);
+    const prefix = `${glyph}${glyph} ${label} `;
+    if (visibleWidth(prefix) >= w)
+        return truncateVisible(prefix, w);
+    return prefix + glyph.repeat(w - visibleWidth(prefix));
+}
+function safeTruncate(line, width, truncate) {
+    if (visibleWidth(line) <= width)
+        return line;
+    const cut = truncate(line, width);
+    return visibleWidth(cut) > width ? truncateVisible(cut, width) : cut;
+}
+const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))", "g");
+const FORMATTING_PREFIX_RE = new RegExp(`^(?:${ANSI_RE.source}|<\\/?[a-zA-Z][\\w-]*>|</>)`);
+function visibleWidth(value) {
+    const cleaned = String(value ?? "")
+        .replace(ANSI_RE, "")
+        .replace(/<\/?[a-zA-Z][\w-]*>/g, "")
+        .replace(/<\/>/g, "");
+    return piVisibleWidth(cleaned);
+}
+function truncateVisible(value, width) {
+    const str = String(value ?? "");
+    const max = Math.max(0, Math.floor(width || 0));
+    if (visibleWidth(str) <= max)
+        return str;
+    return piTruncateToWidth(str, max);
+}
+/**
+ * Render one provider detail with the overlay line builder and the main-list
+ * row formatter. Callers must already be inside the process that registered
+ * the provider. `listedIds` is the live list; `rowLine` uses the same
+ * formatter on the detail payload when the live list has filtered the run.
+ */
+export function renderRegisteredWorkDetail(providerId, id, width = 100) {
+    const s = state();
+    const deps = s.deps;
+    const ctx = s.uiCtx;
+    const truncate = deps?.truncate ?? ((value, limit) => {
+        const text = String(value ?? "");
+        return text.length > limit ? text.slice(0, Math.max(0, limit)) : text;
+    });
+    const fg = ctx ? themeFg(ctx) : (_color, value) => value;
+    const provider = s.providers.get(providerId);
+    let listed = [];
+    try {
+        listed = provider?.listRows(Date.now()) ?? [];
+    }
+    catch {
+        listed = [];
+    }
+    const detail = detailFor(rowKey(providerId, id), Date.now(), { logTailLines: 40 });
+    const listLines = s.lastMainListLines ?? null;
+    const listedIds = listed.map((row) => row.id);
+    if (!detail)
+        return { detail: null, lines: [], rowLine: null, listLines, listedIds };
+    const theme = ctx?.ui?.theme;
+    let lines;
+    try {
+        if (detail.transcript && deps?.createTranscriptComponent) {
+            const transcriptLines = deps.createTranscriptComponent(detail, theme).render(width) ?? [];
+            lines = buildTranscriptDetailLines(detail, transcriptLines, width, truncate, fg, { logTailRows: 12 });
+        }
+        else {
+            lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
+        }
+    }
+    catch {
+        lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
+    }
+    const modelLine = detail.metadata.find((item) => item.label === "model")?.value ?? "";
+    const effortMatch = modelLine.match(/ · effort (.+)$/);
+    const elapsed = detail.metadata.find((item) => item.label === "elapsed")?.value ?? "-";
+    const row = {
+        providerId,
+        id: detail.id,
+        name: detail.title,
+        model: effortMatch ? modelLine.slice(0, effortMatch.index) : modelLine,
+        ...(effortMatch ? { effort: effortMatch[1] } : {}),
+        status: detail.status,
+        statusTone: detail.statusTone,
+        kind: "subagent",
+        elapsed,
+        primary: "",
+        sortStartedAt: 0,
+        navigatorId: rowKey(providerId, detail.id),
+        providerLabel: provider?.label ?? providerId,
+    };
+    return {
+        detail,
+        lines,
+        rowLine: formatMainListRow(row, true, fg, width),
+        listLines,
+        listedIds,
+    };
+}

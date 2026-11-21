@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 /**
  * SPEC-03-R: /agents and model_select must follow the current foreground.
  * agents_catalog already re-read the tool context; the slash command kept the
@@ -15,6 +16,7 @@ mkdirSync(runtimeTmp, { recursive: true });
 process.env.TMPDIR = runtimeTmp;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 
 const { setConfigForTests } = await import("../config.ts");
 const { createLaunchEnricher, loadLaunchSnapshot, noteCatalogHost } = await import("../catalog-runtime.ts");
@@ -70,7 +72,10 @@ describe("current foreground for /agents", { concurrency: false }, () => {
     it("shows catalog options in the slash-menu subtitle", () => {
         assert.match(commands.agents.description, /^\[list\|show\|create\|reload\|import-codex\] — /);
     });
-    after(() => {
+    after(async () => {
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
         setConfigForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });

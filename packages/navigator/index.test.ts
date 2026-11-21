@@ -10,6 +10,8 @@ import {
   isNavigatorUiAvailable,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
+  getNavigatorView,
+  setNavigatorView,
   wrapLogText,
   type BackgroundWorkProvider,
 } from "./index.ts";
@@ -55,6 +57,93 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  it("renders agent groups and their tasks without blank rows in the work tree", () => {
+    const previousView = getNavigatorView();
+    setNavigatorView("tree");
+    const agents = provider("subagents", "Subagents", 10, 100, () => {});
+    const tasks = provider("background-tasks", "Background Tasks", 20, 100, () => {});
+    const unregisterAgents = registerBackgroundWorkProvider({ ...agents, listRows: (now) =>
+      ["main", "leaf-a", "leaf-b", "with-task"].map((id, i) => ({
+        ...agents.listRows(now)[0]!, id, name: id, sortStartedAt: 100 - i,
+      })) });
+    const unregisterTasks = registerBackgroundWorkProvider({ ...tasks, listRows: (now) =>
+      ["main", "with-task", "missing-owner"].map((parentAgentId) => ({ ...tasks.listRows(now)[0]!,
+        id: `${parentAgentId}-task`, name: `${parentAgentId}-task`, parentAgentId,
+      })) });
+    let widget: unknown;
+    const ctx = { mode: "tui", hasUI: true, ui: { factory: undefined as any, setStatus() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      setWidget(key: string, value: unknown) { if (key === MAIN_LIST_WIDGET_KEY) widget = value; },
+    } } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: data => data === "left", matchKey: (data, key) => data === key,
+        truncate: truncateToWidth,
+      });
+      const lines = renderWidget(widget, 100);
+      const mainTask = lines.findIndex(line => line.includes("main-task"));
+      assert.ok(mainTask >= 0);
+      assert.match(lines[mainTask]!, /└─ >_ main-task/);
+      assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
+      assert.match(lines[mainTask + 2]!, /leaf-b/);
+      assert.match(lines[mainTask + 3]!, /with-task/);
+      assert.match(lines[mainTask + 4]!, /└.*with-task-task/);
+      assert.match(lines[mainTask + 5]!, /missing-owner.*not running/);
+      assert.match(lines[mainTask + 6]!, /└.*missing-owner-task/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterAgents();
+      unregisterTasks();
+      setNavigatorView(previousView);
+    }
+  });
+
+  it("refreshes an open loading detail when its observation arrives without another key or list change", () => {
+    let ready = false;
+    let paints = 0;
+    let component: any;
+    const base = provider("subagents", "Subagents", 10, 100, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...base,
+      detail: id => ready ? base.detail(id, Date.now()) : {
+        providerId: "subagents", id, title: "Loading observation", status: "rebuilding",
+        statusTone: "warning", metadata: [], evidence: { label: "observation", text: "Waiting for snapshot" },
+      },
+    });
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {}, setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() { paints++; } }, this.theme, {}, () => undefined);
+        return new Promise(() => {});
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: data => data === "left", matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left"); editor.handleInput("enter");
+      assert.match(component.render(100).join("\n"), /Waiting for snapshot/);
+      const before = paints;
+      ready = true;
+      refreshBackgroundWorkNavigator(ctx);
+      assert.match(component.render(100).join("\n"), /Subagents output/);
+      assert.ok(paints > before, "observation arrival must request an overlay repaint even when list rows are unchanged");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("keeps the persistent footer clear while sharing one editor host and dispatching close by provider", () => {
     const closed: string[] = [];
     const unregisterSubagents = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(`subagents:${id}`)));
@@ -297,6 +386,55 @@ describe("shared background work navigator", () => {
       const disposedCalls = calls;
       t.mock.timers.tick(60_000);
       assert.equal(calls, disposedCalls, "a disposed session must not retain a refresh loop");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps detail-overlay paints free of provider reads while observing external changes", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    let calls = 0;
+    let status = "running";
+    let notify: (() => void) | undefined;
+    let component: any;
+    const rowProvider = provider("overlay-io", "Overlay", 10, 100, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...rowProvider,
+      listRows(now) {
+        calls++;
+        return rowProvider.listRows(now).map(row => ({ ...row, status, primary: status }));
+      },
+      onVisibleChanged(fn) { notify = fn; return () => { notify = undefined; }; },
+    });
+    const ui = { editor: undefined as any, setStatus() {}, setWidget() {},
+      getEditorComponent() { return this.editor; }, setEditorComponent(value: any) { this.editor = value; },
+      custom(create: any) {
+        return new Promise(resolve => { component = create({ requestRender() {} }, {}, {}, resolve); });
+      } };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, { createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: key => key === "left", matchKey: (value, key) => value === key, truncate: value => value });
+      const editor = ui.editor({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      assert.ok(component, "the real detail overlay must open");
+      const expected = component.render(100);
+      const warmCalls = calls;
+      for (let frame = 0; frame < 60; frame++) assert.deepEqual(component.render(100), expected);
+      assert.equal(calls, warmCalls, "unrelated overlay paints must not invoke providers");
+      status = "failed";
+      t.mock.timers.tick(1000);
+      assert.ok(calls > warmCalls, "external changes must be polled independently of paints");
+      assert.match(component.render(100).join("\n"), /failed/);
+      status = "completed";
+      notify?.();
+      assert.match(component.render(100).join("\n"), /completed/);
+      disposeBackgroundWorkNavigator(ctx);
+      const disposedCalls = calls;
+      t.mock.timers.tick(60_000);
+      assert.equal(calls, disposedCalls, "disposal must stop the refresh loop");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -1163,7 +1301,8 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("opens detail only as an overlay with a 25/10 rolling tail and default-expanded command", () => {
+  for (const delayed of [false, true]) it(`opens detail only as an overlay with a 25/10 rolling tail and default-expanded command (delayed=${delayed})`, () => {
+    let detailReady = !delayed;
     const detailCalls: Array<number | undefined> = [];
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -1184,6 +1323,7 @@ describe("shared background work navigator", () => {
       }],
       detail: (_id, _now, options) => {
         detailCalls.push(options?.logTailLines);
+        if (!detailReady) return null;
         return {
           providerId: "background-tasks",
           id: "bg-1",
@@ -1236,6 +1376,12 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       editor.handleInput("enter");
 
+      if (delayed) {
+        assert.doesNotMatch(component.render(72).join("\n"), /Enter collapse/);
+        detailReady = true;
+        component.refreshDetail();
+      }
+
       const overlayOptions = customOptions?.overlayOptions?.();
       const { visible, ...layoutOptions } = overlayOptions;
       const navigatorRows = renderWidget(widgets.at(-1)?.[1], 72, ui.theme).length;
@@ -1284,6 +1430,9 @@ describe("shared background work navigator", () => {
       component.handleInput("enter");
       rendered = component.render(120).join("\n");
       assert.match(rendered, /command.*folded/);
+      component.refreshDetail();
+      assert.match(component.render(120).join("\n"), /command.*folded/, "observation refresh preserves the user's collapse choice");
+
 
       component.handleInput("l");
       assert.equal(detailCalls.at(-1), 25);
@@ -2160,6 +2309,89 @@ describe("shared background work navigator", () => {
       assert.equal(mounted.length, 0, "the overlay closes instead of covering the replacement editor");
       assert.deepEqual(unfocusTargets, [], "focus is never handed to a replaced wrapper");
       assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
+
+      ui.setEditorComponent(inner);
+      editorSlot.handleInput("left");
+      editorSlot.handleInput("down");
+      assert.equal(mounted.length, 1);
+      ui.setEditorComponent(undefined);
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 0, "the overlay closes even when the replacement precedes its first frame");
+      assert.deepEqual(unfocusTargets, [], "focus stays with the replacement editor");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps a pointer-opened detail when an extension replaced the editor before it opened", async () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      listRows: () => ["alpha", "beta"].map((id, i) => ({
+        providerId: "background-tasks", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "process", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+    });
+    const mounted: any[] = [];
+    const widgets: unknown[] = [];
+    let editorSlot: any;
+    const tui = {
+      requestRender() {},
+      isComponentMounted(component: unknown) { return component === editorSlot; },
+    };
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, widget: unknown) { widgets.push(widget); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) {
+        this.factory = factory;
+        editorSlot = factory ? factory(tui, {}, {}) : { render: () => ["default editor"], handleInput() {} };
+      },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory(tui, this.theme, {}, () => { mounted.splice(mounted.indexOf(component), 1); });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus() {} });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    /** One pi-tui frame: the base (editor included) renders first, then the overlays. */
+    const frame = () => { editorSlot?.render?.(100); for (const overlay of [...mounted]) overlay.render(100); };
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", render: () => ["our editor"], handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      editorSlot = ui.factory(tui, {}, {});
+
+      // Another extension installs its own editor instead of composing ours, so pi-tui mounts that
+      // one and never renders our wrapper again. The rail keeps working through the pointer.
+      ui.setEditorComponent(() => ({ render: () => ["foreign editor"], handleInput() {} }));
+      frame(); frame();
+
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      const lines = widget.render(100);
+      const y = lines.findIndex((line: string) => line.includes("alpha"));
+      assert.ok(y > 0, "the rail still renders a clickable row");
+      widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 100 });
+      widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 100 });
+      assert.equal(mounted.length, 1, "the click opens the detail");
+
+      // A repaint (the pointer hovering a row or the back control) must not dismiss the sheet that
+      // opened without a live editor wrapper: it still owns the keyboard through Pi's overlay focus.
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "a repaint keeps the sheet open");
+      mounted[0].handleMouse({ type: "move", button: "none", x: 5, y: 1, width: 100 });
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "hovering the back control keeps the sheet open");
+      mounted[0].handleInput("escape");
+      assert.equal(mounted.length, 0, "Esc still closes it");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

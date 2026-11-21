@@ -2,10 +2,13 @@
 // @level integration
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { startWorkRuntimeFixture } from './work-runtime-fixture.mjs';
+import { managedDomainPort } from './managed-domain-port.mjs';
+import { removeOwnedFixture } from '../../../scripts/test-support/remove-owned-fixture.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'pi-codemode-batch-'));
 const agentDir = join(root, 'agent');
@@ -17,7 +20,7 @@ mkdirSync(binDir);
 Object.assign(process.env, { TMPDIR: root, PI_CODING_AGENT_DIR: agentDir,
     PI_SANDBOX_RECOVERY_SNAPSHOT: 'off', PATH: `${binDir}:${process.env.PATH}` });
 // Fake only the external child process, not the extension or the SDK.
-writeFileSync(join(binDir, 'pi'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+writeFileSync(join(binDir, 'pi'), '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
 
 // Use checkout peers by default; the compatibility lane supplies its pinned SDK.
 const sdkUrl = process.env.PI_CODEMODE_TEST_SDK_DIR
@@ -36,11 +39,14 @@ function metas() {
 }
 
 async function codemode(t, deny = false, observed) {
+    const subagents = (await import('../index.ts')).default;
     const settingsManager = sdk.SettingsManager.inMemory();
     const loader = new sdk.DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
         extensionFactories: [sdk.createCodemodeExtension({ mode: 'on' }),
-            { name: 'batch-under-test', factory: (await import('../index.ts')).default },
+            // Native codemode dispatch is real; this explicit domain port replaces only
+            // the mechanical manager/worker, whose socket acceptance is tested separately.
+            { name: 'batch-under-test', factory: pi => subagents(pi, managedDomainPort()) },
             ...(observed ? [{ name: 'observe-batch', factory: (pi) => pi.on('tool_result', (event) => {
                 if (event.toolName === 'subagent_spawn_batch') observed.push(event);
             }) }] : []),
@@ -51,7 +57,11 @@ async function codemode(t, deny = false, observed) {
         modelsStorePath: join(agentDir, 'models-store.json') });
     const { session } = await sdk.createAgentSession({ cwd: root, agentDir, resourceLoader: loader,
         settingsManager, modelRuntime, sessionManager: sdk.SessionManager.inMemory(root), noTools: 'builtin' });
-    t.after(() => session.dispose());
+    t.after(async () => {
+        await session.abort();
+        await session._extensionRunner.emit({ type: 'session_shutdown', reason: 'shutdown' });
+        session.dispose();
+    });
     await session.bindExtensions({});
     session.setActiveToolsByName(['codemode', 'subagent_spawn_batch']);
     const tool = session.agent.state.tools.find((candidate) => candidate.name === 'codemode');
@@ -73,12 +83,14 @@ async function script(tool, code) {
 const spawn = (args) => `const receipt = await tools.subagent_spawn_batch(${JSON.stringify(args)}); text(receipt);`;
 
 test('native Pi codemode batch receipts', { skip: !supported && 'native codemode requires Pi >=0.99' }, async (t) => {
-    t.after(() => {
+    const stopRuntime = await startWorkRuntimeFixture();
+    t.after(async () => {
+        await stopRuntime();
         config?.setConfigForTests(undefined);
         for (const [key, value] of Object.entries(oldEnv)) {
             if (value === undefined) delete process.env[key]; else process.env[key] = value;
         }
-        rmSync(root, { recursive: true, force: true });
+        removeOwnedFixture(root);
     });
     registry = await import('../registry.ts');
     config = await import('../config.ts');
@@ -112,6 +124,7 @@ test('native Pi codemode batch receipts', { skip: !supported && 'native codemode
         const running = (name) => {
             const id = registry.nextRunId();
             registry.writeMeta({ id, name, status: 'running', pid: process.pid, spawnPid: process.pid,
+                spawnPidStartTime: registry.processStartToken(process.pid), pidStartTime: registry.processStartToken(process.pid),
                 cwd: root, promptPreview: 'capacity fixture', startedAt: Date.now(),
                 logPath: join(root, 'pi-better-subagents', 'runs', id, 'output.log'), sessionId: id });
             return id;

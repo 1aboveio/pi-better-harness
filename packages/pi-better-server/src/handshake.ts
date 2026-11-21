@@ -2,20 +2,17 @@ import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { readOwnBuild } from "./startup/artifact.ts";
 import type { ServerBuild } from "./startup/managed-types.ts";
 import { PROTOCOL_VERSION, type HelloCommand, type HelloData } from "./protocol.ts";
+import { SERVER_EXTENSION_VERSIONS } from "./version.ts";
+export { SERVER_VERSION, SERVER_EXTENSION_VERSIONS } from "./version.ts";
 
-/** Kept equal to package.json `version`; a test pins that. */
-export const SERVER_VERSION = "0.2.4";
-
-export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
-
-export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean; agentDir?: string }
+export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean; agentDir?: string; runtimeLifecycle?: boolean }
 
 export function serverHello(identity: HelloIdentity = {}): HelloData {
   const build = identity.build ?? readOwnBuild();
   return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
     ...(identity.agentDir ? { agentDir: identity.agentDir, nodeVersion: process.versions.node } : {}),
     ...(build ? { build } : {}), ...(identity.instanceId ? { instanceId: identity.instanceId } : {}),
-    capabilities: [...(identity.agentDir ? ["runtime-status-v1"] : []), "native-client-v1", "package-sync-v1", "global-package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
+    capabilities: [...(identity.runtimeLifecycle ? ["runtime-client-retention-v1"] : []),...(identity.agentDir ? ["runtime-status-v1", "runtime-state-v1", "runtime-subscriptions-v1", "runtime-background-state-v1", "runtime-background-execution-v1", "runtime-background-admission-v2", "runtime-cancellation-v1", "runtime-result-supervision-v1", "runtime-catalog-v1", "runtime-subagent-launch-v1"] : []), "native-client-v1", "package-sync-v1", "global-package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
       ...(identity.safeUpgrade && build && identity.instanceId ? ["safe-upgrade-v1"] : [])] };
 }
 

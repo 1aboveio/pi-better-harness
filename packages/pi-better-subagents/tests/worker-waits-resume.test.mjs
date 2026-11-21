@@ -298,9 +298,15 @@ test("full capacity leaves the generation ready and creates no claim", async () 
     const launched = [];
     const orchestration = orchestrationFor(stack, { capacity: cap.value, launch: async (input) => launched.push(input) });
 
-    const outcome = await orchestration.resume(seeded.park);
-
-    assert.equal(outcome, "skipped");
+    const ready = { waitId: seeded.waitId, generation: seeded.generation,
+        owner: { kind: "worker-conversation", sessionId: "sa_capacity", workspace: stack.workspace },
+        taskIds: [seeded.taskId], continuationNote: "", evidence: [] };
+    assert.equal(await orchestration.adapter.onWaitReady({ ...ready, parkedAttemptId: "sa_wrong" }), "deferred");
+    assert.equal(cap.calls.reserve, 0, "a mismatched attempt cannot dispatch another conversation");
+    const before = registry.getRegistryIoMetrics().fullDirectoryReads;
+    assert.equal(await orchestration.adapter.onWaitReady({ ...ready, parkedAttemptId: "sa_capacity" }), "deferred");
+    assert.equal(registry.getRegistryIoMetrics().fullDirectoryReads, before, "exact delivery must not enumerate history");
+    assert.equal(cap.calls.reserve, 1);
     assert.deepEqual(launched, []);
     const view = stack.service.listWorkerWaits({ runId: "sa_capacity", conversationId: "sa_capacity", workspace: stack.workspace, authorityReference: "x", branchId: OWNER.branchId, goalId: null }, { pendingOnly: true })
         .find((entry) => entry.waitId === seeded.waitId);
@@ -418,7 +424,8 @@ test("production schemas gate bridge tools and sandboxed workers are not withhel
     });
     // Background tools without a production schema are withheld, not advertised
     // with a permissive fallback.
-    assert.deepEqual(plan.tools.sort(), ["acknowledge_operation_result", "wait_for_operations"]);
+    assert.deepEqual(plan.tools.sort(), ["acknowledge_operation_result"]);
+    assert.equal(plan.capabilities.wait, false, "an implicit wait is withheld when no terminal evidence reader is authorized");
     assert.equal(plan.capabilities.background.spawn, false);
 
     // A sandboxed worker is planned exactly like any other; its task policy and
@@ -430,4 +437,14 @@ test("production schemas gate bridge tools and sandboxed workers are not withhel
         explicitTools: false,
     });
     assert.equal(sandboxedPlan.tools.length, 6);
+});
+
+
+test("managed continuation accepts a narrower scope but never widens captured authority", () => {
+    const permissions = { projectFiles: "read-write", outsideProject: "read", storedCredentials: "off", commands: true, network: true, shell: true, commandTimeoutSeconds: 30 };
+    const captured = { mandatoryPermissions: true, sandbox: { root: "/assignment", permissions, denyWrite: ["/assignment/private"] } };
+    const current = { mandatoryPermissions: true, sandbox: { ...captured.sandbox, permissions: { ...permissions, projectFiles: "read", network: false, shell: false, commandTimeoutSeconds: 10 } } };
+    assert.doesNotThrow(() => assertAssignmentPermissionScope(captured, current, true));
+    assert.throws(() => assertAssignmentPermissionScope(captured, { ...current, sandbox: { ...current.sandbox, permissions: { ...current.sandbox.permissions, storedCredentials: "read" } } }, true), /captured assignment scope/);
+    assert.throws(() => assertAssignmentPermissionScope(captured, { ...current, mandatoryPermissions: false }, true), /unavailable/);
 });

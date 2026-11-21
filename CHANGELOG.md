@@ -4,6 +4,226 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.50.0] - 2026-11-20
+
+### Changed
+
+- Start a fresh Pi session and submit ordinary prompts while the shared runtime is offline. Opening the work navigator or using a work tool starts the connection. Resumed sessions with pending work still receive results automatically. (#858, #859, #860)
+- The sandbox page shows which worker tools load and which resources they may use. Selecting a tool makes it available under the applicable resource rules. (#855)
+- Bundle Subagents 0.36.0, Background Tasks 0.19.0, Goal 0.15.0, Sandbox 0.15.0 and SSH 0.1.6. Background Tasks and Subagents carry the Server 0.6.0 runtime.
+
+## [pi-better-server@0.6.0] - 2026-11-20
+
+### Changed
+
+- Track changes to assignments, runner state and watched files incrementally. Restore log checkpoints after restart and share catalog parsing across authorized consumers. (#814, #816, #817, #820, #823, #826)
+- Keep handshakes responsive during Subagent recovery and avoid false read-worker watchdog failures after system sleep. Negotiate Background host identity across time zones and isolate unreadable terminal records during history reads. (#852, #853, #856, #857)
+
+## [pi-better-subagents@0.36.0] - 2026-11-20
+
+### Changed
+
+- Register tools at Pi startup and connect on first use. Restore pending result delivery when a session resumes. (#859, #860)
+- Load selected worker tools under the sandbox resource policy, support installed worker bootstrap, and clean up assignment-owned tasks when an assignment ends. (#840, #846, #855)
+
+## [pi-better-background-tasks@0.19.0] - 2026-11-20
+
+### Changed
+
+- Defer supervisor loading and work observation until needed in a new session. Restore subscriptions for sessions with pending work. (#859, #860)
+- Keep history available when an old task record is unreadable and validate host identity during mixed-version upgrades on non-UTC machines. (#856, #857)
+
+## [pi-better-sandbox@0.15.0] - 2026-11-20
+
+### Changed
+
+- Show tool loading separately from resource permissions in `/sandbox`. Loaded worker tools follow the active file, process and network policy without a second tool selection. (#855)
+- Honor an explicit sandbox Off setting and report the effective process policy. Support process identity queries for confined macOS workers. (#835, #848)
+
+## [pi-better-goal@0.15.0] - 2026-11-20
+
+### Changed
+
+- Observe scoped activity changes and deadlines. Idle Goal reads use cached observations so an ordinary prompt can complete while the shared runtime is unavailable. An explicit activity query still requests verified state. (#827, #860)
+
+## [pi-better-ssh@0.1.6] - 2026-11-20
+
+### Documentation
+
+- Update standalone setup instructions for selecting SSH tools in a subagent role or spawn request and granting network access in `/sandbox`. (#855)
+
+## [pi-better-harness@0.49.0] - 2026-11-16
+
+### Added
+
+- Bundle the completed unified runtime: authorized Subagent execution and continuation, server-owned Background supervision, exact-session result delivery, and safe fixed-build upgrades. (#751, #794)
+- Bundle Subagents 0.35.0, Background Tasks 0.18.0, and Goal 0.14.3 with the embedded Server 0.5.0 runtime.
+
+### Fixed
+
+- Keep shared observations current through atomic file replacement, worker recovery, rapid task completion, and native session reloads.
+- Preserve zero-I/O Navigator rendering and bounded shared reads across multiple Pi clients and large task histories.
+
+## [pi-better-server@0.5.0] - 2026-11-16
+
+### Added
+
+- Own authorized Subagent launch, parked-worker continuation, Background supervision, durable result delivery, and upgrade admission in one fixed runtime per canonical Pi root. (#751, #794)
+- Retain exact writer and recipient identities across crashes, parent disconnects, retries, and runtime upgrades; exit with the guardian when no authorized work or clients remain.
+
+### Fixed
+
+- Isolate slow reads and large failure-log folding from control and supervision work, with bounded queues, recovery, and shared coordinator connections.
+- Recover indexed pending callbacks without history scans, preserve scoped runner terminals, and observe repeated atomic file and directory replacements.
+
+## [pi-better-subagents@0.35.0] - 2026-11-16
+
+### Added
+
+- Delegate mechanical launch and continuation to the fixed runtime while the native session retains transcript and Navigator ownership. (#751, #794)
+- Continue already-authorized work without a foreground session and deliver results only to the original session, branch, and Goal.
+
+### Fixed
+
+- Publish canonical outcomes after worker loss and prefer verified terminal evidence over stale result projections.
+- Preserve pending observation notifications during pagination recovery, fence late responses after shutdown, and apply Navigator folding defaults when asynchronous detail arrives.
+
+## [pi-better-background-tasks@0.18.0] - 2026-11-16
+
+### Added
+
+- Use one server-owned supervisor and indexed callback recovery across ordinary local clients and hosted sessions. (#751, #794)
+
+### Fixed
+
+- Retain rapid completions and old owed callbacks across reloads, with bounded exact-recipient recovery and durable receipts.
+- Fence ownership proofs when native sessions change and preserve requester identity for explicitly authorized cross-session cancellation.
+
+## [pi-better-goal@0.14.3] - 2026-11-16
+
+### Fixed
+
+- Carry shared assignment-observation and coordinator updates used by the unified runtime while preserving standalone Goal behavior. (#751, #794)
+
+## [pi-better-harness@0.48.0] - 2026-11-16
+
+### Added
+
+- Bundle shared Catalog management and durable Background result supervision from the unified runtime. (#751, #789)
+
+### Fixed
+
+- Keep exact-ID reads responsive during large initial inventories and recover failed read workers with a bounded restart budget and a fresh observation epoch.
+- Reuse unpublished parsing work after source changes, observe coordinator writes through a coherent read snapshot, and avoid scheduling another inventory solely because the current scan is slow.
+- Bundle Server 0.4.0, Subagents 0.34.0, Background Tasks 0.17.0 and Goal 0.14.2.
+
+## [pi-better-server@0.4.0] - 2026-11-16
+
+### Added
+
+- Manage scoped Catalog observations and mutations, launch admission, and durable Background result supervision in the unified runtime. (#751, #789)
+
+### Fixed
+
+- Return an explicit rebuilding result for an ID awaiting indexing without blocking the shared read queue.
+- Retry a newly written ID in the client for a bounded interval, including when unrelated assignment sources are unverified, so result tools tolerate indexing races without delaying other readers.
+- Restart failed read workers at most twice per minute while clients remain connected; resynchronize existing subscriptions under a fresh observation epoch and cancel pending recovery on shutdown.
+- Yield inventory work by elapsed time, retain unpublished retry caches after concurrent metadata changes, and pin a read-only coordinator snapshot so unrelated writes cannot discard the initial inventory.
+- Avoid periodic rescan requests while an inventory is already running.
+
+## [pi-better-subagents@0.34.0] - 2026-11-16
+
+### Added
+
+- Route Catalog reads, edits and launch admission through the shared runtime, with reconnect support and launch cancellation. (#751, #789)
+
+### Fixed
+
+- Carry the coordinator reader's bounded read-snapshot support in standalone and bundled installations.
+
+## [pi-better-background-tasks@0.17.0] - 2026-11-16
+
+### Added
+
+- Persist Background result-supervision phases and recover terminal publication through the shared runtime. (#751, #789)
+
+### Fixed
+
+- Carry the coordinator reader's bounded read-snapshot support in standalone and bundled installations.
+
+## [pi-better-goal@0.14.2] - 2026-11-16
+
+### Fixed
+
+- Carry the shared coordinator reader's read-only snapshot support while retaining standalone Goal behavior.
+
+## [pi-better-harness@0.47.0] - 2026-11-16
+
+### Added
+
+- Bundle shared runtime observations for Subagents and Background Tasks, including revisioned history reads, current-scope activity and owner-checked task cancellation. (#771, #772, #773, #774)
+
+### Fixed
+
+- Bundle Goal 0.14.1 so overlapping workflow admission requests share one pending scheduler check instead of launching one process per candidate. State changes invalidate admission evidence; later requests obtain a fresh check. (#785, #786)
+- Include bounded Navigator refreshes and settings writes that tolerate brief contention between independent processes.
+- Keep shared runtime status responsive while large history indexes rebuild, without forcing another inventory or terminating the read worker.
+- Bundle Background Tasks 0.16.0, Subagents 0.33.0 and Sandbox 0.14.2.
+
+## [pi-better-goal@0.14.1] - 2026-11-16
+
+### Fixed
+
+- Coalesce equivalent pending workflow admission checks within one Pi owner/session/execution scope. Release the pending check on success, failure or timeout, and reject changed run inputs or lifecycle state before execution. (#785, #786)
+- Consume shared assignment observations while preserving standalone Goal behavior and tolerate brief settings-write contention.
+
+## [pi-better-background-tasks@0.16.0] - 2026-11-16
+
+### Added
+
+- Read scoped activity and history through the shared runtime and deliver owner-checked task cancellation through recorded intents. Preserve local supervisor ownership for hosted sessions. (#772, #774)
+
+### Fixed
+
+- Bound output-tail reads and preserve shared Navigator refresh and settings-write behavior.
+
+## [pi-better-subagents@0.33.0] - 2026-11-16
+
+### Added
+
+- Read current-scope activity, details and revisioned history through the shared runtime, with owner-checked task cancellation and recovery of observation clients. (#771, #772, #774)
+
+### Fixed
+
+- Bound archived-history refresh work and share assignment projection within Navigator refreshes.
+- Preserve evidence-backed assignment reporting and retained outcome reconciliation.
+
+## [pi-better-sandbox@0.14.2] - 2026-11-16
+
+### Fixed
+
+- Tolerate brief settings-write contention between independent processes while retaining lock ownership checks.
+
+## [pi-better-server@0.3.0] - 2026-11-16
+
+### Added
+
+- Serve shared Subagent and Background activity, detail and revisioned history observations through bounded query workers. (#771, #772)
+- Retain authorized work and clients across idle checks, exit with the guardian when unneeded, and recover from read-worker failures within bounded shutdown time. (#773)
+- Process owner-checked, idempotent task-cancellation intents with crash recovery. (#774)
+
+### Fixed
+
+- Isolate read queries from the main server event loop and bound queued work. (#782)
+- Read runtime status from the last worker observation, including its rebuilding or degraded state, without waiting for a full inventory. Idle shutdown still verifies current task obligations before stopping.
+
+## [pi-better-harness@0.46.1] - 2026-11-15
+
+### Fixed
+
+- Preserve optional answer-file links and source provenance when saving workflow decisions through the Todo tool and atomic plan writer. Legacy decisions, revision checks, profiling and completion guards are unchanged. (#780)
+- Keep Navigator detail paints free of provider I/O, retaining refreshed detail state between paints. (#781)
+
 ## [pi-better-harness@0.46.0] - 2026-11-15
 
 ### Added

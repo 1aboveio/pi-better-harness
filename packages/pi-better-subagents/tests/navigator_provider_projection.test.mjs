@@ -1,23 +1,33 @@
 // @covers subagent.assignment-projection
 // @level integration
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire, register, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import "./isolate-registry.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+const stopRuntime = await startWorkRuntimeFixture();
+after(stopRuntime);
+
+async function eventually(predicate) {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+        if (Date.now() > deadline) assert.fail("shared runtime observation did not converge");
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+}
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
 const { default: extension } = await import("../index.ts");
 const { writeMeta, runDir } = await import("../registry.ts");
-const { refreshBackgroundWorkNavigator } = await import("../shared-navigator.ts");
+const { refreshBackgroundWorkNavigator, MAIN_LIST_WIDGET_KEY } = await import("../shared-navigator.ts");
 const { openStore } = await import("../../operation-coordinator/index.ts");
 const sqlite = createRequire(import.meta.url)("node:sqlite");
 
 for (const count of [1, 50]) test(`registered provider observes ${count} attempts once per refresh`, async (t) => {
-    const now = 2_000_000;
-    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+    const now = Date.now();
     const handlers = new Map();
     const widgets = new Map();
     const ctx = { cwd: process.env.TMPDIR, mode: "tui", hasUI: true, isIdle: () => true,
@@ -44,14 +54,14 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         const result = action();
         const observed = { connections, reads };
         t.diagnostic(`${label}: ${JSON.stringify(observed)}`);
-        assert.equal(connections, count, `${label}: one coordinator observation per attempt`);
-        assert.ok(reads <= count, `${label}: at most one scoped metadata read per attempt: ${reads}`);
+        assert.equal(connections, 0, `${label}: no client-side coordinator observations`);
+        assert.equal(reads, 0, `${label}: no client-side metadata observations`);
         return result;
     }
     try {
         await handlers.get("session_start")({}, ctx);
         metas.forEach(writeMeta);
-        list(); // Warm identity discovery before measuring the real provider.
+        await eventually(() => list().length === count && list().every(row => row.status === "running"));
         sqlite.DatabaseSync = class extends OriginalDatabase {
             constructor(...args) { super(...args); connections++; }
         };
@@ -63,7 +73,18 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         assert.equal(budget(list, "direct refresh").length, count);
         assert.equal(budget(list, "separate refresh at same time").length, count);
         budget(() => refreshBackgroundWorkNavigator(ctx), "mounted refresh");
-        budget(() => t.mock.timers.tick(1000), "periodic refresh");
+        for (let frame = 0; frame < 60; frame++) budget(list, "unchanged frame");
+
+        // Armed confirmation is painted on every streaming frame. Exercise the
+        // real registered provider through the mounted native list component.
+        const editor=ctx.ui.factory({requestRender(){}},ctx.ui.theme,{});
+        editor.handleInput("left");editor.handleInput("down");editor.handleInput("x");
+        const widget=widgets.get(MAIN_LIST_WIDGET_KEY);
+        const component=typeof widget==='function'?widget({requestRender(){}},ctx.ui.theme):undefined;
+        assert.ok(component?.render,'actual native work-list component is mounted');
+        assert.match(component.render(120).join('\n'),/x again to stop/);
+        budget(()=>{for(let frame=0;frame<60;frame++)component.render(120);},'60 armed native paints');
+        editor.handleInput('escape');
 
         // Continuation metadata is read from disk by the assignment projection,
         // independently of this host's registry notifications.
@@ -72,8 +93,10 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         fs.mkdirSync(runDir(continuation.id), { recursive: true });
         try {
             externalWrite(continuation);
+            await eventually(() => list().find(r => r.id === metas[0].id)?.status === "failed");
             assert.equal(list().find(r => r.id === metas[0].id).status, "failed");
             externalWrite({ ...continuation, status: "running" });
+            await eventually(() => list().find(r => r.id === metas[0].id)?.status === "running");
             assert.equal(list().find(r => r.id === metas[0].id).status, "running");
         } finally {
             fs.rmSync(runDir(continuation.id), { recursive: true, force: true });
@@ -86,30 +109,43 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
             observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "host", runnerId: "runner" }, authorityRef: "scope" });
         store.registerWait({ waitId: `wait-${count}`, owner, dependencies: [{ operationId: `op-${count}` }],
             origin: { attemptId: first.id }, continuationNote: "Interpret evidence." });
+        await eventually(() => list().find(r => r.id === first.id)?.status === "waiting");
         assert.equal(budget(list, "external coordinator wait").find(r => r.id === first.id).status, "waiting");
         writeMeta({ ...first, status: "completed", endedAt: Date.now() - 30_000 });
         assert.equal(list().find(r => r.id === first.id).status, "waiting",
             "an old exited attempt with a pending authoritative wait does not expire");
         writeMeta(first);
         store.cancelWait({ waitId: `wait-${count}`, generation: 1, owner, expectedCancelEpoch: 0, reason: "Cancelled externally" });
+        await eventually(() => list().find(r => r.id === first.id)?.status === "cancelled");
         assert.equal(budget(list, "external coordinator cancellation").find(r => r.id === first.id).status, "cancelled");
 
         // Registry transitions retain terminal expiry and origin filtering.
         const terminal = { ...first, status: "failed", endedAt: Date.now(), operations: undefined };
         writeMeta(terminal);
+        await eventually(() => list().find(r => r.id === first.id)?.status === "failed");
         assert.equal(list().find(r => r.id === first.id).status, "failed");
+        refreshBackgroundWorkNavigator(ctx);
+        const terminalWidget = widgets.get(MAIN_LIST_WIDGET_KEY);
+        const terminalComponent = typeof terminalWidget === 'function' ? terminalWidget({requestRender(){}}, ctx.ui.theme) : undefined;
+        assert.ok(terminalComponent, 'the last failed worker must leave the subagent section mounted');
+        assert.match(terminalComponent.render(120).join('\n'), /failed/i, 'failure remains visible even with no active workers');
         writeMeta({ ...terminal, endedAt: Date.now() - 30_000 });
+        await eventually(() => !list().some(r => r.id === first.id));
         assert.ok(!list().some(r => r.id === first.id), "terminal row expires at the retention boundary");
         writeMeta({ ...first, callbackOrigin: { cwd: ctx.cwd, sessionId: "foreign-parent" } });
+        await eventually(() => !list().some(r => r.id === first.id));
         assert.ok(!list().some(r => r.id === first.id), "foreign origin is excluded");
+        writeMeta(first);
+        await eventually(() => list().some(r => r.id === first.id));
         writeMeta({ ...first, callbackOrigin: { cwd: join(ctx.cwd, "foreign"), sessionId: `parent-${count}` } });
+        await eventually(() => !list().some(r => r.id === first.id));
         assert.ok(!list().some(r => r.id === first.id), "foreign workspace is excluded");
         writeMeta(first);
         await handlers.get("session_shutdown")({}, ctx);
         connections = 0;
-        t.mock.timers.tick(1000);
         assert.equal(connections, 0, "disposal cancels periodic provider work");
         await handlers.get("session_start")({}, ctx);
+        await eventually(() => list().length === count);
         assert.equal(budget(list, "remounted provider").length, count);
     } finally {
         fs.readFileSync = originalRead;
@@ -118,6 +154,5 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         await handlers.get("session_shutdown")({}, ctx);
         store.close();
         metas.forEach(m => fs.rmSync(runDir(m.id), { recursive: true, force: true }));
-        t.mock.timers.reset();
     }
 });

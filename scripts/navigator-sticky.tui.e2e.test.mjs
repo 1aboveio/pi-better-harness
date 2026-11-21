@@ -17,6 +17,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { ensureRuntime } from "../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const piCli = process.env.PI_NAVIGATOR_STICKY_CLI ?? process.env.PI_NAVIGATOR_CLI ?? join(root, "node_modules", ".bin", "pi");
@@ -54,13 +57,15 @@ const afterReloadRow = chatRow(3);
 const lastScrollRow = chatRow(27); // rows 4..27 scroll the navigator away
 const reloadStatusLine = "Reloaded keybindings";
 
-test("real TUI: Sticky navigator pins the shared host, moves it into chat when Off, and restores the saved choice", { skip }, () => {
+test("real TUI: Sticky navigator pins the shared host, moves it into chat when Off, and restores the saved choice", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-navigator-sticky-"));
   const socket = `navigator-sticky-${process.pid}`;
   const log = join(dir, "calls.jsonl");
   const ready = join(dir, "ready");
   const fixture = join(dir, "fixture.mjs");
   const agent = join(dir, "agent");
+  const serverDir = join(agent, "server");
+  let runtimeOwner;
   const preferences = join(agent, "settings.json");
   mkdirSync(agent);
   // Fullscreen keeps the transcript and the pinned widget in one stable viewport.
@@ -137,6 +142,10 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
   };
 
   try {
+    await ensureRuntime({ agentDir: agent });
+    const runtime = inspectDaemonOwner(serverDir);
+    assert.equal(runtime.status, "live", "fixture runtime must have a verified owner");
+    runtimeOwner = runtime.owner;
     const launch = [
       `cd ${quote(root)} && exec env`,
       `PI_CODING_AGENT_DIR=${quote(agent)}`,
@@ -153,6 +162,9 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     tmux("new-session", "-d", "-s", "test", "-x", "120", "-y", "40", launch);
     tmux("set-option", "-w", "-t", "test", "remain-on-exit", "on");
     wait(() => existsSync(ready), "Pi to start the session");
+    const owner = inspectDaemonOwner(serverDir);
+    assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+    assert.deepEqual(owner.owner, runtimeOwner, "session startup must reuse the prepared runtime");
 
     // 1. Sticky is On by default and the host is pinned between transcript and input.
     reload("/seed-todo");
@@ -211,7 +223,8 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     assert.deepEqual(calls(), [], "the whole journey must not invoke the model");
   } finally {
     spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
-    rmSync(dir, { recursive: true, force: true });
+    await stopOwnedRuntime(serverDir, runtimeOwner);
+    removeOwnedFixture(dir);
   }
 });
 

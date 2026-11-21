@@ -35,6 +35,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
 
 const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
@@ -54,9 +56,11 @@ process.env.TEMP = VOLATILE_A;
 process.env.PI_CONTINUATION_ARTIFACTS = ARTIFACTS;
 process.env.PI_CONTINUATION_SDK_URL = REAL_SDK_URL;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
+const stopRuntime = await startWorkRuntimeFixture();
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents } = await import("../index.ts");
 const {
     baseDir,
@@ -80,7 +84,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DURABLE_SESSIONS = join(DURABLE, "sessions");
 const DURABLE_ATTEMPTS = join(DURABLE, "attempts");
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     rmSync(RUNTIME, { recursive: true, force: true });
 });
 
@@ -154,7 +160,7 @@ function makeHarness() {
         ui: { notify() {}, setWidget() {} },
         sessionManager: { getSessionId: () => "foreground-session", getBranch: () => [] },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
     return {
         tools, ctx,
         shutdown() { handlers.get("session_shutdown")?.({}, ctx); },

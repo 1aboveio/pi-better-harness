@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import extension from "../../extensions/task-context/index.js";
 
 interface SettingControl {
@@ -174,6 +175,81 @@ test("update_todo can bind and save a transition in one call, without binding a 
 function readEvents(path: string): any[] {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
+
+async function exposedUpdate(h: Harness, params: unknown): Promise<any> {
+  const tool = h.tools.get("update_todo")!;
+  const args = validateToolArguments(tool, { type: "toolCall", id: "decision-update", name: tool.name, arguments: params as Record<string, unknown> });
+  return h.update(args);
+}
+
+test("automatic workflow decision roundtrip", async () => {
+  const h = await boundHarness();
+  try {
+    const decision = {
+      id: "installer-runtime-answer-compatibility-check",
+      humanWords: "The user invoked rush-issues with automatic answers.",
+      changes: "Use the read-only canonical runtime evidence adapter.",
+      answers: ["results/127-impl-1.json", "results/128-impl-1.json"],
+      source: "agent-recommendation",
+    };
+    const result = await exposedUpdate(h, { workflow: { event: "automatic-answer", revision: 12, decision } });
+    assert.equal(result.details.revision, 13, "input accepted and transition saved");
+    const saved = h.plan();
+    assert.deepEqual(saved.decisions[1], { ...decision, timestamp: saved.updatedAt, supersedes: null });
+    assert.equal(saved.decisions[0].id, "d-1");
+    assert.deepEqual(readEvents(result.details.profilingPath).map((event) => [event.planRevision, event.decision]), [[13, decision.id]]);
+
+    await exposedUpdate(h, { workflow: { event: "legacy-decision", revision: 13, decision: {
+      id: "legacy", humanWords: "Keep legacy decisions.", changes: "No answer metadata.", supersedes: "d-1",
+    } } });
+    const legacy = h.plan();
+    assert.deepEqual(legacy.decisions[2], {
+      id: "legacy", humanWords: "Keep legacy decisions.", changes: "No answer metadata.",
+      timestamp: legacy.updatedAt, supersedes: "d-1",
+    });
+    assert.deepEqual(legacy.decisions[1], saved.decisions[1], "later transitions preserve answer metadata");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("malformed decision metadata rejects the entire exposed or direct transition", async () => {
+  const h = await boundHarness({ profiling: { "profiling/run.jsonl": `{"planRevision":12}\n` } });
+  try {
+    const before = readFileSync(h.path, "utf8");
+    const logPath = join(h.runDir, "profiling", "run.jsonl");
+    const logBefore = readFileSync(logPath, "utf8");
+    const entriesBefore = structuredClone(h.entries);
+    const cases = [
+      { answers: {} }, { answers: ["results/127-impl-1.json", {}] },
+      { answers: [""] }, { answers: ["   "] },
+      { source: {} }, { source: "" }, { source: "   " },
+    ];
+    for (const metadata of cases) {
+      const params = { workflow: {
+        event: "invalid-answer", revision: 12,
+        changes: [{ id: "1201", set: { note: "must not land" } }],
+        decision: { id: "bad-answer", humanWords: "Automatic answer.", changes: "Record answer.", ...metadata },
+      } };
+      if (Object.values(metadata).some((value) => Array.isArray(value)
+        ? value.some((item) => typeof item === "object") : typeof value === "object")) {
+        const tool = h.tools.get("update_todo")!;
+        assert.throws(() => validateToolArguments(tool, {
+          type: "toolCall", id: "invalid-decision", name: tool.name, arguments: params,
+        }), /answers|source/, "the exposed schema rejects malformed metadata before the handler");
+      }
+      for (const update of [(p: unknown) => exposedUpdate(h, p), h.update]) {
+        await assert.rejects(update(params), /answers|source/);
+        assert.equal(readFileSync(h.path, "utf8"), before);
+        assert.equal(readFileSync(logPath, "utf8"), logBefore);
+        assert.deepEqual(h.entries, entriesBefore);
+        assert.deepEqual(readdirSync(h.runDir).filter((name) => name.endsWith(".tmp")), []);
+      }
+    }
+  } finally {
+    h.cleanup();
+  }
+});
 
 test("one workflow update saves every row change as one revision with a paired profiling event", async () => {
   const h = await boundHarness();

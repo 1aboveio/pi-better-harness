@@ -74,6 +74,7 @@ process.env.PATH = `${binDir}:${originalPath}`;
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents } = await import("../index.ts");
 const {
     cleanupStatePath,
@@ -392,7 +393,7 @@ function makeHarness() {
         ui: { notify() {}, setWidget() {} },
         sessionManager: { getSessionId: () => "owner-session", getBranch: () => [] },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
     return { tools, handlers, ctx };
 }
 

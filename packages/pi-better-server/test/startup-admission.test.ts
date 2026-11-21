@@ -14,6 +14,7 @@ import { DaemonClient } from "../src/client.ts";
 import type { StagedRuntime } from "../src/startup/managed-types.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 import { llmCalls, makeEnv, waitFor, type Env } from "./helpers.ts";
+import { stageDependencies } from "./support/staged-dependencies.ts";
 
 const packageDir = fileURLToPath(new URL("../", import.meta.url));
 function staged(env: Env, seed: string): StagedRuntime {
@@ -27,7 +28,7 @@ function staged(env: Env, seed: string): StagedRuntime {
   cpSync(join(packageDir, "scripts/private-runtime/format.ts"), join(root, "scripts/private-runtime/format.ts"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(root, "managed-build.json"), JSON.stringify(build));
-  symlinkSync(fileURLToPath(new URL("../../../node_modules", import.meta.url)), join(root, "node_modules"));
+  stageDependencies(root);
   mkdirSync(join(root, "node/bin"), { recursive: true });
   symlinkSync(process.execPath, join(root, "node/bin/node"));
   const runtime = { format: 1 as const, root, installRoot, build, node: join(root, "node/bin/node"), entrypoint: join(root, "src/cli.ts"), manifestPath: join(root, "runtime.json") };
@@ -48,7 +49,8 @@ function fixture(t: TestContext) {
 }
 function run(env: Env, entrypoint: string, args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env.vars, HOME: env.root, PI_SERVER_AGENT: "pi", PI_SERVER_DAEMON_IDLE_MS: "0", PI_SERVER_SESSION_IDLE_MS: "0" };
-  for (const name of ["PI_SERVER_COMMAND", "PI_SERVER_LAUNCHER", "PI_SERVER_ACTIVATION_ID", "PI_SERVER_ROLLBACK_OPERATION_ID", "PI_SERVER_ROLLBACK_PERMIT"]) delete childEnv[name];
+  // An ordinary CLI must not inherit the launching process's guardian role.
+  for (const name of ["PI_SERVER_COMMAND", "PI_SERVER_LAUNCHER", "PI_SERVER_ACTIVATION_ID", "PI_SERVER_ROLLBACK_OPERATION_ID", "PI_SERVER_ROLLBACK_PERMIT", "PI_SERVER_GUARDED_CHILD", "PI_SERVER_GUARDIAN_REBIND"]) delete childEnv[name];
   Object.assign(childEnv, extra);
   const child = spawn(process.execPath, [entrypoint, ...args], { env: childEnv, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
@@ -65,7 +67,17 @@ function pointer(env: Env, runtime: StagedRuntime) {
   writeFileSync(join(env.serverDir, "active-runtime.json"), JSON.stringify({ version: 1, serverDir: env.serverDir, agentDir: env.agentDir, runtime }));
 }
 
-test("ordinary CLI ensure cannot restart A after same-SDK B adopts and fails", { timeout: 30_000 }, async t => {
+for (const guardedParent of [false, true]) test(`ordinary CLI ensure cannot restart A after same-SDK B adopts and fails${guardedParent ? " (guardian parent)" : ""}`, { timeout: 30_000 }, async t => {
+  const roles = ["PI_SERVER_GUARDED_CHILD", "PI_SERVER_GUARDIAN_REBIND"];
+  const inherited = roles.map(name => process.env[name]);
+  t.after(() => roles.forEach((name, index) => {
+    if (inherited[index] === undefined) delete process.env[name];
+    else process.env[name] = inherited[index];
+  }));
+  if (guardedParent) {
+    process.env.PI_SERVER_GUARDED_CHILD = "1";
+    process.env.PI_SERVER_GUARDIAN_REBIND = "inherited parent role is not this CLI's authority";
+  } else for (const name of roles) delete process.env[name];
   const env = fixture(t), a = staged(env, "A"), b = staged(env, "B");
   assert.equal(a.build.piSdkVersion, b.build.piSdkVersion);
   pointer(env, a);
@@ -78,17 +90,35 @@ test("ordinary CLI ensure cannot restart A after same-SDK B adopts and fails", {
   writeFileSync(join(env.serverDir, "sessions.json"), "broken index forces failure after adoption");
   const failed = await run(env, b.entrypoint, [], { PI_SERVER_ACTIVATION_ID: "upgrade-B" }).result;
   assert.equal(failed.code, 1, failed.stderr);
+  const adopted = readActivationJournal(env.serverDir)!;
+  assert.equal(adopted.phase, "adopted", "B must acquire the writer fence before the corrupt index is read");
+  assert.equal(adopted.operationId, "upgrade-B");
+  assert.equal(adopted.runtime.build.contentId, b.build.contentId);
+  assert.equal(adopted.desiredBuild.contentId, b.build.contentId);
+  assert.deepEqual(adopted.coordinator, coordinator.owner);
+  assert.ok(adopted.candidateOwner);
+  assert.notEqual(adopted.candidateOwner.pid, coordinator.owner.pid);
+  assert.notEqual(adopted.candidateOwner.token, coordinator.owner.token);
+  assert.equal(adopted.rollbackPermit, undefined, "adoption cannot issue an automatic rollback permit");
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "active-runtime.json"), "utf8")).runtime.build.contentId, a.build.contentId);
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
+  t.diagnostic(`B adoption proved before startup error: operation=${adopted.operationId}, candidate=${adopted.candidateOwner.token}`);
+  assert.match(failed.stderr, /failed before readiness/);
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length, 1,
+    "a reported startup failure is persisted once, not retried until the caller's timeout can mask it");
   assert.equal(readActivationJournal(env.serverDir)?.phase, "adopted");
   assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
   writeFileSync(join(env.serverDir, "sessions.json"), JSON.stringify({ version: 1, sessions: [] }));
   for (const phase of ["adopted", "recovery-required"] as const) {
     save(env, { ...readActivationJournal(env.serverDir)!, phase });
     const before = readFileSync(join(env.serverDir, "activation.json"));
+    const logPath = join(env.serverDir, "daemon.log");
+    const beforeLog = existsSync(logPath) ? readFileSync(logPath) : undefined;
     const result = await run(env, a.entrypoint, ["ensure", "--timeout-ms", "2500"], { PI_SERVER_ACTIVATION_ID: "upgrade-B" }).result;
     assert.equal(result.code, 1, `must refuse ${phase}; ${result.stdout} ${result.stderr}`);
     assert.match(result.stderr, /Startup admission/);
     assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
-    assert.equal(existsSync(join(env.serverDir, "daemon.log")), false, "ensure must refuse before spawning A");
+    assert.deepEqual(existsSync(logPath) ? readFileSync(logPath) : undefined, beforeLog, "ensure must refuse before spawning A or appending any startup output");
     assert.deepEqual(readFileSync(join(env.serverDir, "activation.json")), before);
   }
 });

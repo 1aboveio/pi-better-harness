@@ -1,11 +1,11 @@
 import { failurePath, recordFailure, recoverFailure } from "./failures.js";
-import { failureIdentity, readFailureState } from "./shared-failure-observations.js";
+import { actionableFailures, failureIdentity, readFailureState } from "./shared-failure-observations.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 const STALL_OPERATION = "suspected-stall";
 
-/** Record silent spells for inspection, without escalating silence into a failure notification. */
+/** Observe silence without changing lifecycle. The caller schedules existing failure attention on true. */
 export function observeTaskStallAttention(meta: BackgroundTaskMeta, now = Date.now()): boolean {
   if (meta.status !== "running") {
     recoverFailure(meta, STALL_OPERATION, ["terminal", meta.status], now);
@@ -24,9 +24,8 @@ export function observeTaskStallAttention(meta: BackgroundTaskMeta, now = Date.n
   if (prior && prior.id !== incidentId) recoverFailure(meta, STALL_OPERATION, eventKey, now);
   if (observation.state !== "stalled") return false;
 
-  if (prior?.id !== incidentId) {
-    recordFailure(meta, STALL_OPERATION, formatBackgroundTaskStall(observation)!, eventKey, { category: "stall", at: now });
-  }
-  // This remains an inspectable observation; silence alone never wakes the parent.
-  return false;
+  recordFailure(meta, STALL_OPERATION, formatBackgroundTaskStall(observation)!, eventKey, { category: "stall", at: now });
+  const previousActionable = new Set(actionableFailures(before).map((incident) => incident.id));
+  return actionableFailures(readFailureState(path))
+    .some((incident) => incident.id === incidentId && !previousActionable.has(incident.id));
 }

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fingerprint.js";
 import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
@@ -27,7 +27,7 @@ import type {
   TerminalResult,
 } from "./types.js";
 import { observeTaskStallAttention } from "./stall-attention.js";
-import { isTerminalStatus } from "./types.js";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.js";
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
@@ -98,7 +98,7 @@ export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 /** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
 export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+export { FIRST_WATCH_CHECK_WAIT_MS } from "./types.js";
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /**
@@ -110,7 +110,8 @@ export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
 export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
 
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention()) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion?: (origin: BackgroundTaskCallbackOrigin | undefined, event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => void, admission?: { assert(): void; prepared?(id: string): void },
+  sourceWork: (kind: string, id: string, work: () => unknown, dueAt?: number) => unknown = (_kind, _id, work) => work()) {
 const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -298,6 +299,7 @@ function spawnTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  admission?.assert();
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
   const intent = readTaskIntent(params);
@@ -314,6 +316,7 @@ function spawnTask(
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
   const id = nextTaskId();
+  admission?.prepared?.(id);
   const logPath = logPathFor(id);
   ensureTaskDir(id);
   const remoteTask = params.ssh
@@ -515,7 +518,8 @@ function scheduleRemoteSessionPoll(
 ): void {
   clearRemoteSessionTimer(id);
   if (scheduledWorkSuspended) return;
-  const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
+  const dueAt = Date.now() + delayMs;
+  const timer = setTimeout(() => void sourceWork("remote-poll", id, () => scheduledWorkSuspended ? undefined : pollRemoteSession(pi, id, getActiveSession), dueAt), delayMs);
   timer.unref();
   remoteSessionTimers.set(id, timer);
 }
@@ -611,6 +615,7 @@ function startWatchTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  admission?.assert();
   for (const [name, condition] of [["success_when", params.success_when], ["failure_when", params.failure_when]] as const) {
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
@@ -625,6 +630,7 @@ function startWatchTask(
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
   const id = nextTaskId();
+  admission?.prepared?.(id);
   const now = Date.now();
   const timeoutSeconds = resolveWatchTimeoutSeconds(params.timeout_seconds);
   const remoteTask = params.ssh
@@ -731,6 +737,9 @@ function resumeRunningTask(
   scheduleLogRetention(pi, meta.id, getActiveSession);
   const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);
   if (meta.kind === "command_watch") {
+    // Shared display refreshes can revisit an already supervised watch. They
+    // must not replace its captured interval with a new immediate poll.
+    if (watcherTimers.has(meta.id) || activePolls.has(meta.id)) return meta;
     scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
       ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
       : dependencies.watchPollRunner);
@@ -810,7 +819,8 @@ function scheduleHandoff(
   };
   const arm = () => {
     if (scheduledWorkSuspended) return;
-    const timer = setTimeout(check, delayMs);
+    const dueAt = Date.now() + delayMs;
+    const timer = setTimeout(() => sourceWork("handoff", id, () => { if (!scheduledWorkSuspended) check(); }, dueAt), delayMs);
     timer.unref();
     handoffTimers.set(id, timer);
   };
@@ -953,7 +963,8 @@ function scheduleWatch(
 ): void {
   clearWatchTimer(id);
   if (scheduledWorkSuspended) return;
-  const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
+  const dueAt = Date.now() + delayMs;
+  const timer = setTimeout(() => void sourceWork("watch", id, () => scheduledWorkSuspended ? undefined : pollWatch(pi, id, getActiveSession, runOnce), dueAt), delayMs);
   timer.unref();
   watcherTimers.set(id, timer);
 }
@@ -1256,7 +1267,8 @@ function scheduleProcessTimeout(
   clearProcessTimeout(id);
   if (scheduledWorkSuspended) return;
   const delay = Math.max(0, deadlineAt - Date.now());
-  const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
+  const dueAt = deadlineAt;
+  const timer = setTimeout(() => void sourceWork("process-deadline", id, () => scheduledWorkSuspended ? undefined : timeoutProcess(pi, id, getActiveSession), dueAt), delay);
   timer.unref();
   processTimeoutTimers.set(id, timer);
 }
@@ -1363,7 +1375,9 @@ async function notifyTerminal(
   const pending = terminalFailureAttention(latest.id);
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   const facts = formatCallbackFacts(latest);
-  getCallbackBatcher(pi).enqueue({
+  const enqueue = (event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => deliverCompletion ? deliverCompletion(latest.callbackOrigin, event) : getCallbackBatcher(pi).enqueue(event);
+  enqueue({
+    receiptId: `background-legacy:${latest.id}:${latest.endedAt ?? latest.startedAt}`,
     source: "background-task",
     id: latest.id,
     label,
@@ -1453,15 +1467,17 @@ function launchArgvOf(commandSpec: CommandSpec, launchSpec: CommandSpec): string
 function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopLogRetention(id);
   if (scheduledWorkSuspended) return;
-  const timer = setInterval(() => {
+  let dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
+  const timer = setInterval(() => { const due = dueAt; dueAt = Date.now() + LOG_RETENTION_CHECK_MS; return sourceWork("log-retention", id, () => {
+    if (scheduledWorkSuspended) return;
     const meta = readMeta(id);
     if (!meta || meta.status !== "running") {
       stopLogRetention(id);
       return;
     }
     if (meta.kind === "process") enforceLogRetention(meta);
-    observeTaskStallAttention(meta);
-  }, LOG_RETENTION_CHECK_MS);
+    if (observeTaskStallAttention(meta)) scheduleFailureAttention(pi, id, getActiveSession);
+  }, due); }, LOG_RETENTION_CHECK_MS);
   timer.unref();
   logRetentionTimers.set(id, timer);
 }
@@ -1522,74 +1538,6 @@ function extractLastState(result: { stdout: string }): unknown {
   } catch {
     return result.stdout.slice(0, 4000);
   }
-}
-
-/** Version tag of the watch outcome fingerprint. A value from another version is adopted, never compared. */
-const WATCH_FINGERPRINT_VERSION = "v1";
-/** OSC and CSI control sequences are display markup, not content. */
-const TERMINAL_ESCAPE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
-
-/**
- * Text as the terminal would settle it. Redraw frames and control sequences are
- * display churn: repainting the same visible line is not a new observation.
- */
-function settledTerminalText(text: string): string {
-  return text
-    .replace(TERMINAL_ESCAPE, "")
-    .split("\n")
-    .map((line) => {
-      // A CR immediately before LF ends the line; any other CR overwrites it in place.
-      const body = line.endsWith("\r") ? line.slice(0, -1) : line;
-      return (body.split("\r").at(-1) ?? "").replace(/[ \t]+$/, "");
-    })
-    .join("\n")
-    .replace(/\n+$/, "");
-}
-
-/** Objects compare by content regardless of key order, so reordered keys are not progress. */
-function canonicalJsonText(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonText).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const entries = Object.keys(record).sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJsonText(record[key])}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-/** stdout compares as JSON content when it parses, and as settled text otherwise. */
-function canonicalWatchStdout(stdout: string): string {
-  const settled = settledTerminalText(stdout);
-  try {
-    return `json:${canonicalJsonText(JSON.parse(settled))}`;
-  } catch {
-    return `text:${settled}`;
-  }
-}
-
-/**
- * What a poll observed, independent of when it ran. Exit status, signal, error,
- * stdout content, and stderr content are included; poll metadata (start time,
- * end time, duration, check count) is deliberately not, so it can never hide a
- * watch that reports the same outcome forever. Watch stdout may carry its own
- * timestamps: projecting meaningful fields is the caller's job, not this
- * fingerprint's guess.
- */
-function watchOutcomeFingerprint(result: CommandResult): string {
-  // A runner may report why the check itself could not run; that is part of the
-  // observed outcome, not poll metadata.
-  const reported = (result as CommandResult & { error?: unknown }).error;
-  const error = typeof reported === "string" ? settledTerminalText(reported) : null;
-  const payload = JSON.stringify([
-    result.exitCode,
-    result.signal ?? null,
-    result.timedOut === true,
-    error,
-    canonicalWatchStdout(result.stdout),
-    settledTerminalText(result.stderr),
-  ]);
-  return `${WATCH_FINGERPRINT_VERSION}:${createHash("sha256").update(payload).digest("hex")}`;
 }
 
 /**

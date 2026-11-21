@@ -15,10 +15,12 @@
 import type { RunTiming } from "./timing.ts";
 import { assignmentRetainsEvidence } from "./assignment-outcomes.ts";
 import type { SkillExposureSource } from "./skills.ts";
-import { execFileSync } from "node:child_process";
+import { processStartToken } from "./process-identity.mjs";
+export { processStartToken } from "./process-identity.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
@@ -42,6 +44,7 @@ export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphane
 export interface RunCallbackOrigin {
     cwd: string;
     sessionId?: string;
+    branchId?: string | null;
 }
 
 /**
@@ -110,6 +113,8 @@ export interface LaunchRecipe {
     effort?: string;
     /** Effective tool allowlist (already adjusted for confinement). */
     tools: string;
+    /** Inherited trusted tools may be registered but inactive in the child. Older recipes are strict. */
+    optionalTrustedTools?: string[];
     excludeTools?: string;
     /**
      * Effective skill exposure: absent means discovery of the user catalog,
@@ -130,10 +135,14 @@ export interface LaunchRecipe {
     role?: string | readonly string[];
     alias?: string;
     catalog?: CatalogLaunchSnapshot;
+    /** Absent on recipes that predate explicit ordinary worker providers. */
+    toolLoadingVersion?: 1;
     /** Resolved extension arguments; a changed implementation requires explicit replacement. */
     extensionArgs?: string[];
     /** Provider/tool runtime arguments, excluding permission-dependent trusted tools. */
     baseExtensionArgs?: string[];
+    /** Published worker closure retained for this conversation across server upgrades. */
+    runtimeRoot?: string;
     /** Initial trusted implementations survive revocation so re-grants cannot replace them. */
     trustedExtensions?: { name: string; package: string; loadPath: string }[];
 }
@@ -233,6 +242,8 @@ export interface RunMeta {
     resumedFrom?: string;
     /** Effective launch recipe, frozen at launch for continuation. */
     recipe?: LaunchRecipe;
+    /** Mechanical manager, separate from the original spawnPid capacity domain. */
+    management?: { root: string; instance: string; epoch: number };
     /** Foreground session that is allowed to receive unsolicited callbacks. */
     callbackOrigin?: RunCallbackOrigin;
     /** Durable ordinary-completion callback recovery and successful-handoff markers. */
@@ -242,6 +253,8 @@ export interface RunMeta {
     completionCallbackSuppressedReason?: string;
     outcomeDeliveryDeferredReason?: string;
     assignmentReport?: { version: 1; assignmentId: string; attemptId: string; digest: string; path: string };
+    /** Latest authenticated refusal, cleared when a corrected report is retained. */
+    assignmentReportRejection?: { reason: string; rejectedAt: number };
     orphanedCallbackSuppressedAt?: number;
     orphanedCallbackSuppressedReason?: string;
     lostCallbackSuppressedAt?: number;
@@ -520,6 +533,28 @@ export function listParkRecordCandidates(metas: readonly RunMeta[] = listMetas()
         || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
 }
 
+/** Read recovery sidecars in batches so a large registry does not block socket replies. */
+export async function* scanParkRecords(metas: readonly RunMeta[] = listMetas()): AsyncGenerator<{ meta: RunMeta; record: ParkRecord }> {
+    const runs = join(baseDir(), "runs");
+    const volatileIds = new Set(await readdir(runs).catch(() => [] as string[]));
+    const batchSize = 32;
+    for (let offset = 0; offset < metas.length; offset += batchSize) {
+        const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
+            if (!meta.park && !volatileIds.has(meta.id)) return;
+            try {
+                const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
+                if (record) return { meta, record };
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === "ENOENT" && meta.park) {
+                    const record = readMeta(meta.id)?.park;
+                    if (record) return { meta, record };
+                }
+            }
+        }));
+        for (const entry of batch) if (entry) yield entry;
+    }
+}
+
 /**
  * How long a launch attempt that never produced a child is kept before a sweep
  * reclaims it. Launch preparation takes seconds; the grace only exists so a
@@ -794,33 +829,6 @@ function lockTimeout(id: string): Error {
 let ownStartKnown = false;
 let ownStartCache: string | undefined;
 const foreignStartCache = new Map<number, { token: string | undefined; at: number }>();
-
-/** Best-effort process start identity. Unavailable does not prove the pid is dead. */
-export function processStartToken(pid: number): string | undefined {
-    if (process.platform === "linux") {
-        try {
-            const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-            const close = stat.lastIndexOf(") ");
-            if (close >= 0) {
-                const starttime = stat.slice(close + 2).split(" ")[19];
-                if (starttime && /^\d+$/.test(starttime)) return starttime;
-            }
-        } catch (error) {
-            if (errnoOf(error) !== "ENOENT" && errnoOf(error) !== "EACCES") return undefined;
-        }
-    }
-    try {
-        const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-            encoding: "utf-8",
-            timeout: 1_000,
-            env: { ...process.env, LC_ALL: "C" },
-            stdio: ["ignore", "pipe", "ignore"],
-        }).trim().replace(/\s+/g, " ");
-        return out === "" ? undefined : out;
-    } catch {
-        return undefined;
-    }
-}
 
 function ownStartToken(): string | undefined {
     if (ownStartKnown) return ownStartCache;
@@ -1175,7 +1183,7 @@ export function setMetaWriteBarrierForTests(barrier: (() => void) | undefined): 
 // cross-process index changes before any cached IDs are reused.
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
 const initializedIndexes = new Set<string>();
-const metaChangedListeners = new Set<() => void>();
+const metaChangedListeners = new Set<(meta?: RunMeta) => void>();
 const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
 
 export interface RegistryIoMetrics {
@@ -1249,10 +1257,23 @@ export function observeArchivePublication(id: string, error?: unknown): void {
     } catch { /* the journal is best-effort; retaining the run is the safety net */ }
 }
 
-export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): void {
+export function writeMeta(meta: RunMeta, options: {
+    ifAbsent?: boolean;
+    /** Build a field update from current metadata under the existing run lock. */
+    patch?: (current: Readonly<RunMeta>) => Partial<RunMeta> | undefined;
+} = {}): void {
+    if (options.patch && !readMeta(meta.id)) return;
     mkdirSync(runDir(meta.id), { recursive: true });
+    let written = false;
     withRunMetaLock(meta.id, (owns) => {
         if (options.ifAbsent && existsSync(metaPathFor(meta.id))) return;
+        if (options.patch) {
+            const current = readMeta(meta.id);
+            if (!current) return;
+            const patch = options.patch(current);
+            if (!patch) return;
+            meta = { ...current, ...patch, id: meta.id };
+        }
         metaWriteBarrier?.();
         if (!owns()) throw new MetadataLockLost();
         writeMetaFile(meta);
@@ -1271,13 +1292,15 @@ export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): 
             }
         }
         owns();
+        written = true;
     });
+    if (options.patch && !written) return;
     for (const listener of metaChangedListeners) {
-        try { listener(); } catch { /* best effort */ }
+        try { listener(meta); } catch { /* best effort */ }
     }
 }
 
-export function onMetaChanged(listener: () => void): () => void {
+export function onMetaChanged(listener: (meta?: RunMeta) => void): () => void {
     metaChangedListeners.add(listener);
     return () => metaChangedListeners.delete(listener);
 }
@@ -1339,7 +1362,7 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
         removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
         for (const listener of metaChangedListeners) {
-            try { listener(); } catch { /* best effort */ }
+            try { listener(meta); } catch { /* best effort */ }
         }
         return true;
     } catch {

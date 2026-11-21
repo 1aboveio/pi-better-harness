@@ -7,6 +7,7 @@ import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type ReadSkil
 import { canonicalCatalogId } from "./catalog-schema.ts";
 import { defaultUserRoot, loadCatalog } from "./catalog-store.ts";
 import { withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
+import { openSharedCatalog } from "./shared-catalog.ts";
 
 type TypeModule = {
     Object: (value: unknown) => unknown;
@@ -24,6 +25,7 @@ export interface DiscoveryHost {
 }
 
 export interface DiscoveryDeps {
+    sharedCatalog?: boolean;
     userRoot?: string;
     bundledRoot?: string;
     projectConfigDirName?: string;
@@ -72,7 +74,12 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
                 return toolError(`agents_catalog action must be list or inspect, got ${JSON.stringify(action ?? "")}. It does not create, import, reload, or launch. Nothing was written.`);
             }
             const host = resolveHost(ctx, deps);
-            const snapshot = withAgentSessionSettings(loadCatalog(host), host.sessionSettings ?? deps.sessionSettings?.snapshot());
+            const remote = (deps.sharedCatalog ?? !deps.userRoot) ? await openSharedCatalog(host.cwd, host.userRoot, "catalog-tool", host.projectTrusted) : undefined;
+            let snapshot;
+            try {
+                snapshot = remote ? await remote.get(host.sessionSettings ?? deps.sessionSettings?.snapshot())
+                    : withAgentSessionSettings(loadCatalog(host), host.sessionSettings ?? deps.sessionSettings?.snapshot());
+            } finally { remote?.close(); }
             if (action === "list") {
                 const listed = presentCatalog(snapshot, deps.enrich, deps.readSkillDefaults);
                 return {

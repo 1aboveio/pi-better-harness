@@ -1,9 +1,8 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
@@ -341,7 +340,7 @@ test("failed sandbox launch never falls back to host fs", async () => {
 
 test("removal judges a link's own entry without following it (no kernel needed)", { skip: process.platform === "win32" }, () => {
     // A home outside every temp root, so only the entry rules decide.
-    const base = realpathSync(mkdtempSync(join(fileURLToPath(new URL(".", import.meta.url)), "task-remove-entry-")));
+    const base = realpathSync(mkdtempSync(join(homedir(), "task-remove-entry-")));
     const temporary = realpathSync(mkdtempSync(join(tmpdir(), "task-remove-target-")));
     try {
         const home = join(base, "home"), root = join(home, "work", "project");
@@ -372,7 +371,7 @@ test("removal judges a link's own entry without following it (no kernel needed)"
 });
 
 test("case-variant paths to protected entries are refused by the pre-checks on a case-insensitive volume (#354)", { skip: process.platform === "win32" }, (t) => {
-    const base = realpathSync(mkdtempSync(join(fileURLToPath(new URL(".", import.meta.url)), "task-case-")));
+    const base = realpathSync(mkdtempSync(join(homedir(), "task-case-")));
     try {
         if (!existsSync(base.toUpperCase()) || !existsSync(base.toLowerCase())) {
             t.skip("the fixture volume is case-sensitive");

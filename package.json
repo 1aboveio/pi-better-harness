@@ -28,6 +28,7 @@
     ]
   },
   "scripts": {
+    "postinstall": "node scripts/sync-runtime-client.mjs",
     "catalog:check": "node --import tsx scripts/check-agent-catalog.mjs",
     "sync:shared-log-utils": "node scripts/sync-shared-log-utils.mjs",
     "sync:shared-ssh-core": "node scripts/sync-shared-ssh-core.mjs",

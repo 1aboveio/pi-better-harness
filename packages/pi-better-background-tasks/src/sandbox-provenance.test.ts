@@ -39,18 +39,20 @@ describe("background sandbox provenance", () => {
     expect(() => resolveForegroundSandboxPlan(h.pi)).toThrow(/Background tasks profile disables commands/);
   });
 
-  it("requires both current columns to allow process reads, even when their sandboxes are off", () => {
+  it("ignores retained Off values while preserving independent active boundaries", () => {
     const h = publisher();
-    const base = { state: "disabled", denyWrite: [], reason: "off", permissions: h.permissions };
-    h.set({ ...base, background: base });
+    const unrestricted = { state: "disabled", permissions: h.permissions };
+    const restricted = { ...unrestricted, permissions: { ...h.permissions, processAccess: "off" } };
+    h.set({ ...restricted, background: restricted });
     expect(backgroundProcessDiagnosticsAccess(h.pi)).toBe("read");
-    for (const column of ["main", "background"]) {
-      const restricted = { ...base, permissions: { ...h.permissions, processAccess: "off" } };
-      h.set(column === "main" ? { ...restricted, background: base } : { ...base, background: restricted });
-      expect(backgroundProcessDiagnosticsAccess(h.pi)).toBe("off");
-    }
-    h.set({ ...base, state: "enabled", writableRoot: "/tmp", background: base });
+    const backgroundOn = { ...restricted, state: "enabled", permissions: { ...restricted.permissions, enabled: true } };
+    h.set({ ...restricted, background: backgroundOn });
+    expect(backgroundProcessDiagnosticsAccess(h.pi)).toBe("off");
+    h.set({ ...restricted, background: { ...backgroundOn, permissions: { ...backgroundOn.permissions, processAccess: "read" } } });
+    expect(backgroundProcessDiagnosticsAccess(h.pi)).toBe("read");
+    h.set({ ...unrestricted, state: "enabled", writableRoot: "/tmp", background: restricted });
     expect(backgroundProcessDiagnosticsAccess(h.pi)).toBe("confined");
+    expect(backgroundProcessDiagnosticsAccess({})).toBe("unknown");
   });
 
   it("labels legacy, missing and remote launch evidence without inventing confinement", () => {

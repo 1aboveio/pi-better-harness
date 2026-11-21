@@ -1,0 +1,6 @@
+// Generated fixed launch domain from packages/pi-better-subagents/widget.ts. Do not edit directly.
+/**
+ * TypeScript re-export of widget.mjs pure helpers.
+ * Logic lives in widget.mjs for ESM unit-test compatibility (mirrors completion.ts).
+ */
+export { SPINNER, TICK_MS, SPEND_REFRESH_MS, WIDGET_CLEAR, ELAPSED_WIDTH, TOKENS_WIDTH, COST_WIDTH, fmtElapsed, fmtElapsedFixed, fmtTokens, fmtTokensFixed, fmtCost, fmtCostFixed, shortModel, fmtSpend, fmtSpendFixed, linesEqual, nextWidgetAction, buildWidgetLines, isSpendCacheFresh, isHealthLogCacheFresh, resolveHealthLogExtraction, HOT_PATH_REFRESH_FLOOR_MS, withinRefreshFloor, } from "./widget.mjs";

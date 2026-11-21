@@ -8,6 +8,9 @@ import test, { after, before } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeMeta as writeTaskMeta } from "../packages/pi-better-background-tasks/src/registry.ts";
 import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/registry.ts";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { ensureRuntime } from "../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
@@ -28,7 +31,11 @@ let tmuxArgs = ["-L", session];
 const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${goldenSession}-evidence`));
 const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
 const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
-const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
+// Keep the private Unix socket below macOS's 103-byte limit.
+const fixtures = realpathSync(mkdtempSync("/tmp/pi-nav-"));
+const agentDir = join(fixtures, "agent");
+const serverDir = join(agentDir, "server");
+let runtimeOwner;
 const launches = [];
 let launchSequence = 0;
 const WARMUP_TIMEOUT_MS = 60_000;
@@ -47,11 +54,16 @@ const mouseSkip = skip || (mouseRouting || process.env.PI_NAVIGATOR_MOUSE === "1
 
 // Populate only the module cache. Do not run extension factories or session
 // handlers here: their first execution must retain the journey's 10s budget.
-before((t) => {
+before(async (t) => {
   if (skip) return;
   mkdirSync(evidenceDir, { recursive: true });
   assertPrivateRegistry();
   assert.ok(hasTmux, "the navigator warmup requires tmux");
+  // Prepare the immutable runtime separately from the UI journey's readiness budget.
+  await ensureRuntime({ agentDir });
+  const owner = inspectDaemonOwner(serverDir);
+  assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+  runtimeOwner = owner.owner;
   if (!/\.[cm]?js$/.test(realpathSync(piBin))) {
     t.diagnostic("Import setup skipped for a compiled Pi host; its embedded loader owns compilation.");
     return;
@@ -64,11 +76,13 @@ before((t) => {
   assert.equal(result.status, 0, `extension import setup failed: ${result.stderr}`);
 });
 
-after(() => {
+after(async () => {
   for (const launch of launches) stopLaunch(launch);
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
+  // Stop the registry writer before removing the state it supervises.
+  await stopOwnedRuntime(serverDir, runtimeOwner);
   // The registries live under the private TMPDIR from scripts/isolate-registry.mjs,
   // which removes it at exit. Never touch registries in any other TMPDIR (the tests
   // refuse to seed without the preload, so there is nothing of ours there).
@@ -76,7 +90,7 @@ after(() => {
     rmSync(join(tmpdir(), "pi-better-subagents"), { recursive: true, force: true });
     rmSync(join(tmpdir(), "pi-better-background-tasks"), { recursive: true, force: true });
   }
-  rmSync(fixtures, { recursive: true, force: true });
+  removeOwnedFixture(fixtures);
 });
 
 function isPrivateRegistry() {
@@ -324,8 +338,8 @@ test("closing work from its detail opens the next row, then returns the keyboard
   });
 
   const hiddenList = (screen) => /Work · \d|↑↓ select/.test(screen);
+  observeSeededRows("subagent to close", "task to close");
   sendKey("Left");
-  waitForScreen((screen) => screen.includes("subagent to close") && screen.includes("task to close"));
   sendKey("Down");
   waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
   sendKey("x");
@@ -447,6 +461,7 @@ test("switching full-page details with multiline diagnostics keeps exactly one t
   execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", "132", "-y", "54"]);
   const ids = [`sa_diagnostic_alpha_${process.pid}`, `sa_diagnostic_beta_${process.pid}`];
   for (const id of ids) seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid, subagentId: id });
+  waitForScreen(value => (value.match(/subagent golden path/g) ?? []).length === ids.length);
 
   sendKey("Left");
   waitForScreen((screen) => screen.includes("subagent golden path") && !screen.includes("provider Subagents"));
@@ -458,7 +473,7 @@ test("switching full-page details with multiline diagnostics keeps exactly one t
   for (let index = 0; index < 6; index++) {
     sendKey(index % 2 ? "Up" : "Down");
     const id = index % 2 ? firstId : secondId;
-    screen = waitForScreen((value) => value.includes(id) && hasSettledInputFrame(value));
+    screen = waitForScreen((value) => value.includes(id) && value.includes("provider Subagents") && hasSettledInputFrame(value));
     saveScreen(`multiline-diagnostic-${index}`, screen);
     assert.equal(screen.split(/\r?\n/).filter((line) => /^━━ /u.test(line)).length, 1,
       `switch ${index}: previous detail title must not remain visible:\n${screen}`);
@@ -827,7 +842,7 @@ export default function(pi) {
 `;
 }
 
-function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagentId, taskId = defaultTaskId }) {
+function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagentId, taskId = `${defaultTaskId}_${piPid}` }) {
   const now = Date.now();
   const callbackOrigin = { cwd, sessionId };
   const subagentDir = join(tmpdir(), "pi-better-subagents", "runs", subagentId);
@@ -864,7 +879,9 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     startedAt: now - 30_000,
     logPath: taskLog,
     cwd,
-    command: "printf 'background task output\\n'",
+    // The canonical server resumes this watch; every real poll retains the
+    // Unicode evidence instead of pushing the initial seeded log out of the tail.
+    command: `printf '%s\\n' '${unicodeLog}'`,
     shell: true,
     pid: piPid,
     pgid: piPid,
@@ -874,6 +891,16 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     intervalMs: 15_000,
     deadlineAt: now + 600_000,
   });
+  observeSeededRows("subagent golden path", "background golden path");
+}
+
+function observeSeededRows(subagentTitle, taskTitle) {
+  // External fixture writes bypass the tools. Open the navigator to subscribe, then
+  // give focus back to the editor so each scenario starts in its normal input state.
+  sendKey("Left");
+  const overview = waitForScreen(screen => screen.includes(subagentTitle) && screen.includes(taskTitle));
+  if (overview.includes("Esc unfocus")) sendKey("Escape");
+  waitForScreen(screen => screen.includes("← work navigator"));
 }
 
 function hasSettledInputFrame(screen) {
@@ -926,10 +953,13 @@ function captureScreen() {
 
 function waitForScreen(matches, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
-  let screen = "";
+  let screen = "", previous;
   while (Date.now() < deadline) {
     screen = captureScreen();
-    if (matches(screen)) return screen;
+    // tmux can expose a partially applied frame with both old and new rows.
+    // Require the same matching frame twice before asserting its exact layout.
+    if (matches(screen) && screen === previous) return screen;
+    previous = screen;
     sleep(50);
   }
   throw new Error(`Timed out waiting for navigator page. Current screen:\n${screen}`);

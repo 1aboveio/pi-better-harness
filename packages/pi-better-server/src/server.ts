@@ -1,4 +1,7 @@
-import { chmodSync, existsSync, realpathSync, unlinkSync } from "node:fs";
+import { createBackgroundTools } from "./runtime/background-tools.ts";
+import { createLocalWorkClient } from "./runtime/local-client.ts";
+import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
@@ -9,7 +12,7 @@ import { MoveService } from "./move/service.ts";
 import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
 import { NativeClientHost, NATIVE_HOST_COMMANDS } from "./remote-client/host.ts";
-import { claimDaemonOwner, inspectDaemonOwner } from "./daemon-owner.ts";
+import { claimDaemonOwner, inspectDaemonOwner, ownerIdentityVerified, sameOwner, validateDaemonOwnerIdentity } from "./daemon-owner.ts";
 import { readOwnBuild, readStagedRuntime } from "./startup/artifact.ts";
 import { canonicalStateDir, commitActivationStop, compatibleUpgrade, hasActivationReservations, readActivationJournal } from "./startup/activation.ts";
 import { admitDaemonStartup, startupIntentFromEnv } from "./startup/admission.ts";
@@ -17,6 +20,12 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
+import { RuntimeCancellation } from "./runtime/cancellation.ts";
+import { RuntimeResultSupervision } from "./runtime/result-supervision.ts";
+import { SharedCatalog } from "./runtime/catalog.ts";
+import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
+import { WorkQueryExecutor } from "./runtime/query-executor.ts";
+import { createSubagentLaunch } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -31,6 +40,12 @@ export interface DaemonOptions extends Partial<LifecycleConfig> {
   now?: () => number;
   /** Brief protection between hello/readiness and creation of a session. */
   startupGraceMs?: number;
+  /** CLI-owned process shutdown budget; never used to reclaim a different owner. */
+  onDraining?: () => void;
+  /** Trusted fault-injection seam; never exposed through the socket protocol. */
+  cancellationFault?: (stage: import("./runtime/cancellation.ts").CancellationStage) => void;
+  /** Private fixture hook; no protocol command, parameters or authority are passed. */
+  rpcEvidence?: { bind(read: () => unknown): void; event(plane: string, slot: number, phase: string): void };
 }
 
 export interface Daemon {
@@ -80,21 +95,103 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const owner = inspectDaemonOwner(serverDir);
     const instanceId = owner.status === "live" ? owner.owner.token : undefined;
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
-    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now });
-    cleanupStartup = () => registry.shutdown();
+    let launches: Awaited<ReturnType<typeof createSubagentLaunch>> | undefined;
+    let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
+    let backgroundInitialization: ReturnType<typeof createBackgroundTools> | undefined;
+    let backgroundTools: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
+    const initializeBackground = () => backgroundInitialization ??= (() => {
+      options.rpcEvidence?.event('background', 0, 'init-pending');
+      return createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope), config.runtimeIdleMs,
+        options.rpcEvidence ? (slot, phase) => options.rpcEvidence!.event('adapter', slot, phase) : undefined)
+        .then(host => { options.rpcEvidence?.event('background', 0, 'init-returned'); return backgroundTools = host; })
+        .catch(error => { options.rpcEvidence?.event('background', 0, 'init-failed'); backgroundInitialization = undefined; throw error; });
+    })();
+    let cancellations: RuntimeCancellation | undefined;
+    const controlStore = acquireMutationStore(realpathSync(getAgentDir()));
+    let resultSupervision: RuntimeResultSupervision | undefined;
+    const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
+    const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
+    const resultRoot = realpathSync(getAgentDir());
+    const resultPort = { status() {
+      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+      resultSupervision.reconcile();
+      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason,
+        obligations: resultSupervision.livenessReasons(), metrics: resultSupervision.metrics };
+    } };
+    let workModel: WorkQueryExecutor | undefined;
+    let registry!: SessionRegistry;
+    cleanupStartup = async () => {
+      try { await registry?.shutdown(); }
+      finally {
+        try { await cancellations?.close(); }
+        finally {
+          resultSupervision?.close();
+          controlStore.release();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+          try { await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close(); }
+          finally { await workModel?.close(); }
+        }
+      }
+    };
+    if (controlStore.store.resultSupervisions(true).length || controlStore.store.listAssignmentCleanupOperations(1).length) {
+      resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+    }
+    resultPorts.set(resultRoot, resultPort);
+    if (controlStore.store.pendingTaskCancellations().length) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
+    const initializeLaunch = () => {
+      if (!launchInitialization) {
+        const pending = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog, config.runtimeIdleMs);
+        launchInitialization = pending;
+        void pending.then(host => { launches = host; }, () => {
+          // The factory releases partial resources before rejection. A later
+          // request may retry after the underlying recovery fault is repaired.
+          if (launchInitialization === pending) launchInitialization = undefined;
+        });
+      }
+      return launchInitialization;
+    };
+    if (controlStore.store.hasSubagentManagement()) {
+      void initializeLaunch().catch(error => log(`Subagent supervision unavailable: ${String(error)}`));
+    }
+    const work = () => {
+      if (!workModel) {
+        workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!, {
+          logWatchdog: log,
+          budgetBuffer: controlStore.budget.buffer,
+          onTerminalLogsChanged: async ids => {
+            if (!launchInitialization && !controlStore.store.hasSubagentManagement()) return;
+            const host = await initializeLaunch();
+            await host.foldTerminalFailures(ids);
+          },
+        });
+      }
+      return workModel;
+    };
+    registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
     // Structural port permits independent integration with the shared maintenance owner.
     const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
       readonly busy: boolean;
+      lifecycleReasons(): unknown[];
       enterSessionOperation(): () => void;
       withIdleSessions<T>(purpose: "upgrade", run: (live: HostedSession[], lease: IdleSessionsLease) => Promise<T>): Promise<T>;
     } }).maintenance;
     const safeUpgrade = !!(build && instanceId && sessionMaintenance
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
+    if(controlStore.store.backgroundRequests().hasPending()) void initializeBackground().catch(error => log(`Background request recovery unavailable: ${String(error)}`));
     const reconnectControllers = new Map<ConnectionControl, boolean>();
+    const setUpgradeFence = (epoch: string | null) => {
+      const lease = acquireMutationStore(realpathSync(getAgentDir()));
+      try { lease.store.setUpgradeFence(epoch); } finally { lease.release(); }
+    };
+    // Startup ownership has proved the preceding manager exited.
+    setUpgradeFence(null);
     let upgradeCommitted = false;
+    let upgradeBlockers: unknown[] = [];
     const companions = new CompanionManager({
       socketPath,
       ...options.companion,
@@ -108,16 +205,32 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const sockets = new Set<Socket>();
     const dispatches = new Set<Promise<void>>();
     let inFlight = 0;
+    let requestCounter = 0, connectionCounter = 0;
+    const requests = new Map<number, { kind: string; id: number; connection: number; operation?: { kind: string; id: string }; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
+    options.rpcEvidence?.bind(() => ({ lanes: controlStore.budget.metrics().lanes,
+      read: workModel?.metrics().executor, observation: workModel?.observation().status }));
     let draining = false;
+    let idleStopping = false;
+    let idleEvidence: unknown;
+    const runtimeClients = new Map<Socket, string>();
+    let guardianBinding: { socket: Socket; identity: import("./daemon-owner.ts").DaemonOwnerIdentity } | undefined;
+    let observationUnavailable = false;
+    let runtimeZeroSince: number | undefined = now();
+    let hostedUsed = registry.activeCount > 0;
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
     let startupUntil = 0;
     const server: Server = createServer((socket) => {
+      const connection = ++connectionCounter;
       sockets.add(socket);
       const send = (message: ServerMessage): void => {
         if (!socket.destroyed) socket.write(encodeLine(message));
       };
       const control = new ConnectionControl(send);
       let greeted = false;
+      const catalogCommand = catalog.connection();
+      let catalogSubscription: { close(): void } | undefined;
+      let workQueries: ReturnType<WorkQueryExecutor["connect"]> | undefined;
+      let runtimeInFlight = 0;
 
       const dispatch = async (line: string): Promise<void> => {
         let command: Record<string, unknown>;
@@ -137,17 +250,34 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           send(failure(id, type || "unknown", "Daemon is shutting down; reconnect to start it again"));
           return;
         }
+        if (pendingUpgrade && type === "runtime_launch_subagent") {
+          send(failure(id, type, "runtime-draining: new execution is deferred while a fixed-build upgrade is pending"));
+          return;
+        }
         inFlight++;
+        const request = ++requestCounter;
+        const evidencePlane = type === 'runtime_background_tool' ? 'background'
+          : ['runtime_cancel_task', 'runtime_query_cancellation', 'runtime_cancellation_status'].includes(type) ? 'cancel'
+          : ['runtime_get_snapshot', 'runtime_subscribe', 'runtime_get_metrics'].includes(type) ? 'read' : undefined;
+        if (evidencePlane) options.rpcEvidence?.event(evidencePlane, request, 'request-pending');
+        requests.set(request, { kind: 'transport-request', id: request, connection, lastProgressAt: now(),
+          nextDeadline: null, executionDeadline: null,
+          recovery: 'dispatch-drains-to-settlement-read-waiters-use-existing-caller-cancellation-accepted-effects-use-durable-owner' });
+        const accepted = (kind: string) => (operationId: string) => {
+          const record = requests.get(request);
+          if (record) { record.operation = { kind, id: operationId }; record.lastProgressAt = now(); }
+        };
+        let evidenceFailed = false;
         try {
           if (!type) {
             send(failure(id, "unknown", "Missing command type"));
             return;
           }
           if (type === "hello") {
-            const verdict = checkHello(command, { build, instanceId, safeUpgrade, agentDir: realpathSync(getAgentDir()) });
+            const verdict = checkHello(command, { build, instanceId, safeUpgrade, runtimeLifecycle: true, agentDir: realpathSync(getAgentDir()) });
             if (verdict.ok) {
               reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
-              if (!greeted) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
+              if (!greeted && command.runtimeRoot === undefined) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
               greeted = true;
               return reply({ data: verdict.data });
             }
@@ -157,10 +287,136 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
+            // Status observes the last inventory; only idle shutdown requests a fresh liveness check.
+            const observation = workModel?.observation();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
-              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount } });
+              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
+              subagentManagement: launches?.status() ?? null,
+              backgroundManagement: backgroundTools?.metrics() ?? null,
+              resultSupervision: resultSupervision ? { reason: resultSupervision.reason, metrics: resultSupervision.metrics } : null,
+              workBudget: controlStore.budget.metrics(),
+              guardianBinding: guardianBinding?.identity ?? null,
+              workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
+              livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
+                ...requests.values(),
+                ...registry.lifecycleReasons(),
+                ...(resultSupervision?.livenessReasons() ?? []),
+                ...(launches?.lifecycleReasons() ?? []),
+                ...(backgroundTools?.lifecycleReasons() ?? []),
+                ...(cancellations?.lifecycleReasons() ?? []),
+                ...(sessionMaintenance?.lifecycleReasons() ?? []),
+                ...(observation?.reasons ?? []).filter((reason: any) => !resultSupervision?.manages(reason.operationId))],
+              livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
+              readRequests: workModel?.requestReasons() ?? [],
+              transportRequests: [...requests.values()].map(reason => ({ ...reason })),
+              nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
+                : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
+                : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
           }
-          if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
+          if (type === "runtime_result_supervision") {
+            if (!greeted) throw new Error("not_accepted: supervision requires hello");
+            if (Object.keys(command).some(key => !["id", "type"].includes(key))) throw new Error("not_accepted: unsupported supervision field");
+            return reply({ data: resultPort.status() });
+          }
+          if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
+            if (!greeted) throw new Error("not_accepted: cancellation requires hello");
+            if (runtimeInFlight >= 32) throw new Error("not_accepted: too many in-flight runtime requests");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            const releaseControl = controlStore.budget.enter("control");
+            try {
+              if (!releaseControl) throw new Error("runtime-overloaded: control source capacity");
+              cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+              return reply({ data: await cancellations.handle(command, accepted('cancellation'), releaseControl) });
+            } finally { releaseControl?.(); runtimeInFlight--; }
+          }
+          if (type === "runtime_bind_catalog_host") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalog.admission.bind(command.authority, socket);
+            return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_background_tool") {
+            if (!greeted) throw new Error("Background tools require hello");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            if (runtimeInFlight >= 32) throw new Error("runtime-overloaded");
+            runtimeInFlight++;
+            try { return reply({data: await (await initializeBackground()).handle(command, accepted('background-request'))}); } finally { runtimeInFlight--; }
+          }
+          if (type === "runtime_launch_subagent") {
+            if (!greeted) throw new Error("not_accepted: launch requires hello");
+            if (runtimeInFlight >= 32) throw new Error("not_accepted: too many in-flight runtime requests");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              launches = await initializeLaunch();
+              const data = await launches.handle(command, accepted('managed-launch'));
+              // The durable launch receipt must not fail because derived reads
+              // are rebuilding or overloaded. Refresh independently.
+              void work().livenessReasons().catch(error => log(`Launch snapshot refresh unavailable: ${String(error)}`));
+              return reply({ data });
+            } finally { runtimeInFlight--; }
+          }
+          if (type === "runtime_subscribe_catalog") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalogSubscription?.close();
+            const subscription = catalog.observe(() => catalogCommand({ type: "runtime_get_catalog", overlay: command.overlay }), snapshot => {
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              send({ type: "event", event: { type: "runtime_catalog_snapshot", snapshot } } as unknown as ServerMessage);
+            });
+            catalogSubscription = subscription;
+            return reply({ data: subscription.snapshot });
+          }
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            return reply({ data: catalogCommand(command) });
+          }
+          if (type === "runtime_register_client") {
+            if (!greeted) throw new Error("runtime_register_client requires hello");
+            if (typeof command.clientId !== "string" || !command.clientId || command.clientId.length > 256) throw new Error("Invalid runtime client identity");
+            runtimeClients.set(socket, command.clientId);
+            runtimeZeroSince = undefined;
+            return reply({ data: { clientId: command.clientId } });
+          }
+          if (type === "runtime_guardian_bind") {
+            if (!greeted) throw new Error("runtime_guardian_bind requires hello");
+            validateDaemonOwnerIdentity(command.server);
+            validateDaemonOwnerIdentity(command.guardian);
+            const current = inspectDaemonOwner(serverDir);
+            const guardian = inspectDaemonOwner(serverDir, "guardian-owner");
+            if (current.status !== "live" || guardian.status !== "live"
+              || !ownerIdentityVerified(current.owner) || !ownerIdentityVerified(guardian.owner)
+              || !sameOwner(current.owner, command.server) || !sameOwner(guardian.owner, command.guardian)
+              || current.owner.token !== instanceId) throw new Error("runtime-unhealthy: exact guardian/server identity could not be verified");
+            guardianBinding = { socket, identity: guardian.owner };
+            return reply({ data: { server: current.owner, guardian: guardian.owner } });
+          }
+          if (type === "runtime_upgrade_status") {
+            const journal = readActivationJournal(serverDir);
+            return reply({ data: journal ? { ...journal, blockers: upgradeBlockers } : null });
+          }
+          if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            if (id && id.length > 128) throw new Error("Runtime request ID exceeds 128 characters");
+            if (runtimeInFlight >= 32) throw new Error("runtime-unhealthy: too many in-flight queries; resync and retry");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              workQueries ??= work().connect(socket);
+              const data = await workQueries.handle(command);
+              if (type === "runtime_get_metrics") {
+                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()),
+                  workBudget: controlStore.budget.metrics(), resultSupervision: resultSupervision?.metrics,
+                  subagentLifecycle: launches?.status().lifecycle } });
+              }
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              // Snapshot JSON is encoded in the worker; only the small envelope runs here.
+              const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
+              if (!socket.destroyed) socket.write(envelope.slice(0, -1) + ',"data":' + data.json + "}\n");
+              return;
+            } finally {
+              runtimeInFlight--;
+            }
+          }
           if (type === "runtime_upgrade") {
             if (!safeUpgrade || !build) throw new Error("This daemon cannot safely activate managed runtimes");
             if (typeof command.operationId !== "string" || typeof command.runtime !== "object" || !command.runtime) throw new Error("Invalid upgrade request");
@@ -171,9 +427,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               || journal.previousOwner?.token !== instanceId || journal.phase !== "prepared") throw new Error("Upgrade request does not match this daemon's activation journal");
             if (!compatibleUpgrade(build, runtime.build)) throw new Error("Unsafe SDK downgrade or incompatible protocol");
             if (pendingUpgrade && pendingUpgrade.operationId !== command.operationId) throw new Error("activation-conflict: another upgrade is pending");
+            setUpgradeFence(instanceId!);
             pendingUpgrade = { runtime, operationId: command.operationId, serverDir, agentDir: command.agentDir as string };
             setImmediate(() => { void daemon.sweepIdle().catch(error => log(`upgrade maintenance failed: ${String(error)}`)); });
-            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for idle sessions" } });
+            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for accepted runtime work and idle sessions" } });
           }
           if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
           if ((sessionMaintenance?.busy || nativeHost.busy) && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
@@ -246,7 +503,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             await nativeHost.reload(sessionId);
             return reply({ sessionId });
           }
-          if (type === "client_snapshot") return reply({ sessionId, data: await hosted.clientSnapshot() });
+          if (type === "client_snapshot") {
+            if (socket.destroyed) return;
+            const data = await new Promise<unknown>((resolve, reject) => {
+              const closed = () => reject(new Error('Read caller disconnected'));
+              socket.once('close', closed);
+              void hosted.clientSnapshot().then(resolve, reject).finally(() => socket.off('close', closed));
+            });
+            return reply({ sessionId, data });
+          }
           if (type === "clear_queue") return reply({ sessionId, data: hosted.session.clearQueue() });
           if (type === "abort_compaction") {
             hosted.session.abortCompaction();
@@ -256,11 +521,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const response = await hosted.handle(rpc as RpcCommand);
           send({ ...response, sessionId } as ServerMessage);
         } catch (error) {
+          evidenceFailed = true;
           send(failure(id, type || "unknown", error instanceof Error ? error.message : String(error)));
         } finally {
+          if (evidencePlane) {
+            options.rpcEvidence?.event(evidencePlane, request, evidenceFailed ? 'request-failed' : 'request-returned');
+            options.rpcEvidence?.event(evidencePlane, request, 'settled');
+          }
           releaseSessionOperation?.();
           inFlight--;
-          if (registry.activeCount > 0) zeroSince = undefined;
+          requests.delete(request);
+          if (registry.activeCount > 0) { zeroSince = undefined; hostedUsed = true; }
           else zeroSince ??= now();
         }
       };
@@ -283,13 +554,26 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("data", (chunk: string) => decoder.push(chunk));
       socket.on("error", () => undefined);
       socket.on("close", () => {
+        catalogSubscription?.close();
+        catalog.admission.close(socket);
+        workQueries?.close();
         sockets.delete(socket);
+        runtimeClients.delete(socket);
+        if (guardianBinding?.socket === socket) guardianBinding = undefined;
+        if (runtimeClients.size === 0) runtimeZeroSince ??= now();
         reconnectControllers.delete(control);
         control.dispose();
       });
     });
 
     cleanupStartup = async () => {
+      await cancellations?.close();
+      await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
+      resultSupervision?.close();
+      controlStore.release();
+      if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+      await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
       await registry.shutdown();
@@ -322,9 +606,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (pendingUpgrade && sessionMaintenance) {
             const request = pendingUpgrade;
             const journal = readActivationJournal(serverDir);
-            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) pendingUpgrade = undefined;
+            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) { setUpgradeFence(null); pendingUpgrade = undefined; upgradeBlockers = []; }
             else {
               try {
+                upgradeBlockers = [];
                 // Observe background completion before taking the idle fence. A slow or
                 // failed provider must leave admitted work and dialog answers usable.
                 const live = registry.list().filter(item => item.live).map(item => registry.get(item.sessionId)!);
@@ -336,6 +621,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   const legacyController = () => live.some(hosted => hosted.controllerIs(controller =>
                     !(controller instanceof ConnectionControl) || reconnectControllers.get(controller) !== true));
                   if (legacyController()) throw new Error("Waiting for legacy controllers to detach");
+                  // HostedSession idleness does not cover detached accepted work.
+                  // Unknown observation fails closed for an irreversible activation.
+                  upgradeBlockers = await work().upgradeObligations();
+                  if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
+                  if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
                     (hosted as HostedSession & { publishRuntimeEvent(event: unknown): void }).publishRuntimeEvent({
@@ -343,7 +633,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                     });
                   }
                 });
-              } catch (error) { log(`upgrade waiting: ${String(error)}`); }
+              } catch (error) {
+                if (!upgradeBlockers.length) upgradeBlockers = [{ kind: "upgrade-unavailable", reason: String(error) }];
+                log(`upgrade waiting: ${String(error)}`);
+              }
               // Pending upgrades take priority over expiry and release their idle fence on busy passes.
               return;
             }
@@ -356,10 +649,44 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           zeroSince ??= now();
-          if (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil) return;
+          if (runtimeClients.size > 0) return;
+          runtimeZeroSince ??= now();
+          if (hostedUsed ? (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil)
+            : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
+          // Recheck durable activity before fencing admission; observation never adopts a writer.
+          if (draining) return;
+          resultSupervision?.reconcile();
+          if (resultSupervision?.livenessReasons().length) {
+            runtimeZeroSince = undefined;
+            return;
+          }
+          if (launches?.lifecycleReasons().length) { runtimeZeroSince = undefined; return; }
+          if (backgroundTools?.lifecycleReasons().length) { runtimeZeroSince = undefined; return; }
+          try {
+            // Control never waits for a queued/rebuilding/wedged read worker.
+            // Legacy passive evidence is usable only within its existing idle
+            // verification window; it cannot renew itself through a probe RPC.
+            const observation = workModel?.observation();
+            const fresh = observation?.observedAt !== null && observation?.observedAt !== undefined
+              && now() < observation.observedAt + config.runtimeIdleMs;
+            if (fresh && observation.reasons.some((reason: any) => !resultSupervision?.manages(reason.operationId))) {
+              runtimeZeroSince = undefined;
+              return;
+            }
+            if (observation && (!fresh || observation.status !== "ready")) observationUnavailable = true;
+          } catch (error) {
+            // The executor already bounds query deadlines and terminates failed workers.
+            // Unknown obligations cannot keep an otherwise detached runtime alive forever.
+            // Stop only the management layer; leave runner evidence and writer leases intact.
+            observationUnavailable = true;
+            log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
+          }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
+          idleStopping = true;
+          idleEvidence = { at: now(), deadline: hostedUsed ? zeroSince! + config.daemonIdleMs : runtimeZeroSince! + config.runtimeIdleMs,
+            lifecycle: config, obligations: [], budget: controlStore.budget.metrics() };
           log("idle timeout with no active sessions; shutting down");
         })().finally(() => { maintenance = undefined; });
         return maintenance.then(() => draining ? daemon.stop() : undefined);
@@ -368,6 +695,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         const pendingMaintenance = maintenance;
         stopped ??= (async () => {
           draining = true;
+          options.onDraining?.();
+          if (idleStopping) {
+            const temporary = join(serverDir, `idle-stop-${instanceId}.tmp`);
+            writeFileSync(temporary, JSON.stringify({ token: instanceId, pid: process.pid }), { mode: 0o600 });
+            renameSync(temporary, join(serverDir, "idle-stop-intent.json"));
+          }
           if (timer) clearInterval(timer);
           await pendingMaintenance?.catch(error => log(`maintenance interrupted during shutdown: ${String(error)}`));
           if (upgradeCommitted) {
@@ -380,25 +713,34 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const closed = new Promise<void>((resolve) => server.close(() => resolve()));
           for (const socket of sockets) socket.destroy();
           await closed;
+          await cancellations?.close();
+          await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
+          resultSupervision?.close();
+          controlStore.release();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+          await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);
+          const checkpoint = join(serverDir, `clean-stop-${instanceId}.tmp`);
+          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop", observation: observationUnavailable ? "unavailable" : "verified", idleEvidence }), { mode: 0o600 });
+          renameSync(checkpoint, join(serverDir, "clean-stop.json"));
           releaseOwner();
           finishClosed();
         })();
         return stopped;
       },
     };
-    const durations = [config.sessionIdleMs, config.daemonIdleMs].filter(value => value > 0);
+    const durations = [config.sessionIdleMs, config.daemonIdleMs, config.runtimeIdleMs].filter(value => value > 0);
     if (safeUpgrade) durations.push(1_000);
     if (durations.length) {
-      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(30_000, ...durations)));
+      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(1_000, ...durations)));
       timer.unref();
     }
     return daemon;
   } catch (error) {
-    await cleanupStartup();
-    releaseOwner();
+    try { await cleanupStartup(); } finally { releaseOwner(); }
     throw error;
   }
 }

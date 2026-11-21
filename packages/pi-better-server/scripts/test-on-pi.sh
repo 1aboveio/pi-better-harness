@@ -25,12 +25,22 @@ printf '{ "name": "pi-compat", "private": true }\n' > "$PREFIX/package.json"
 cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
 cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
-# Background-activity regressions load the real sibling provider against this SDK.
-cp -R "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subagents"
+# Activity and permission regressions load the real sibling providers against this SDK.
+node "$PKG_DIR/scripts/copy-pi-test-providers.mjs" "$ROOT_DIR" "$PREFIX"
+# Install the consumer's declared runtime closure, not just the host's transitives.
+# Its host-provided peers must keep resolving to the requested Pi above.
+(cd "$PREFIX/packages/pi-better-server" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-subagents" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-background-tasks" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-sandbox" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-goal" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"
 echo "testing against pi-coding-agent $installed"
 tests=("${@:3}")
 if [ "${#tests[@]}" -eq 0 ]; then tests=(test/*.test.ts); fi
+if [ -n "${TEST_SHARD:-}" ]; then
+  tests=("--test-shard=$TEST_SHARD" "${tests[@]}")
+fi
 PI_RUNTIME_PACK_WORKSPACE="$ROOT_DIR" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 "${tests[@]}"

@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claimDaemonOwner } from "../src/daemon-owner.ts";
+import { claimDaemonOwner, inspectDaemonOwner } from "../src/daemon-owner.ts";
 import { makeEnv } from "./helpers.ts";
 
 function contender(serverDir: string) {
@@ -28,6 +28,46 @@ function contender(serverDir: string) {
   });
   return { child, report, exited };
 }
+
+test("a kernel-confirmed unreaped Linux owner is dead without treating a live owner as reclaimable", { skip: process.platform !== "linux" ? "Linux proc process states" : false, timeout: 10000 }, async () => {
+  const env = makeEnv(); mkdirSync(env.serverDir);
+  const ownerScript = `import {claimDaemonOwner} from ${JSON.stringify(new URL("../src/daemon-owner.ts", import.meta.url).href)};
+    claimDaemonOwner(${JSON.stringify(env.serverDir)}); console.log(process.pid); setInterval(()=>{},1000);`;
+  const parentScript = `const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(ownerScript)}],{stdio:['ignore','pipe','inherit']});
+    child.stdout.pipe(process.stdout); child.once('exit',()=>process.exit(0));`;
+  const parent = spawn(process.execPath, ["-e", parentScript], { stdio: ["ignore", "pipe", "inherit"] });
+  const parentExit = once(parent, "exit");
+  let pid: number | undefined;
+  try {
+    const [data] = await once(parent.stdout!, "data"); pid = Number(String(data).trim());
+    assert.ok(Number.isSafeInteger(pid) && pid! > 0);
+    const before = inspectDaemonOwner(env.serverDir);
+    assert.equal(before.status, "live");
+    assert.throws(() => claimDaemonOwner(env.serverDir), /already running/);
+    const deadline = Date.now() + 5000;
+    process.kill(parent.pid!, "SIGSTOP");
+    while (readFileSync(`/proc/${parent.pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0] !== "T") {
+      assert.ok(Date.now() < deadline, "owned parent did not stop");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    process.kill(pid!, "SIGKILL");
+    while (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0] !== "Z") {
+      assert.ok(Date.now() < deadline, "owned process did not reach kernel terminal state");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const after = inspectDaemonOwner(env.serverDir);
+    assert.equal(after.status, "dead");
+    if (before.status === "live" && after.status === "dead") assert.deepEqual(after.owner, before.owner);
+    const release = claimDaemonOwner(env.serverDir);
+    try { assert.equal(inspectDaemonOwner(env.serverDir).status, "live"); }
+    finally { release(); }
+  } finally {
+    if (pid) { try { process.kill(pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
+    process.kill(parent.pid!, "SIGCONT");
+    await parentExit;
+  }
+});
 
 test("simultaneous processes converge on one daemon owner and release permits a new owner", async t => {
   const env = makeEnv();

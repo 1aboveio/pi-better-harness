@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEventBus } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = mkdtempSync(join(tmpdir(), "subagent-settings-contribution-"));
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 const { default: extension } = await import("../index.ts");
 const { setConfigPathForTests, setConfigForTests, loadConfig } = await import("../config.ts");
 const { TIMING_ENV } = await import("../timing.ts");
@@ -43,7 +45,9 @@ test("subagents contributes the standalone settings opener with shared session a
     };
     process.env[TIMING_ENV.toolWait] = "7";
     process.env[TIMING_ENV.stuck] = "13";
-    t.after(() => {
+    t.after(async () => {
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
         if (previousTimingEnv.toolWait === undefined) delete process.env[TIMING_ENV.toolWait];
         else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
         if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];
@@ -51,26 +55,35 @@ test("subagents contributes the standalone settings opener with shared session a
         if (previousMax === undefined) delete process.env[TIMING_ENV.max];
         else process.env[TIMING_ENV.max] = previousMax;
         setConfigPathForTests(undefined);
-        rmSync(root, { recursive: true, force: true });
     });
-    const events = createEventBus();
+    mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+    let events;
     const registrations = [];
-    events.on("harness-settings:register", (data) => registrations.push(data));
     const commands = new Map();
     const handlers = new Map();
     const entries = [];
-    extension({
-        events,
-        registerTool() {},
-        registerCommand(name, command) { commands.set(name, command); },
+    const sessionManager = SessionManager.inMemory(root);
+    const settingsManager = SettingsManager.inMemory({});
+    const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager,
+      noExtensions: true, noSkills: true, noContextFiles: true, noThemes: true, noPromptTemplates: true,
+      extensionFactories: [pi => {
+        events = pi.events;
+        events.on("harness-settings:register", data => registrations.push(data));
+        extension({ ...pi,
+        registerCommand(name, command) { commands.set(name, command); pi.registerCommand(name, command); },
         on(name, handler) {
             const prior = handlers.get(name);
             handlers.set(name, async (...args) => { await prior?.(...args); return handler(...args); });
+            pi.on(name, handler);
         },
-        appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
+        appendEntry(customType, data) { pi.appendEntry(customType, data); entries.push({ type: "custom", customType, data }); },
         sendMessage() { assert.fail("settings must not send messages"); },
         sendUserMessage() { assert.fail("settings must not send user messages"); },
-    });
+    }); }] });
+    await resourceLoader.reload();
+    const { session } = await createAgentSession({ cwd: root, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager, resourceLoader, sessionManager, noTools: "all" });
+    await session.bindExtensions({ mode: "print" });
+    t.after(async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); await stopCatalogRuntime(); rmSync(root, { recursive: true, force: true }); });
     const packageLinks = registrations.filter(item => item.command);
     assert.equal(packageLinks.length, 2);
     const contribution = packageLinks[0];
@@ -95,8 +108,8 @@ test("subagents contributes the standalone settings opener with shared session a
     let closed = 0;
     const notices = [];
     const ctx = {
+        ...session.extensionRunner.createContext(),
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
-        sessionManager: { getBranch: () => entries },
         ui: {
             notify(message) { notices.push(message); }, setWidget() {}, setStatus() {},
             custom(factory) {
@@ -210,7 +223,7 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("subagents").handler("settings", ctx);
     assert.equal(pages.length, opened);
     assert.equal(notices.at(-1), notices.at(-2));
-    await handlers.get("session_shutdown")({}, ctx);
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     const count = registrations.length;
     events.emit("harness-settings:request");
     assert.equal(registrations.length, count);

@@ -18,22 +18,27 @@
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { register } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
-register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
+const { nativeBackground } = await import("../../pi-better-background-tasks/src/test-support/native-background.ts");
+const { initTheme } = await import("@earendil-works/pi-coding-agent");
+initTheme("dark", false);
 
 const tempDir = mkdtempSync(join(tmpdir(), "cached-factory-combined-"));
 process.env.TMPDIR = tempDir;
+const stopRuntime = await startWorkRuntimeFixture();
 
 const { default: betterSubagents } = await import("../index.ts");
 const { default: backgroundTasksExtension } = await import("../../pi-better-background-tasks/src/index.ts");
 const { setConfigPathForTests, setConfigForTests } = await import("../config.ts");
 const { logPathFor, runDir, writeMeta } = await import("../registry.ts");
 
-after(() => {
+after(async () => {
+    await stopRuntime();
     setConfigPathForTests(undefined);
     setConfigForTests(undefined);
     rmSync(tempDir, { recursive: true, force: true });
@@ -41,43 +46,6 @@ after(() => {
 
 const NAVIGATOR_STATE = Symbol.for("pi-better-harness.navigator.state");
 const navigatorState = () => globalThis[NAVIGATOR_STATE];
-
-/** One Pi host: a cached extension factory instance, its events, and its session. */
-function host() {
-    const handlers = new Map();
-    const tools = new Map();
-    const listeners = new Map();
-    const events = {
-        on(name, listener) {
-            listeners.set(name, [...(listeners.get(name) ?? []), listener]);
-            return () => {
-                listeners.set(name, (listeners.get(name) ?? []).filter((entry) => entry !== listener));
-            };
-        },
-        emit(name, payload) {
-            for (const listener of listeners.get(name) ?? []) listener(payload);
-        },
-    };
-    const pi = {
-        events,
-        on(event, handler) {
-            handlers.set(event, [...(handlers.get(event) ?? []), handler]);
-        },
-        registerTool(tool) { tools.set(tool.name, tool); },
-        registerCommand() {},
-        appendEntry() {},
-        sendMessage() { return Promise.resolve(); },
-        sendUserMessage() { return Promise.resolve(); },
-    };
-    return {
-        pi,
-        tools,
-        listeners,
-        async emit(name, payload, ctx) {
-            for (const handler of handlers.get(name) ?? []) await handler(payload, ctx);
-        },
-    };
-}
 
 /** A TUI session and a headless child session never share a UI object. */
 function tuiContext() {
@@ -96,28 +64,7 @@ function tuiContext() {
     return {
         ui,
         widget,
-        ctx: {
-            cwd: tempDir,
-            mode: "tui",
-            hasUI: true,
-            ui,
-            isIdle: () => true,
-            model: { provider: "test", id: "test" },
-            thinkingLevel: "high",
-            getContextUsage: () => ({ tokens: 1_000, contextWindow: 200_000, percent: 0.5 }),
-            sessionManager: { getSessionId: () => "cached-parent", getBranch: () => [{ id: "branch-parent" }] },
-        },
-    };
-}
 
-function headlessChildContext() {
-    return {
-        cwd: tempDir,
-        mode: "rpc",
-        hasUI: false,
-        ui: { setStatus() {}, setWidget() {}, notify() {} },
-        isIdle: () => true,
-        sessionManager: { getSessionId: () => "cached-child", getBranch: () => [{ id: "branch-child" }] },
     };
 }
 
@@ -127,17 +74,15 @@ function registerCombined(pi) {
 }
 
 test("a headless child sharing cached Subagents and Background Tasks factories cannot dispose the parent's navigator", async () => {
-    const parent = host();
-    const child = host();
-    registerCombined(parent.pi);
-    registerCombined(child.pi);
+    const parent = await nativeBackground({ cwd: tempDir, sessionId: "cached-parent", factory: registerCombined });
+    let child;
 
     const parentSession = tuiContext();
-    const childSession = headlessChildContext();
     assert.equal(navigatorState()?.uiCtx, undefined, "no TUI session owns the shared navigator yet");
 
     try {
-        await parent.emit("session_start", { type: "session_start" }, parentSession.ctx);
+        await parent.session.bindExtensions({ mode: "tui", uiContext: { ...parent.session.extensionRunner.getUIContext(), ...Object.fromEntries(Object.entries(parentSession.ui).map(([key, value]) => [key, typeof value === "function" ? value.bind(parentSession.ui) : value])) } });
+        parentSession.ctx = navigatorState().uiCtx;
         const parentState = navigatorState();
         assert.equal(parentState?.uiCtx, parentSession.ctx, "the parent TUI session owns the navigator");
         assert.equal(typeof parentSession.ui.factory, "function", "the parent installs the ← editor wrapper");
@@ -148,9 +93,9 @@ test("a headless child sharing cached Subagents and Background Tasks factories c
         );
 
         // The headless child runs the same cached modules and the same lifecycle.
-        await child.emit("session_start", { type: "session_start" }, childSession);
-        await child.emit("session_before_switch", {}, childSession);
-        await child.emit("session_shutdown", { reason: "switch" }, childSession);
+        child = await nativeBackground({ cwd: tempDir, sessionId: "cached-child", factory: registerCombined });
+        await child.session.extensionRunner.emit({ type: "session_before_switch" });
+        await child.close(); child = undefined;
 
         assert.equal(navigatorState().uiCtx, parentSession.ctx, "the headless child must not clear the parent's navigator");
         assert.equal(typeof parentSession.ui.factory, "function", "the parent's editor wrapper survives the child");
@@ -161,33 +106,38 @@ test("a headless child sharing cached Subagents and Background Tasks factories c
         );
 
         // The parent's editor wrapper is still mounted and still owns the keys.
-        const editor = parentSession.ui.factory({}, parentSession.ui.theme, {});
+        const editor = parentSession.ui.factory({ requestRender() {} }, parentSession.ui.theme, { getHotkeys: () => [] });
         assert.equal(typeof editor.handleInput, "function", "the parent's editor wrapper survives the child");
 
         // The parent's tools still work: a child teardown must not starve the parent.
-        const spawn = await parent.tools.get("bg_task_spawn").execute("spawn", {
+        const spawn = await parent.execute("bg_task_spawn", {
             name: "parent-still-running",
             shell: false,
             argv: [process.execPath, "-e", "setTimeout(() => {}, 5_000)"],
             callback: false,
-        }, undefined, undefined, parentSession.ctx);
-        const id = spawn.content[0].text.match(/bgs_[0-9a-f]{20}/)?.[0];
-        assert.ok(id, spawn.content[0].text);
+        });
+        const id = spawn.match(/bgs_[0-9a-f]{20}/)?.[0];
+        assert.ok(id, spawn);
 
-        const listed = await parent.tools.get("bg_task_list").execute("list", {}, undefined, undefined, parentSession.ctx);
-        assert.match(listed.content[0].text, /parent-still-running/, "the parent's own list still reports its task");
+        const listed = await parent.execute("bg_task_list", {});
+        assert.match(listed, /parent-still-running/, "the parent's own list still reports its task");
 
         // A launch by the parent installs its main-list widget through the same
         // factory-owned navigator the child left alone.
         assert.equal(typeof parentSession.widget.installed, "function", "the parent's main-list widget is installed for its live row");
-        const rail = parentSession.widget.installed({ requestRender() {} }, parentSession.ui.theme).render(160).join("\n");
+        let rail = "";
+        for (let attempt = 0; attempt < 100 && !rail.includes("parent-still-running"); attempt++) {
+            rail = parentSession.widget.installed({ requestRender() {} }, parentSession.ui.theme).render(160).join("\n");
+            if (!rail.includes("parent-still-running")) await delay(20);
+        }
         assert.match(rail, /parent-still-running/);
         assert.match(rail, /← work navigator/);
 
-        const stop = await parent.tools.get("bg_task_stop").execute("stop", { id }, undefined, undefined, parentSession.ctx);
-        assert.match(stop.content[0].text, /cancelled/);
+        const stop = await parent.execute("bg_task_stop", { id });
+        assert.match(stop, /cancelled/);
     } finally {
-        await parent.emit("session_shutdown", { reason: "quit" }, parentSession.ctx);
+        await child?.close();
+        await parent.close();
     }
 
     assert.equal(navigatorState()?.uiCtx, undefined, "the owning factory still releases its own navigator");

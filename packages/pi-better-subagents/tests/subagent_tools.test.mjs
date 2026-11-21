@@ -35,7 +35,7 @@ function packages(t) {
     return { base, web, other, ask, ssh, registered };
 }
 
-test('SSH tools require opt-in and Network On and load only the selected extension', (t) => {
+test('SSH tools need a selected provider and Network On', (t) => {
     const { ssh } = packages(t);
     const names = ['remote_bash', 'ssh_mux', 'ssh_profile'];
     const registered = names.map((name) => ({ name,
@@ -79,7 +79,7 @@ test('the default plan loads the ticked web tools from their registered package 
         { name: 'web_fetch', root: web, network: true, loadPath: web },
         { name: 'web_search', root: web, network: true, loadPath: web },
     ]);
-    assert.deepEqual(plan.refused, [{ name: 'ask_user_question', reason: 'not a guarded tool and not ticked as trusted in /sandbox (Subagents · Tools)' }]);
+    assert.deepEqual(plan.refused, [{ name: 'ask_user_question', reason: 'no provider selected for this worker' }]);
     assert.equal(describeTaskTools(plan), 'guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools), web_search (@juicesharp/rpiv-web-tools)');
 });
 
@@ -92,7 +92,7 @@ test('file-backed builtin display provenance does not change launch roots or adm
     assert.deepEqual(plan.trusted, [{ name: 'web_fetch', package: web, root: web, network: true, loadPath: web }]);
     const mislabeled = planTaskTools({ ...options, settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: 'built-in' }] } });
     assert.deepEqual(mislabeled.trusted, []);
-    assert.match(mislabeled.refused[0].reason, /can't be found/);
+    assert.match(mislabeled.refused[0].reason, /is unavailable/);
 });
 
 test('network tools are refused with Network Off; unresolvable or mismatched packages are refused with a reason', (t) => {
@@ -101,15 +101,15 @@ test('network tools are refused with Network Off; unresolvable or mismatched pac
     assert.deepEqual(planTaskTools({ ...base, requested: ['web_fetch'], network: false }).refused,
         [{ name: 'web_fetch', reason: 'needs Network access, which is Off for subagents' }]);
     assert.match(planTaskTools({ ...base, requested: ['web_fetch'], network: true, registered: [] }).refused[0].reason,
-        /package @juicesharp\/rpiv-web-tools is not installed|can't be found/);
-    // A config override naming another package loads it only if that package is the ticked one.
+        /provider @juicesharp\/rpiv-web-tools is unavailable/);
+    // The configured provider must exist. The old checkbox cannot veto the selected provider.
     const mismatch = planTaskTools({ ...base, requested: ['web_fetch'], network: true, toolExtensions: { web_fetch: 'npm:other-web' } });
-    assert.match(mismatch.refused[0].reason, /toolExtensions maps it to other-web, not the ticked package @juicesharp\/rpiv-web-tools/);
+    assert.match(mismatch.refused[0].reason, /provider other-web is unavailable/);
     const ticked = planTaskTools({ ...base, requested: ['web_fetch'], network: true, toolExtensions: { web_fetch: 'npm:other-web' },
-        settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: 'npm:other-web' }] }, resolvePath: () => other });
+        settings: { applyPatch: false, trusted: [] }, resolvePath: () => other });
     assert.deepEqual(ticked.trusted.map((tool) => [tool.name, tool.root]), [['web_fetch', other]]);
-    assert.deepEqual(planTaskTools({ ...base, requested: ['apply_patch'], network: true, settings: { applyPatch: false, trusted: [] } }).refused,
-        [{ name: 'apply_patch', reason: 'apply_patch is off in /sandbox (Subagents · Tools)' }]);
+    assert.deepEqual(planTaskTools({ ...base, requested: ['apply_patch'], network: true, settings: { applyPatch: false, trusted: [] } }),
+        { applyPatch: true, trusted: [], refused: [] });
 });
 
 test('inventory requests are refused while Off and Read needs no trusted extension', () => {

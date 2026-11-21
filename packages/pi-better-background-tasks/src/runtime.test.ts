@@ -1,11 +1,12 @@
 import { readFileSync, rmSync, statSync } from "node:fs";
+import { createWorkBudget } from "../../pi-better-server/src/runtime/work-budget.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failurePath } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
-import { resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
-import { actionableFailures, failureHistory, readFailureState } from "./shared-failure-observations.js";
+import { createBackgroundTaskRuntime, resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
+import { actionableFailures, readFailureState } from "./shared-failure-observations.js";
 import { formatLaunch } from "./tools.js";
 import type { CommandResult } from "./types.js";
 import { failedResult, FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
@@ -1148,9 +1149,83 @@ describe("command watch progress evidence", () => {
   }
 
   function incidents(id: string) {
-    return failureHistory(readFailureState(failurePath(id)))
-      .filter((incident) => incident.category === "stall" && incident.status === "unresolved");
+    return actionableFailures(readFailureState(failurePath(id)));
   }
+
+  it("defers an actual watch at root capacity without polling after its original deadline", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(watchStartedAt);
+    const budget = createWorkBudget(), peer = createWorkBudget(budget.buffer);
+    const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
+      (kind, id, work, dueAt) => budget.scheduleSource(`legacy-${kind}`, id, work, 'runtime', dueAt));
+    const held = Array.from({ length: 16 }, () => peer.enter('control')!);
+    const scripted = scriptedWatch([{ stdout: 'pending' }]);
+    const meta = runtime.startWatchTask(fakePi, {
+      command: 'check deployment', interval_seconds: 60, timeout_seconds: 2, callback: false,
+      success_when: { type: 'stdout_contains', value: 'done' },
+    }, process.cwd(), undefined, undefined, { watchPollRunner: scripted.runner });
+    ids.push(meta.id);
+    try {
+      await advance(0); expect(scripted.calls()).toBe(0);
+      await advance(2_000); expect(scripted.calls()).toBe(0);
+      held.forEach(release => release());
+      await advance(10);
+      expect(readMeta(meta.id)).toMatchObject({ status: 'timed_out', deadlineAt: watchStartedAt + 2_000 });
+      expect(scripted.calls()).toBe(0);
+      expect(peer.metrics().sources['legacy-watch']!.completed).toBe(1);
+      expect(peer.metrics().lanes.control!.active).toBe(0);
+    } finally { held.forEach(release => release()); runtime.suspendScheduledWork(); }
+  });
+
+  it("charges the actual watch and retention callbacks without repeating a poll or moving its deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const performed: Array<{ kind: string; id: string }> = [];
+    const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined, (kind, id, work) => {
+      performed.push({ kind, id });
+      return work();
+    });
+    const scripted = scriptedWatch([{ stdout: "pending" }]);
+    const meta = runtime.startWatchTask(fakePi, {
+      command: "check deployment", interval_seconds: 60, timeout_seconds: 2, callback: false,
+      success_when: { type: "stdout_contains", value: "done" },
+    }, process.cwd(), undefined, undefined, { watchPollRunner: scripted.runner });
+    ids.push(meta.id);
+    try {
+      await advance(0);
+      expect(scripted.calls()).toBe(1);
+      expect(performed.filter(item => item.kind === "watch")).toEqual([{ kind: "watch", id: meta.id }]);
+      await advance(1_000);
+      expect(performed.filter(item => item.kind === "log-retention")).toEqual([{ kind: "log-retention", id: meta.id }]);
+      expect(scripted.calls()).toBe(1);
+      await advance(1_000);
+      expect(readMeta(meta.id)).toMatchObject({ status: "timed_out", deadlineAt: watchStartedAt + 2_000 });
+      expect(scripted.calls()).toBe(1);
+    } finally { runtime.suspendScheduledWork(); }
+  });
+
+  it("shared observation resumes cannot accelerate an already owned one-second watch", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(watchStartedAt);
+    const watch = scriptedWatch([{ exitCode: 7, stdout: '{"status":"pending"}\n' }]);
+    const origin = { cwd: process.cwd(), sessionId: "reload-watch-parent" };
+    const meta = startWatchTask(fakePi, { name: "reload-watch", command: "controlled SSH poll boundary", interval_seconds: 1,
+      timeout_seconds: 0, callback: false, success_when: { type: "json_path_equals", path: "$.status", value: "done" } },
+      origin.cwd, origin, () => origin, { watchPollRunner: watch.runner });
+    ids.push(meta.id);
+    await advance(0);
+    expect(watch.calls()).toBe(1);
+    for (let read = 0; read < 22; read++) {
+      await advance(100);
+      resumeRunningTask(fakePi, readMeta(meta.id)!, () => origin, { watchPollRunner: watch.runner });
+      await advance(0);
+    }
+    expect(watch.calls()).toBe(3); // Initial poll, then the two original interval deadlines.
+    suspendScheduledWork(); resumeScheduledWork();
+    resumeRunningTask(fakePi, readMeta(meta.id)!, () => origin, { watchPollRunner: watch.runner });
+    await advance(0);
+    expect(watch.calls(), "a genuinely suspended owner still resumes immediately").toBe(4);
+    await advance(1000);
+    expect(watch.calls()).toBe(5);
+  });
 
   it("holds the state clock while polls keep reporting the same outcome", async () => {
     vi.useFakeTimers();
@@ -1166,7 +1241,6 @@ describe("command watch progress evidence", () => {
     expect(stalled.lastProgressAt).toBe(watchStartedAt);
     expect(stalled.lastCheckedAt).toBe(watchStartedAt + 11 * WATCH_POLL_MS);
     expect(incidents(watch.meta.id)).toHaveLength(1);
-    expect(actionableFailures(readFailureState(failurePath(watch.meta.id)))).toHaveLength(0);
 
     // Polls keep running, and the same silent spell stays a single observation.
     const journal = readFileSync(failurePath(watch.meta.id), "utf8");
@@ -1178,7 +1252,7 @@ describe("command watch progress evidence", () => {
     expect(incidents(watch.meta.id)).toHaveLength(1);
   });
 
-  it("recovers on a real state change and records a new later stationary phase", async () => {
+  it("recovers on a real state change and alerts again in a later stationary phase", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(watchStartedAt);
     let state = "pending";

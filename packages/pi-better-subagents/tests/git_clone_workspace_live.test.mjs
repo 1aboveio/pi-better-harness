@@ -191,7 +191,8 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             const { default: extensionFactory } = await import(indexUrl);
 
             const harness = createExtensionHarness(repo);
-            await extensionFactory(harness.pi);
+            const { managedDomainPort } = await import("./managed-domain-port.mjs");
+            await extensionFactory(harness.pi, managedDomainPort());
 
             const tool = harness.tools.get('subagent_spawn');
             assert.ok(tool, 'extension must register subagent_spawn');
@@ -326,7 +327,8 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             const { default: extensionFactory } = await import(indexUrl);
 
             const harness = createExtensionHarness(wt);
-            await extensionFactory(harness.pi);
+            const { managedDomainPort } = await import("./managed-domain-port.mjs");
+            await extensionFactory(harness.pi, managedDomainPort());
 
             const tool = harness.tools.get('subagent_spawn');
             assert.ok(tool, 'extension must register subagent_spawn');

@@ -14,6 +14,7 @@ import type { Readiness } from "../src/startup/ensure.ts";
 import type { StagedRuntime } from "../src/startup/managed-types.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 import { gate, makeEnv, waitFor, type Env } from "./helpers.ts";
+import { stageDependencies } from "./support/staged-dependencies.ts";
 
 const packageDir = fileURLToPath(new URL("../", import.meta.url));
 function staged(env: Env, seed: string): StagedRuntime {
@@ -28,7 +29,7 @@ function staged(env: Env, seed: string): StagedRuntime {
   cpSync(join(packageDir, "scripts", "private-runtime", "format.ts"), join(root, "scripts", "private-runtime", "format.ts"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(root, "managed-build.json"), JSON.stringify(build));
-  symlinkSync(fileURLToPath(new URL("../../../node_modules", import.meta.url)), join(root, "node_modules"));
+  stageDependencies(root);
   mkdirSync(join(root, "node", "bin"), { recursive: true });
   symlinkSync(process.execPath, join(root, "node", "bin", "node"));
   const runtime = { format: 1 as const, root, installRoot, build, node: join(root, "node", "bin", "node"), entrypoint: join(root, "src", "cli.ts"), manifestPath: join(root, "runtime.json") };
@@ -186,6 +187,14 @@ test("busy daemon keeps both views usable, then sends restarting events and resu
   const pending = await activate(env, after, "upgrade");
   assert.equal(pending.status, "deferred");
   assert.equal(pending.operationId, "upgrade");
+  const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+  const foreground = openStore({ path: join(env.agentDir, "operation-coordinator.sqlite") });
+  try {
+    assert.throws(() => foreground.registerOperation({ operationId: "new-during-upgrade", taskId: "new-task",
+      launchToken: "new-launch", owner: { kind: "parent-session", sessionId, workspace: env.cwd },
+      observer: { kind: "local-supervisor", version: "1" } }), /runtime-draining/);
+  } finally { foreground.close(); }
+
   assert.equal(hasActivationReservations(readActivationJournal(env.serverDir)!), true, "a deferred caller leaves its request reserved");
   assert.equal((await b.call({ type: "list_sessions" })).data.sessions.length, 1);
   assert.equal((await b.call({ type: "runtime_upgrade_status" })).data.phase, "prepared");
@@ -246,12 +255,16 @@ function reservations(env: Env) {
 // Gates expose the preflight and shutdown awaits without replacing server/SDK code.
 function installGates(env: Env) {
   writeFileSync(join(env.agentDir, "extensions", "activation-gates.ts"), `
-    import { existsSync, writeFileSync } from "node:fs";
+    import { existsSync, writeFileSync, renameSync } from "node:fs";
     import { join } from "node:path";
     const dir = process.env.PI_FAKE_GATE_DIR;
     const path = name => join(dir, name);
     async function hold(name) {
-      writeFileSync(path(name + ".started"), String(process.pid));
+      // Publish the complete PID before the parent's existence probe can pass.
+      const marker = path(name + ".started");
+      const next = marker + "." + process.pid + ".next";
+      writeFileSync(next, String(process.pid));
+      renameSync(next, marker);
       while (!existsSync(path(name + ".release"))) await new Promise(resolve => setTimeout(resolve, 15));
       writeFileSync(path(name + ".finished"), String(process.pid));
     }
@@ -476,6 +489,7 @@ test("committed activation survives observer cancellation and waits for shutdown
       const { existsSync, writeFileSync } = await import("node:fs");
       const shutdown = SessionRegistry.prototype.shutdown;
       SessionRegistry.prototype.shutdown = async function() {
+        writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.entered"))}, String(process.pid));
         await shutdown.call(this);
         writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.started"))}, String(process.pid));
         while (!existsSync(${JSON.stringify(join(env.gateDir, "shutdown.release"))})) await new Promise(resolve => setTimeout(resolve, 15));
@@ -487,7 +501,19 @@ test("committed activation survives observer cancellation and waits for shutdown
   const client = await connected(t, env, initial.readiness);
   await session(client, env);
   const pending = activate(env, after, "shutdown-upgrade");
-  await waitFor("old owner shutdown hook", gate(env, "shutdown").started);
+  let activationOutcome: unknown;
+  void pending.then(value => { activationOutcome = value; }, error => { activationOutcome = String(error); });
+  try { await waitFor("old owner shutdown hook", gate(env, "shutdown").started); }
+  catch (error) {
+    const journal = readActivationJournal(env.serverDir);
+    let upgradeBlockers: unknown;
+    try {
+      const status = await client.call({ type: "runtime_upgrade_status" });
+      upgradeBlockers = JSON.stringify(status.data?.blockers?.slice(0, 8) ?? null).slice(0, 4096);
+    } catch (capture) { upgradeBlockers = { captureError: String(capture).slice(0, 512) }; }
+    throw new Error(`${String(error)}; ${JSON.stringify({ enteredShutdown: existsSync(join(env.gateDir, "shutdown.entered")),
+      owner: inspectDaemonOwner(env.serverDir), phase: journal?.phase, reason: journal?.reason, activationOutcome, upgradeBlockers })}`);
+  }
   const old = inspectDaemonOwner(env.serverDir);
   assert.equal(old.status, "live");
   if (old.status !== "live") throw new Error("old owner released too early");

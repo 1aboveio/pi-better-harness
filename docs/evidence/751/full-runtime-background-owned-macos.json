@@ -1,0 +1,2529 @@
+{
+  "root": "/private/tmp/p751-full-5dYtB3",
+  "platform": "darwin",
+  "node": "v24.21.0",
+  "machine": {
+    "release": "24.6.0",
+    "arch": "arm64",
+    "cpus": 16,
+    "cpuModel": "Apple M3 Max",
+    "totalMemory": 137438953472
+  },
+  "source": {
+    "head": "cff852e430259eba338f008aee10260275f5b1fe",
+    "dirty": ""
+  },
+  "scope": "Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two HostedSessions; sampler overhead included",
+  "scenarios": [
+    {
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 14,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 1,
+      "elapsedMs": 3108.197625,
+      "resources": [
+        {
+          "identity": {
+            "pid": 10502,
+            "token": "837de715-c7cc-4d01-bbad-e2a1f8189b51",
+            "start": "1794771381000"
+          },
+          "generation": "1",
+          "at": 1794771389090,
+          "cpu": {
+            "user": 1320334,
+            "system": 218085
+          },
+          "usage": {
+            "userCPUTime": 1320336,
+            "systemCPUTime": 218091,
+            "maxRSS": 375456,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 24690,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 282,
+            "ipcReceived": 294,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 1290,
+            "involuntaryContextSwitches": 4621
+          },
+          "rss": 313641536,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.321343,
+            "p95": 12.066815,
+            "p99": 12.779519
+          },
+          "role": "pi",
+          "cpuMs": 27.004,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11399,
+            "token": "4301d3be-5308-4ae7-a34e-6c9f435b333d",
+            "start": "1794771383000"
+          },
+          "generation": "1",
+          "at": 1794771389125,
+          "cpu": {
+            "user": 816397,
+            "system": 97197
+          },
+          "usage": {
+            "userCPUTime": 816399,
+            "systemCPUTime": 97207,
+            "maxRSS": 258432,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 16408,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 11,
+            "involuntaryContextSwitches": 2736
+          },
+          "rss": 214586432,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.239423,
+            "p95": 12.058623,
+            "p99": 12.615679
+          },
+          "role": "worker",
+          "cpuMs": 14.042,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11760,
+            "token": "abe182bf-d271-450e-b52a-341aa411ed77",
+            "start": "1794771383000"
+          },
+          "generation": "1",
+          "at": 1794771388916,
+          "cpu": {
+            "user": 91961,
+            "system": 27281
+          },
+          "usage": {
+            "userCPUTime": 91962,
+            "systemCPUTime": 27287,
+            "maxRSS": 82464,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5353,
+            "majorPageFault": 87,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 1248
+          },
+          "rss": 29040576,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.108351,
+            "p95": 12.058623,
+            "p99": 12.492799
+          },
+          "role": "runner",
+          "cpuMs": 24.8,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11810,
+            "token": "c08939d9-f991-4a6d-87f7-ecc023eb6600",
+            "start": "1794771383000"
+          },
+          "generation": "1",
+          "at": 1794771388988,
+          "cpu": {
+            "user": 76215,
+            "system": 23980
+          },
+          "usage": {
+            "userCPUTime": 76216,
+            "systemCPUTime": 23983,
+            "maxRSS": 72608,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4739,
+            "majorPageFault": 76,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1184
+          },
+          "rss": 26713984,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.206655,
+            "p95": 12.066815,
+            "p99": 12.525567
+          },
+          "role": "command",
+          "cpuMs": 17.821,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11860,
+            "token": "16fa2308-495e-4a83-adc9-f9d7f7c95ee2",
+            "start": "1794771383000"
+          },
+          "generation": "1",
+          "at": 1794771389038,
+          "cpu": {
+            "user": 75332,
+            "system": 24601
+          },
+          "usage": {
+            "userCPUTime": 75334,
+            "systemCPUTime": 24607,
+            "maxRSS": 72048,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4707,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1174
+          },
+          "rss": 26074688,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.231231,
+            "p95": 12.075007,
+            "p99": 12.156927
+          },
+          "role": "legacy-command",
+          "cpuMs": 18.598,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11867,
+            "token": "e3cf2d66-a830-4360-85ad-7382b0225b4f",
+            "start": "1794771383000"
+          },
+          "generation": "1",
+          "at": 1794771389040,
+          "cpu": {
+            "user": 73138,
+            "system": 22085
+          },
+          "usage": {
+            "userCPUTime": 73139,
+            "systemCPUTime": 22087,
+            "maxRSS": 73136,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4772,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1189
+          },
+          "rss": 27221696,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.223039,
+            "p95": 12.066815,
+            "p99": 12.230655
+          },
+          "role": "legacy-command",
+          "cpuMs": 17.409,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9772,
+            "token": "2274dbba-99c1-48a9-8a85-24ab138e7666",
+            "start": "1794771379000"
+          },
+          "generation": "1",
+          "at": 1794771389092,
+          "cpu": {
+            "user": 197340,
+            "system": 36891
+          },
+          "usage": {
+            "userCPUTime": 197341,
+            "systemCPUTime": 36894,
+            "maxRSS": 137184,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8783,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 2262
+          },
+          "rss": 71340096,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.272191,
+            "p95": 12.050431,
+            "p99": 12.705791
+          },
+          "role": "guardian",
+          "cpuMs": 13.31,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9815,
+            "token": "c5c1e25f-dea8-4710-be7b-d5c000d8485a",
+            "start": "1794771379000"
+          },
+          "generation": "1",
+          "at": 1794771389157,
+          "cpu": {
+            "user": 2039664,
+            "system": 368840
+          },
+          "usage": {
+            "userCPUTime": 2039666,
+            "systemCPUTime": 368847,
+            "maxRSS": 567024,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 36482,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 198,
+            "ipcReceived": 260,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2226,
+            "involuntaryContextSwitches": 6182
+          },
+          "rss": 493137088,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.190271,
+            "p95": 12.066815,
+            "p99": 13.975551
+          },
+          "role": "server",
+          "cpuMs": 88.66,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 5,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 2,
+          "activeQueries": 6,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 14,
+        "queryCount": 29,
+        "cacheBytes": 20510,
+        "cacheEntries": 5,
+        "queryDurationMs": [
+          0.3691670000002887,
+          0.05608299999994415,
+          0.11404200000015408,
+          0.10045799999988958,
+          0.5695000000000618,
+          0.02608299999974406,
+          0.058083999999780644,
+          0.013166999999612017,
+          0.18729199999961565,
+          0.017749999999978172,
+          0.014957999999751337,
+          0.028084000000035303,
+          0.10474999999996726,
+          0.10329200000023775,
+          0.150749999999789,
+          0.07362499999999272,
+          0.040582999999969616,
+          0.0729999999998654,
+          0.19883299999992232,
+          0.03683299999966039,
+          0.09237499999971988,
+          0.05104200000005221,
+          0.024999999999636202,
+          0.2099580000003698,
+          0.26662499999929423,
+          0.13574999999946158,
+          0.07045800000014424,
+          0.12070899999980611,
+          0.059834000000591914
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 3,
+          "completed": 33,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.045249999999668944,
+            0.01670799999965311,
+            0.01275000000032378,
+            0.007833000000118773,
+            0.009750000000167347,
+            0.015750000000025466,
+            0.009374999999636202,
+            0.019750000000385626,
+            340.07837500000005,
+            7.260499999999865,
+            0.012917000000015832,
+            0.06466599999976097,
+            0.011083999999755179,
+            0.0038749999998799467,
+            0.00966599999992468,
+            0.011458999999831576,
+            0.013832999999976892,
+            0.06612499999982901,
+            0.0038749999998799467,
+            0.006083000000216998,
+            0.006124999999883585,
+            0.006375000000389264,
+            0.017915999999786436,
+            0.007708000000093307,
+            0.06424999999990177,
+            0.007749999999759893,
+            0.00670799999988958,
+            0.013084000000162632,
+            0.02033300000039162,
+            0.0070420000001831795,
+            0.14750000000003638,
+            0.0056670000003578025,
+            0.047999999999774445
+          ],
+          "readMs": [
+            44.97804199999973,
+            0.7281669999997575,
+            0.22391700000025594,
+            0.06608300000016243,
+            0.16879199999993943,
+            0.7507080000000315,
+            4.822541999999885,
+            345.159083,
+            340.16949999999997,
+            8.255999999999858,
+            0.12337500000012369,
+            0.21958300000005693,
+            0.2132090000000062,
+            0.141208000000006,
+            0.07245800000009694,
+            0.11841699999968114,
+            0.11374999999998181,
+            0.15291600000000471,
+            0.14949999999998909,
+            0.08466600000019753,
+            0.20604199999979755,
+            0.14370800000006057,
+            0.08354099999996834,
+            0.10437500000034561,
+            0.11724999999978536,
+            0.08558300000004238,
+            0.08333300000003874,
+            0.3269170000003214,
+            0.12087499999961437,
+            0.24370900000030815,
+            0.5161250000001019,
+            0.1432089999998425,
+            0.37045799999941664
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.198463,
+            "p95": 12.107775,
+            "p99": 20.774911
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 221.644,
+      "totalRss": 1201756096,
+      "rpcMs": {
+        "p50": 0.7557500000002619,
+        "p95": 3.6240000000016153,
+        "p99": 7.0260830000006536
+      }
+    },
+    {
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 12,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 5,
+      "elapsedMs": 3117.8475419999995,
+      "resources": [
+        {
+          "identity": {
+            "pid": 10502,
+            "token": "837de715-c7cc-4d01-bbad-e2a1f8189b51",
+            "start": "1794771381000"
+          },
+          "generation": "5",
+          "at": 1794771397619,
+          "cpu": {
+            "user": 1342424,
+            "system": 236269
+          },
+          "usage": {
+            "userCPUTime": 1342425,
+            "systemCPUTime": 236281,
+            "maxRSS": 376480,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 24772,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 290,
+            "ipcReceived": 302,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 1294,
+            "involuntaryContextSwitches": 6300
+          },
+          "rss": 314755776,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.329535,
+            "p95": 12.050431,
+            "p99": 12.066815
+          },
+          "role": "pi",
+          "cpuMs": 16.698,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11399,
+            "token": "4301d3be-5308-4ae7-a34e-6c9f435b333d",
+            "start": "1794771383000"
+          },
+          "generation": "5",
+          "at": 1794771397652,
+          "cpu": {
+            "user": 900631,
+            "system": 119887
+          },
+          "usage": {
+            "userCPUTime": 900633,
+            "systemCPUTime": 119894,
+            "maxRSS": 260416,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 17014,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 11,
+            "involuntaryContextSwitches": 4425
+          },
+          "rss": 110936576,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.247615,
+            "p95": 12.066815,
+            "p99": 12.492799
+          },
+          "role": "worker",
+          "cpuMs": 10.705,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11760,
+            "token": "abe182bf-d271-450e-b52a-341aa411ed77",
+            "start": "1794771383000"
+          },
+          "generation": "5",
+          "at": 1794771397700,
+          "cpu": {
+            "user": 120915,
+            "system": 43835
+          },
+          "usage": {
+            "userCPUTime": 120916,
+            "systemCPUTime": 43837,
+            "maxRSS": 83344,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5408,
+            "majorPageFault": 87,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 3202
+          },
+          "rss": 29941696,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.190271,
+            "p95": 12.099583,
+            "p99": 12.730367
+          },
+          "role": "runner",
+          "cpuMs": 18.339,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11810,
+            "token": "c08939d9-f991-4a6d-87f7-ecc023eb6600",
+            "start": "1794771383000"
+          },
+          "generation": "5",
+          "at": 1794771397771,
+          "cpu": {
+            "user": 105532,
+            "system": 42658
+          },
+          "usage": {
+            "userCPUTime": 105533,
+            "systemCPUTime": 42661,
+            "maxRSS": 73456,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4865,
+            "majorPageFault": 76,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 3149
+          },
+          "rss": 25223040,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.304959,
+            "p95": 12.050431,
+            "p99": 12.328959
+          },
+          "role": "command",
+          "cpuMs": 16.613,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11860,
+            "token": "16fa2308-495e-4a83-adc9-f9d7f7c95ee2",
+            "start": "1794771383000"
+          },
+          "generation": "5",
+          "at": 1794771397818,
+          "cpu": {
+            "user": 104485,
+            "system": 43372
+          },
+          "usage": {
+            "userCPUTime": 104486,
+            "systemCPUTime": 43375,
+            "maxRSS": 72992,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4805,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 3153
+          },
+          "rss": 24894528,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.329535,
+            "p95": 12.050431,
+            "p99": 12.566527
+          },
+          "role": "legacy-command",
+          "cpuMs": 16.019,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11867,
+            "token": "e3cf2d66-a830-4360-85ad-7382b0225b4f",
+            "start": "1794771383000"
+          },
+          "generation": "5",
+          "at": 1794771397820,
+          "cpu": {
+            "user": 101485,
+            "system": 38377
+          },
+          "usage": {
+            "userCPUTime": 101486,
+            "systemCPUTime": 38381,
+            "maxRSS": 73920,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4878,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 3151
+          },
+          "rss": 26172608,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.165695,
+            "p95": 12.066815,
+            "p99": 12.484607
+          },
+          "role": "legacy-command",
+          "cpuMs": 14.916,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14264,
+            "token": "d915dd3b-8777-48ac-b802-717fd7fe0d2d",
+            "start": "1794771389000"
+          },
+          "generation": "5",
+          "at": 1794771397834,
+          "cpu": {
+            "user": 1075890,
+            "system": 156087
+          },
+          "usage": {
+            "userCPUTime": 1075891,
+            "systemCPUTime": 156092,
+            "maxRSS": 302528,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19801,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2897
+          },
+          "rss": 247965248,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.517951,
+            "p95": 12.066815,
+            "p99": 12.722175
+          },
+          "role": "pi",
+          "cpuMs": 15.257,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14541,
+            "token": "646e38e3-3f3b-4151-b54d-60beee28f912",
+            "start": "1794771390000"
+          },
+          "generation": "5",
+          "at": 1794771397706,
+          "cpu": {
+            "user": 1069472,
+            "system": 153127
+          },
+          "usage": {
+            "userCPUTime": 1069473,
+            "systemCPUTime": 153134,
+            "maxRSS": 290448,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19035,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2671
+          },
+          "rss": 238919296,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.345919,
+            "p95": 12.050431,
+            "p99": 12.402687
+          },
+          "role": "pi",
+          "cpuMs": 13.012,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14867,
+            "token": "09c208b6-685f-4816-ba9b-a2c553658424",
+            "start": "1794771390000"
+          },
+          "generation": "5",
+          "at": 1794771397821,
+          "cpu": {
+            "user": 1078427,
+            "system": 155280
+          },
+          "usage": {
+            "userCPUTime": 1078429,
+            "systemCPUTime": 155286,
+            "maxRSS": 312976,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20453,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 1,
+            "involuntaryContextSwitches": 2546
+          },
+          "rss": 258599040,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.214847,
+            "p95": 12.050431,
+            "p99": 12.099583
+          },
+          "role": "pi",
+          "cpuMs": 12.579,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 15249,
+            "token": "7666467b-93a5-436a-ac2a-c9eaba0228ca",
+            "start": "1794771391000"
+          },
+          "generation": "5",
+          "at": 1794771397697,
+          "cpu": {
+            "user": 1075250,
+            "system": 155097
+          },
+          "usage": {
+            "userCPUTime": 1075252,
+            "systemCPUTime": 155104,
+            "maxRSS": 294352,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19262,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 3,
+            "involuntaryContextSwitches": 2371
+          },
+          "rss": 242213568,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.378687,
+            "p95": 12.058623,
+            "p99": 12.402687
+          },
+          "role": "pi",
+          "cpuMs": 17.584,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9772,
+            "token": "2274dbba-99c1-48a9-8a85-24ab138e7666",
+            "start": "1794771379000"
+          },
+          "generation": "5",
+          "at": 1794771397623,
+          "cpu": {
+            "user": 210016,
+            "system": 50563
+          },
+          "usage": {
+            "userCPUTime": 210017,
+            "systemCPUTime": 50567,
+            "maxRSS": 137424,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8798,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 30,
+            "ipcReceived": 35,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 8,
+            "involuntaryContextSwitches": 3884
+          },
+          "rss": 71585856,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.370495,
+            "p95": 12.050431,
+            "p99": 12.312575
+          },
+          "role": "guardian",
+          "cpuMs": 10.858,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9815,
+            "token": "c5c1e25f-dea8-4710-be7b-d5c000d8485a",
+            "start": "1794771379000"
+          },
+          "generation": "5",
+          "at": 1794771397684,
+          "cpu": {
+            "user": 2187251,
+            "system": 436503
+          },
+          "usage": {
+            "userCPUTime": 2187253,
+            "systemCPUTime": 436514,
+            "maxRSS": 578752,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 37291,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 296,
+            "ipcReceived": 395,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2227,
+            "involuntaryContextSwitches": 8738
+          },
+          "rss": 502871552,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.255807,
+            "p95": 12.132351,
+            "p99": 14.598143
+          },
+          "role": "server",
+          "cpuMs": 125.346,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 14,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 11,
+          "activeQueries": 15,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 33,
+        "queryCount": 44,
+        "cacheBytes": 63810,
+        "cacheEntries": 20,
+        "queryDurationMs": [
+          0.3691670000002887,
+          0.05608299999994415,
+          0.11404200000015408,
+          0.10045799999988958,
+          0.5695000000000618,
+          0.02608299999974406,
+          0.058083999999780644,
+          0.013166999999612017,
+          0.18729199999961565,
+          0.017749999999978172,
+          0.014957999999751337,
+          0.028084000000035303,
+          0.10474999999996726,
+          0.10329200000023775,
+          0.150749999999789,
+          0.07362499999999272,
+          0.040582999999969616,
+          0.0729999999998654,
+          0.19883299999992232,
+          0.03683299999966039,
+          0.09237499999971988,
+          0.05104200000005221,
+          0.024999999999636202,
+          0.2099580000003698,
+          0.26662499999929423,
+          0.13574999999946158,
+          0.07045800000014424,
+          0.12070899999980611,
+          0.059834000000591914,
+          0.129917000000205,
+          0.05687500000021828,
+          0.05179099999986647,
+          0.10958299999947485,
+          0.06383400000049733,
+          0.05799999999908323,
+          0.02991699999984121,
+          0.12770799999998417,
+          0.07283299999835435,
+          0.039416999999957625,
+          0.11958299999969313,
+          0.09470899999905669,
+          0.18250000000080036,
+          0.04874999999992724,
+          0.028374999999869033
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 11,
+          "completed": 67,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.045249999999668944,
+            0.01670799999965311,
+            0.01275000000032378,
+            0.007833000000118773,
+            0.009750000000167347,
+            0.015750000000025466,
+            0.009374999999636202,
+            0.019750000000385626,
+            340.07837500000005,
+            7.260499999999865,
+            0.012917000000015832,
+            0.06466599999976097,
+            0.011083999999755179,
+            0.0038749999998799467,
+            0.00966599999992468,
+            0.011458999999831576,
+            0.013832999999976892,
+            0.06612499999982901,
+            0.0038749999998799467,
+            0.006083000000216998,
+            0.006124999999883585,
+            0.006375000000389264,
+            0.017915999999786436,
+            0.007708000000093307,
+            0.06424999999990177,
+            0.007749999999759893,
+            0.00670799999988958,
+            0.013084000000162632,
+            0.02033300000039162,
+            0.0070420000001831795,
+            0.14750000000003638,
+            0.0056670000003578025,
+            0.047999999999774445,
+            0.007750000000669388,
+            0.002500000000509317,
+            0.0015829999993002275,
+            0.0015419999999721767,
+            0.0048749999987194315,
+            0.005708000000595348,
+            0.0023339999988820637,
+            0.00370900000052643,
+            0.01004099999954633,
+            0.004750000000058208,
+            0.0026669999988371274,
+            0.0023339999988820637,
+            0.0017920000009326031,
+            0.007499999999708962,
+            0.0034159999995608814,
+            0.007082999998601736,
+            0.011459000001195818,
+            0.006708000000799075,
+            0.0035410000000410946,
+            0.006292000000030384,
+            0.0027500000014697434,
+            0.01262499999938882,
+            0.005542000000787084,
+            0.006624999999985448,
+            0.008374999999432475,
+            0.003457999999227468,
+            0.002207999999882304,
+            0.002375000000029104,
+            0.005917000000408734,
+            0.005125000001498847,
+            0.02125000000160071,
+            0.0032499999997526174,
+            0.0059999999994033715,
+            0.01391700000021956
+          ],
+          "readMs": [
+            44.97804199999973,
+            0.7281669999997575,
+            0.22391700000025594,
+            0.06608300000016243,
+            0.16879199999993943,
+            0.7507080000000315,
+            4.822541999999885,
+            345.159083,
+            340.16949999999997,
+            8.255999999999858,
+            0.12337500000012369,
+            0.21958300000005693,
+            0.2132090000000062,
+            0.141208000000006,
+            0.07245800000009694,
+            0.11841699999968114,
+            0.11374999999998181,
+            0.15291600000000471,
+            0.14949999999998909,
+            0.08466600000019753,
+            0.20604199999979755,
+            0.14370800000006057,
+            0.08354099999996834,
+            0.10437500000034561,
+            0.11724999999978536,
+            0.08558300000004238,
+            0.08333300000003874,
+            0.3269170000003214,
+            0.12087499999961437,
+            0.24370900000030815,
+            0.5161250000001019,
+            0.1432089999998425,
+            0.37045799999941664,
+            0.17400000000088767,
+            0.06079200000021956,
+            0.1614579999986745,
+            0.03854200000023411,
+            0.04966699999931734,
+            0.14608299999963492,
+            0.09812499999861757,
+            0.07749999999941792,
+            0.135707999999795,
+            0.052832999999736785,
+            0.13958400000046822,
+            0.040791999999783,
+            0.11083400000097754,
+            0.15200000000004366,
+            0.07345799999893643,
+            0.0821669999986625,
+            0.14724999999998545,
+            0.05333299999983865,
+            0.15837500000088767,
+            0.06550000000061118,
+            0.04033300000082818,
+            0.21337499999935972,
+            0.11158400000022084,
+            0.08845799999835435,
+            0.15941700000075798,
+            0.053958000000420725,
+            0.14875000000029104,
+            0.08133300000008603,
+            0.13566700000046694,
+            0.26379200000155834,
+            0.1316660000011325,
+            0.06799999999930151,
+            0.06841699999858974,
+            0.14104199999928824
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.231231,
+            "p95": 12.075007,
+            "p99": 16.572415
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 287.92600000000004,
+      "totalRss": 2094078784,
+      "rpcMs": {
+        "p50": 0.46195799999986775,
+        "p95": 2.160041999999521,
+        "p99": 2.1692500000008295
+      }
+    },
+    {
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 154,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 10,
+      "elapsedMs": 60137.88929199999,
+      "resources": [
+        {
+          "identity": {
+            "pid": 10502,
+            "token": "837de715-c7cc-4d01-bbad-e2a1f8189b51",
+            "start": "1794771381000"
+          },
+          "generation": "10",
+          "at": 1794771464590,
+          "cpu": {
+            "user": 1492472,
+            "system": 353801
+          },
+          "usage": {
+            "userCPUTime": 1492474,
+            "systemCPUTime": 353808,
+            "maxRSS": 383856,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 25367,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 357,
+            "ipcReceived": 369,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 1301,
+            "involuntaryContextSwitches": 19753
+          },
+          "rss": 322358144,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.239423,
+            "p95": 12.042239,
+            "p99": 12.148735
+          },
+          "role": "pi",
+          "cpuMs": 241.374,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11399,
+            "token": "4301d3be-5308-4ae7-a34e-6c9f435b333d",
+            "start": "1794771383000"
+          },
+          "generation": "10",
+          "at": 1794771464633,
+          "cpu": {
+            "user": 985369,
+            "system": 217666
+          },
+          "usage": {
+            "userCPUTime": 985370,
+            "systemCPUTime": 217677,
+            "maxRSS": 260416,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 17117,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 11,
+            "involuntaryContextSwitches": 17298
+          },
+          "rss": 112673536,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.313151,
+            "p95": 12.042239,
+            "p99": 12.156927
+          },
+          "role": "worker",
+          "cpuMs": 164.568,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11760,
+            "token": "abe182bf-d271-450e-b52a-341aa411ed77",
+            "start": "1794771383000"
+          },
+          "generation": "10",
+          "at": 1794771464655,
+          "cpu": {
+            "user": 314245,
+            "system": 153174
+          },
+          "usage": {
+            "userCPUTime": 314247,
+            "systemCPUTime": 153178,
+            "maxRSS": 86944,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5632,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 18,
+            "involuntaryContextSwitches": 18293
+          },
+          "rss": 33497088,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.149311,
+            "p95": 12.050431,
+            "p99": 12.345343
+          },
+          "role": "runner",
+          "cpuMs": 268.053,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11810,
+            "token": "c08939d9-f991-4a6d-87f7-ecc023eb6600",
+            "start": "1794771383000"
+          },
+          "generation": "10",
+          "at": 1794771464479,
+          "cpu": {
+            "user": 223955,
+            "system": 153816
+          },
+          "usage": {
+            "userCPUTime": 223957,
+            "systemCPUTime": 153818,
+            "maxRSS": 78848,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5317,
+            "majorPageFault": 82,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2,
+            "involuntaryContextSwitches": 18113
+          },
+          "rss": 29974912,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.149311,
+            "p95": 12.042239,
+            "p99": 12.320767
+          },
+          "role": "command",
+          "cpuMs": 202.275,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11860,
+            "token": "16fa2308-495e-4a83-adc9-f9d7f7c95ee2",
+            "start": "1794771383000"
+          },
+          "generation": "10",
+          "at": 1794771464552,
+          "cpu": {
+            "user": 223020,
+            "system": 148324
+          },
+          "usage": {
+            "userCPUTime": 223021,
+            "systemCPUTime": 148326,
+            "maxRSS": 78368,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5238,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 8,
+            "involuntaryContextSwitches": 18167
+          },
+          "rss": 29449920,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.132927,
+            "p95": 12.042239,
+            "p99": 12.222463
+          },
+          "role": "legacy-command",
+          "cpuMs": 197.279,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 11867,
+            "token": "e3cf2d66-a830-4360-85ad-7382b0225b4f",
+            "start": "1794771383000"
+          },
+          "generation": "10",
+          "at": 1794771464544,
+          "cpu": {
+            "user": 219419,
+            "system": 144542
+          },
+          "usage": {
+            "userCPUTime": 219420,
+            "systemCPUTime": 144550,
+            "maxRSS": 79280,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5291,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 18151
+          },
+          "rss": 30416640,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.141119,
+            "p95": 12.050431,
+            "p99": 12.328959
+          },
+          "role": "legacy-command",
+          "cpuMs": 198.406,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14264,
+            "token": "d915dd3b-8777-48ac-b802-717fd7fe0d2d",
+            "start": "1794771389000"
+          },
+          "generation": "10",
+          "at": 1794771464552,
+          "cpu": {
+            "user": 1204669,
+            "system": 263367
+          },
+          "usage": {
+            "userCPUTime": 1204670,
+            "systemCPUTime": 263374,
+            "maxRSS": 308448,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20305,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 15896
+          },
+          "rss": 254109568,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.280383,
+            "p95": 12.042239,
+            "p99": 12.124159
+          },
+          "role": "pi",
+          "cpuMs": 211.126,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14541,
+            "token": "646e38e3-3f3b-4151-b54d-60beee28f912",
+            "start": "1794771390000"
+          },
+          "generation": "10",
+          "at": 1794771464685,
+          "cpu": {
+            "user": 1254319,
+            "system": 269828
+          },
+          "usage": {
+            "userCPUTime": 1254321,
+            "systemCPUTime": 269834,
+            "maxRSS": 309456,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20367,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 4,
+            "involuntaryContextSwitches": 15903
+          },
+          "rss": 259207104,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.247615,
+            "p95": 12.042239,
+            "p99": 12.140543
+          },
+          "role": "pi",
+          "cpuMs": 278.09,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 14867,
+            "token": "09c208b6-685f-4816-ba9b-a2c553658424",
+            "start": "1794771390000"
+          },
+          "generation": "10",
+          "at": 1794771464549,
+          "cpu": {
+            "user": 1204471,
+            "system": 260617
+          },
+          "usage": {
+            "userCPUTime": 1204473,
+            "systemCPUTime": 260623,
+            "maxRSS": 317344,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20861,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 8,
+            "involuntaryContextSwitches": 15571
+          },
+          "rss": 263137600,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.272191,
+            "p95": 12.042239,
+            "p99": 12.132351
+          },
+          "role": "pi",
+          "cpuMs": 208.718,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 15249,
+            "token": "7666467b-93a5-436a-ac2a-c9eaba0228ca",
+            "start": "1794771391000"
+          },
+          "generation": "10",
+          "at": 1794771464685,
+          "cpu": {
+            "user": 1261541,
+            "system": 270100
+          },
+          "usage": {
+            "userCPUTime": 1261579,
+            "systemCPUTime": 270107,
+            "maxRSS": 311664,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20488,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 13,
+            "involuntaryContextSwitches": 15501
+          },
+          "rss": 259683008,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.304959,
+            "p95": 12.042239,
+            "p99": 12.255231
+          },
+          "role": "pi",
+          "cpuMs": 274.518,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 17822,
+            "token": "3b83fbd9-7d77-4289-8c04-eaa670c50cf6",
+            "start": "1794771397000"
+          },
+          "generation": "10",
+          "at": 1794771464504,
+          "cpu": {
+            "user": 1236680,
+            "system": 267202
+          },
+          "usage": {
+            "userCPUTime": 1236682,
+            "systemCPUTime": 267211,
+            "maxRSS": 315472,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20634,
+            "majorPageFault": 179,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 14582
+          },
+          "rss": 260711552,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.247615,
+            "p95": 12.042239,
+            "p99": 12.132351
+          },
+          "role": "pi",
+          "cpuMs": 213.873,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 18317,
+            "token": "bfe39742-bfed-4fdb-a9f2-9884be370abf",
+            "start": "1794771398000"
+          },
+          "generation": "10",
+          "at": 1794771464682,
+          "cpu": {
+            "user": 1233167,
+            "system": 262835
+          },
+          "usage": {
+            "userCPUTime": 1233169,
+            "systemCPUTime": 262842,
+            "maxRSS": 322864,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 21175,
+            "majorPageFault": 93,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 3,
+            "involuntaryContextSwitches": 14403
+          },
+          "rss": 269099072,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.239423,
+            "p95": 12.042239,
+            "p99": 12.156927
+          },
+          "role": "pi",
+          "cpuMs": 210.006,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 18711,
+            "token": "bffdbe03-afb6-417c-8549-17f36f8ac8ff",
+            "start": "1794771399000"
+          },
+          "generation": "10",
+          "at": 1794771464610,
+          "cpu": {
+            "user": 1234022,
+            "system": 260591
+          },
+          "usage": {
+            "userCPUTime": 1234023,
+            "systemCPUTime": 260596,
+            "maxRSS": 323504,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 21229,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 14051
+          },
+          "rss": 269609600,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.263999,
+            "p95": 12.042239,
+            "p99": 12.165119
+          },
+          "role": "pi",
+          "cpuMs": 209.046,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19108,
+            "token": "179b03c7-5c1b-4a1d-983c-3d1c1a3e746e",
+            "start": "1794771400000"
+          },
+          "generation": "10",
+          "at": 1794771464546,
+          "cpu": {
+            "user": 1237183,
+            "system": 269640
+          },
+          "usage": {
+            "userCPUTime": 1237184,
+            "systemCPUTime": 269647,
+            "maxRSS": 319488,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20978,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 13,
+            "involuntaryContextSwitches": 14064
+          },
+          "rss": 266446464,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.288575,
+            "p95": 12.042239,
+            "p99": 12.230655
+          },
+          "role": "pi",
+          "cpuMs": 211.048,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19552,
+            "token": "f674cf93-7de9-44fe-8358-b9fce786a425",
+            "start": "1794771401000"
+          },
+          "generation": "10",
+          "at": 1794771464735,
+          "cpu": {
+            "user": 1303356,
+            "system": 276840
+          },
+          "usage": {
+            "userCPUTime": 1303358,
+            "systemCPUTime": 276846,
+            "maxRSS": 326976,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 21441,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 15,
+            "ipcReceived": 19,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 13958
+          },
+          "rss": 277098176,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.263999,
+            "p95": 12.042239,
+            "p99": 12.214271
+          },
+          "role": "pi",
+          "cpuMs": 278.173,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9772,
+            "token": "2274dbba-99c1-48a9-8a85-24ab138e7666",
+            "start": "1794771379000"
+          },
+          "generation": "10",
+          "at": 1794771464609,
+          "cpu": {
+            "user": 301623,
+            "system": 142839
+          },
+          "usage": {
+            "userCPUTime": 301625,
+            "systemCPUTime": 142842,
+            "maxRSS": 137952,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8831,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 97,
+            "ipcReceived": 102,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 17021
+          },
+          "rss": 72126528,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.280383,
+            "p95": 12.042239,
+            "p99": 12.189695
+          },
+          "role": "guardian",
+          "cpuMs": 165.617,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 9815,
+            "token": "c5c1e25f-dea8-4710-be7b-d5c000d8485a",
+            "start": "1794771379000"
+          },
+          "generation": "10",
+          "at": 1794771464652,
+          "cpu": {
+            "user": 2795440,
+            "system": 809323
+          },
+          "usage": {
+            "userCPUTime": 2795443,
+            "systemCPUTime": 809331,
+            "maxRSS": 581680,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 38077,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1029,
+            "ipcReceived": 1406,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2230,
+            "involuntaryContextSwitches": 27455
+          },
+          "rss": 505411072,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.149311,
+            "p95": 12.050431,
+            "p99": 13.033471
+          },
+          "role": "server",
+          "cpuMs": 875.279,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 24,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 21,
+          "activeQueries": 25,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 55,
+        "queryCount": 64,
+        "cacheBytes": 91158,
+        "cacheEntries": 32,
+        "queryDurationMs": [
+          0.3691670000002887,
+          0.05608299999994415,
+          0.11404200000015408,
+          0.10045799999988958,
+          0.5695000000000618,
+          0.02608299999974406,
+          0.058083999999780644,
+          0.013166999999612017,
+          0.18729199999961565,
+          0.017749999999978172,
+          0.014957999999751337,
+          0.028084000000035303,
+          0.10474999999996726,
+          0.10329200000023775,
+          0.150749999999789,
+          0.07362499999999272,
+          0.040582999999969616,
+          0.0729999999998654,
+          0.19883299999992232,
+          0.03683299999966039,
+          0.09237499999971988,
+          0.05104200000005221,
+          0.024999999999636202,
+          0.2099580000003698,
+          0.26662499999929423,
+          0.13574999999946158,
+          0.07045800000014424,
+          0.12070899999980611,
+          0.059834000000591914,
+          0.129917000000205,
+          0.05687500000021828,
+          0.05179099999986647,
+          0.10958299999947485,
+          0.06383400000049733,
+          0.05799999999908323,
+          0.02991699999984121,
+          0.12770799999998417,
+          0.07283299999835435,
+          0.039416999999957625,
+          0.11958299999969313,
+          0.09470899999905669,
+          0.18250000000080036,
+          0.04874999999992724,
+          0.028374999999869033,
+          0.0944999999992433,
+          0.07458299999780138,
+          0.05345799999849987,
+          0.029625000002852175,
+          0.13024999999834108,
+          0.0912499999976717,
+          0.04975000000194996,
+          0.03054100000008475,
+          0.12295799999992596,
+          0.09354199999870616,
+          0.058249999998224666,
+          0.0556670000005397,
+          0.1369589999994787,
+          0.06937499999912689,
+          0.05550000000221189,
+          0.030833000000711763,
+          0.12658300000111922,
+          0.07466599999679602,
+          0.07079199999861885,
+          0.03258300000015879
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 21,
+          "completed": 109,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.045249999999668944,
+            0.01670799999965311,
+            0.01275000000032378,
+            0.007833000000118773,
+            0.009750000000167347,
+            0.015750000000025466,
+            0.009374999999636202,
+            0.019750000000385626,
+            340.07837500000005,
+            7.260499999999865,
+            0.012917000000015832,
+            0.06466599999976097,
+            0.011083999999755179,
+            0.0038749999998799467,
+            0.00966599999992468,
+            0.011458999999831576,
+            0.013832999999976892,
+            0.06612499999982901,
+            0.0038749999998799467,
+            0.006083000000216998,
+            0.006124999999883585,
+            0.006375000000389264,
+            0.017915999999786436,
+            0.007708000000093307,
+            0.06424999999990177,
+            0.007749999999759893,
+            0.00670799999988958,
+            0.013084000000162632,
+            0.02033300000039162,
+            0.0070420000001831795,
+            0.14750000000003638,
+            0.0056670000003578025,
+            0.047999999999774445,
+            0.007750000000669388,
+            0.002500000000509317,
+            0.0015829999993002275,
+            0.0015419999999721767,
+            0.0048749999987194315,
+            0.005708000000595348,
+            0.0023339999988820637,
+            0.00370900000052643,
+            0.01004099999954633,
+            0.004750000000058208,
+            0.0026669999988371274,
+            0.0023339999988820637,
+            0.0017920000009326031,
+            0.007499999999708962,
+            0.0034159999995608814,
+            0.007082999998601736,
+            0.011459000001195818,
+            0.006708000000799075,
+            0.0035410000000410946,
+            0.006292000000030384,
+            0.0027500000014697434,
+            0.01262499999938882,
+            0.005542000000787084,
+            0.006624999999985448,
+            0.008374999999432475,
+            0.003457999999227468,
+            0.002207999999882304,
+            0.002375000000029104,
+            0.005917000000408734,
+            0.005125000001498847,
+            0.02125000000160071,
+            0.0032499999997526174,
+            0.0059999999994033715,
+            0.01391700000021956,
+            0.007416000000375789,
+            0.0024999999986903276,
+            0.00166700000045239,
+            0.001291000000492204,
+            0.0011660000018309802,
+            0.005499999999301508,
+            0.002375000000029104,
+            0.0030829999996058177,
+            0.013083000001643086,
+            0.006666000001132488,
+            0.006750000000465661,
+            0.003749999999854481,
+            0.0021670000023732428,
+            0.007541999999375548,
+            0.009957999998732703,
+            0.007582999998703599,
+            0.009416000000783242,
+            0.003416999999899417,
+            0.003833000002487097,
+            0.011832999996840954,
+            0.007333000001381151,
+            0.007999999997991836,
+            0.006582999998499872,
+            0.006666999997833045,
+            0.02449999999953434,
+            0.004000000000814907,
+            0.002082999999402091,
+            0.0077089999977033585,
+            0.006667000001471024,
+            0.009291999998822575,
+            0.007665999997698236,
+            0.006750000000465661,
+            0.010916999999608379,
+            0.0035829999978886917,
+            0.0025409999980183784,
+            0.0025830000013229437,
+            0.007083000000420725,
+            0.016042000002926216,
+            0.006375000000844011,
+            0.009125000000494765,
+            0.008875000003172318,
+            0.05904200000077253
+          ],
+          "readMs": [
+            44.97804199999973,
+            0.7281669999997575,
+            0.22391700000025594,
+            0.06608300000016243,
+            0.16879199999993943,
+            0.7507080000000315,
+            4.822541999999885,
+            345.159083,
+            340.16949999999997,
+            8.255999999999858,
+            0.12337500000012369,
+            0.21958300000005693,
+            0.2132090000000062,
+            0.141208000000006,
+            0.07245800000009694,
+            0.11841699999968114,
+            0.11374999999998181,
+            0.15291600000000471,
+            0.14949999999998909,
+            0.08466600000019753,
+            0.20604199999979755,
+            0.14370800000006057,
+            0.08354099999996834,
+            0.10437500000034561,
+            0.11724999999978536,
+            0.08558300000004238,
+            0.08333300000003874,
+            0.3269170000003214,
+            0.12087499999961437,
+            0.24370900000030815,
+            0.5161250000001019,
+            0.1432089999998425,
+            0.37045799999941664,
+            0.17400000000088767,
+            0.06079200000021956,
+            0.1614579999986745,
+            0.03854200000023411,
+            0.04966699999931734,
+            0.14608299999963492,
+            0.09812499999861757,
+            0.07749999999941792,
+            0.135707999999795,
+            0.052832999999736785,
+            0.13958400000046822,
+            0.040791999999783,
+            0.11083400000097754,
+            0.15200000000004366,
+            0.07345799999893643,
+            0.0821669999986625,
+            0.14724999999998545,
+            0.05333299999983865,
+            0.15837500000088767,
+            0.06550000000061118,
+            0.04033300000082818,
+            0.21337499999935972,
+            0.11158400000022084,
+            0.08845799999835435,
+            0.15941700000075798,
+            0.053958000000420725,
+            0.14875000000029104,
+            0.08133300000008603,
+            0.13566700000046694,
+            0.26379200000155834,
+            0.1316660000011325,
+            0.06799999999930151,
+            0.06841699999858974,
+            0.14104199999928824,
+            0.1640000000006694,
+            0.05316599999787286,
+            0.12520800000129384,
+            0.058291000001190696,
+            0.10250000000087311,
+            0.13816600000063772,
+            0.06733399999939138,
+            0.07416699999885168,
+            0.1522079999995185,
+            0.0788749999992433,
+            0.18408300000010058,
+            0.05995899999834364,
+            0.12575000000288128,
+            0.13191699999879347,
+            0.08820799999739393,
+            0.08445799999753945,
+            0.13637500000186265,
+            0.04754200000024866,
+            0.1554580000010901,
+            0.07549999999901047,
+            0.15241600000081235,
+            0.15283300000010058,
+            0.1184579999971902,
+            0.13387499999953434,
+            0.18062500000087311,
+            0.07012500000200816,
+            0.21337499999935972,
+            0.0696669999997539,
+            0.11124999999810825,
+            0.16137499999967986,
+            0.08283299999675364,
+            0.11520799999925657,
+            0.1334999999999127,
+            0.05274999999892316,
+            0.15966599999956088,
+            0.04783300000053714,
+            0.12024999999994179,
+            0.16070899999976973,
+            0.182582999997976,
+            0.11245799999960582,
+            0.10754200000155834,
+            0.5572089999986929
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.198463,
+            "p95": 12.050431,
+            "p99": 13.574143
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 4407.448999999999,
+      "totalRss": 3515009984,
+      "rpcMs": {
+        "p50": 0.35808299999916926,
+        "p95": 0.9249170000039157,
+        "p99": 2.298458000001119
+      }
+    }
+  ],
+  "errors": ""
+}

@@ -1,11 +1,18 @@
 // Generated from packages/pi-better-subagents/assignment-projection.mjs. Do not edit directly.
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { readAssignmentWaits } from "./shared-assignment-observation.mjs";
 
 export const ASSIGNMENT_STATES = ["running", "waiting", "completed", "failed", "cancelled"];
+const observations = new AsyncLocalStorage();
+
+/** Bind an immutable observation to one read call, never to a supervision loop. */
+export function withAssignmentObservations(rows, read) {
+    return observations.run(new Map(rows.map(row => [row.meta.id, row.assignment])), read);
+}
 
 /** A projection revision is a content-addressed semantic token, not a clock. */
 export function projectAssignment(meta, processStatus, observation = { verified: true, waits: [] }) {
@@ -177,6 +184,7 @@ export function createAssignmentProjector(options = {}) {
     let prepared;
     const snapshots = new Map();
     const readSnapshot = (meta) => {
+        if (options.attempts) return options.attempts;
         const key = conversationKey(meta.sessionId, meta.cwd);
         if (!snapshots.has(key)) {
             prepared ??= prepareAttemptIndex(options);
@@ -184,7 +192,7 @@ export function createAssignmentProjector(options = {}) {
         }
         return snapshots.get(key);
     };
-    return (meta, processStatus = meta.status) => assignmentFromSnapshot(meta, processStatus, options,
+    return (meta, processStatus = meta.status) => observations.getStore()?.get(meta.id) ?? assignmentFromSnapshot(meta, processStatus, options,
         () => readSnapshot(meta));
 }
 
@@ -221,7 +229,7 @@ function assignmentFromSnapshot(meta, processStatus, options, readSnapshot) {
     const status = current.id === meta.id ? processStatus : current.status;
     const sessionId = current.operations?.conversationId ?? current.sessionId;
     const observation = options.observation ?? (sessionId && (current.assignment || current.operations || current.park)
-        ? readAssignmentWaits(options.coordinatorPath ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite"),
+        ? (options.observe ?? ((owner) => readAssignmentWaits(options.coordinatorPath ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite"), owner)))(
             { sessionId, workspace: current.operations?.workspace ?? current.cwd,
                 ...(current.assignment ? { assignmentId: current.assignment.assignmentId } : {}),
                 attemptIds: [...lineage.keys()], waitRefs: [...lineage.values()].flatMap((attempt) =>
@@ -232,6 +240,6 @@ function assignmentFromSnapshot(meta, processStatus, options, readSnapshot) {
     return projectAssignment(current, status, observation);
 }
 
-export function assignmentDiagnostic(assignment) {
-    return `Assignment ${assignment.state} r${assignment.revision}: ${assignment.reason} Process ${assignment.processStatus}; termination ${assignment.termination}. Evidence: ${assignment.evidence.join(", ")}`;
+export function assignmentDiagnostic(assignment, options = {}) {
+    return `Assignment ${assignment.state} r${assignment.revision}: ${assignment.reason} Process ${assignment.processStatus}; termination ${assignment.termination}.${options.includeEvidence === false ? "" : ` Evidence: ${assignment.evidence.join(", ")}`}`;
 }

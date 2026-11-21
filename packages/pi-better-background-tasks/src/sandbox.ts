@@ -214,7 +214,7 @@ export interface ForegroundSandboxPolicy {
   readonly denyWrite: readonly string[];
   /** Human-readable evidence for why `state` is what it is. */
   readonly reason: string;
-  readonly permissions?: Readonly<SandboxPermissions & { enabled: boolean }>;
+  readonly permissions?: Readonly<SandboxPermissions & { enabled: boolean; processAccess?: "off" | "read" }>;
   readonly policySource?: "background" | "main-legacy";
 }
 
@@ -320,6 +320,7 @@ function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"]
     projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
     outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
     storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+    ...(p.processAccess === undefined ? {} : { processAccess: p.processAccess as "off" | "read" }),
     ...(p.shell === undefined ? {} : { shell: p.shell as boolean }),
     ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds as number | null }),
   });
@@ -343,16 +344,18 @@ export function observeForegroundSandboxPolicy(pi: unknown): void {
     try {
       const published = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
       const hasBackground = published && Object.hasOwn(published, "background");
-      const policy = readPolicy(hasBackground ? published.background : data, hasBackground ? "Background tasks" : "Main");
-      if (hasBackground && !policy) throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
-      const access = (value: unknown): unknown => {
-        if (!value || typeof value !== "object") return undefined;
-        return (value as { permissions?: { processAccess?: unknown } }).permissions?.processAccess;
-      };
-      mirror.mainConfined = published?.state !== "disabled" && published?.state !== "inactive";
-      mirror.processAccess = access(data) === "read" && access(hasBackground ? published.background : data) === "read" ? "read" : "off";
-      if (policy) Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
-      if (policy) { mirror.policy = policy; mirror.error = undefined; }
+      const main = readPolicy(data);
+      const policy = hasBackground ? readPolicy(published.background, "Background tasks") : main;
+      if (hasBackground && (!main || !policy)) throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
+      if (!policy || !main) return;
+      const isOff = (scope: ForegroundSandboxPolicy) => scope.state === "disabled" || scope.state === "inactive";
+      const allowsRead = (scope: ForegroundSandboxPolicy) => scope.permissions !== undefined &&
+        (isOff(scope) || scope.permissions.processAccess === "read");
+      mirror.mainConfined = !isOff(main);
+      mirror.processAccess = allowsRead(main) && allowsRead(policy) ? "read" : "off";
+      Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
+      mirror.policy = policy;
+      mirror.error = undefined;
     } catch (error) {
       mirror.error = error as Error;
       mirror.processAccess = "off";
@@ -900,4 +903,11 @@ function blocked(plan: ForegroundSandboxPlan & { confined: true }, detail: strin
     },
     detail,
   );
+}
+
+/** Fixed server adapter clears only its own scope mirror before publishing another captured grant. */
+export function clearForegroundSandboxPolicy(pi: unknown): void {
+  observeForegroundSandboxPolicy(pi);
+  const events=eventBusOf(pi), mirror=events && mirrors.get(events);
+  if(mirror){mirror.policy=undefined;mirror.error=undefined;mirror.processAccess="off";mirror.mainConfined=false;}
 }

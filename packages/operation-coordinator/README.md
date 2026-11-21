@@ -11,8 +11,9 @@ tool execution, no model call, no provider transport and no permission decision.
 
 ## Requirements and configuration
 
-Assignment outcomes use storage schema 3, with transactional upgrades from
-schemas 1 and 2. `registerAssignment` captures immutable worker/recipient and
+Storage schema 4 gains nullable operation-to-attempt bindings in an additive
+upgrade. Older clients can still read and write the database; their new operations
+are unbound. `registerAssignment` captures immutable worker/recipient and
 attempt bindings before dispatch. `recordAssignmentOutcome` atomically commits
 the terminal decision, typed parent event, dispatch disarming and evidence-pin
 transfer. Published writer claims require independent exit proof; neither delivery
@@ -63,15 +64,73 @@ generation (`stale-generation`).
 
 ## Lifecycle contract
 
+### Server Cancellation (#759)
+
+`acceptTaskCancellation` stores the fixed `cancel_task` request in the existing
+coordinator database. An immediate transaction checks the operation's full owner,
+launch token, terminal revision and supervision host before accepting the intent.
+The owner and idempotency key identify the receipt. Identical retries return that
+receipt before checking current operation state; changed content raises
+`request-conflict`. `getTaskCancellation` reads the same receipt after reconnect.
+
+The additive `task_cancellation_requests` table implements the persisted-intent
+requirement from ADR 0023 without creating another operation or terminal authority.
+`recordTaskStopRequested` records the host's durable stop-file publication after
+acceptance. Neither state proves process exit, publishes a terminal outcome,
+changes waits or releases evidence and writer fences.
+
+The registered Background stop tool obtains authority from `ObservedWaitHost`'s
+actual tool context. The host refuses foreign ownership and a live legacy or
+unknown supervisor, drains local cancellation admission, and records a hashed,
+exact-request credential before handing cancellation to the server. Subsequent
+local stop calls refuse that managed task. Launch and wait supervision stay with
+their existing hosts. An owner string or socket access grants no authority.
+
+`acceptAuthorizedTaskCancellation` verifies the current management epoch, the
+task cancellation epoch and an opaque semantic revision in the same transaction
+as journal acceptance. Health timestamps do not change that revision. Accepted
+requests are looked up before epoch checks, so reconnecting clients recover the
+original receipt rather than submitting an old envelope in a new epoch.
+
+The fixed server adapter calls the canonical supervisor's stop implementation.
+Before a file or process action, the journal is durable. Recovery verifies the
+original launch token. An existing durable stop file is observed rather than
+replayed, because its process action may already have happened. Unverifiable
+identity records `outcome_unknown`, retaining existing fences. Terminal evidence
+uses the host's shared publication contract and commits with the request receipt
+through the existing coordinator terminal transaction. No callback receipt or
+wait interpretation is manufactured.
+
+The wire commands are `runtime_cancellation_status`, `runtime_cancel_task` and
+`runtime_query_cancellation`; they require hello and accept only the fixed
+credential-bearing schema. The tool displays its request identity and accepts
+`request_id` for reconnect retries. A timeout before submission is `not_accepted`;
+a lost response after submission is `outcome_unknown`. A durable accepted request
+without a result remains `accepted`, and must be queried with the same key.
+
 **Launch.** `registerOperation` records the launch intent and unique execution
 token before a runner starts. Re-registering the same launch is idempotent; a
-changed task id, launch token, owner or observer is refused, so a store cannot be
+changed task id, launch token, owner, observer or assignment attempt is refused, so a store cannot be
 used to prove ownership of a launch that was swapped underneath it.
 `recordSupervision` replaces the supervising host and reports observer health
 (`active`, `unmonitored`, `lost`) separately from the wait phase.
 A host that closes calls `releaseSupervision` with its exact host id; a newer
 takeover is left untouched, and running work becomes explicitly unmonitored for
 the next host.
+
+**Assignment cleanup (ADR [0025](../../docs/adr/0025-assignment-terminal-task-cleanup.md)).**
+Pass `assignmentAttemptId` when the launch comes from an exact registered worker
+attempt. The store checks the captured owner and refuses new launches after that
+assignment has a terminal outcome. An exact replay returns `created: false`;
+it does not admit another launch. Operations without the field, including
+existing operations at migration, remain unbound.
+`listAssignmentCleanupOperations(limit, afterOperationId?)` lists bound operations
+without a terminal revision whose assignment has a committed outcome. It returns
+at most 256 rows in ascending operation ID order. Use the last returned operation
+ID as the exclusive cursor and start each new sweep without a cursor. Parking,
+dependency links, and a shared conversation do not create obligations. Only a
+recorded operation terminal revision closes an obligation; a stop request or
+parent outcome receipt does not. The caller owns supervised stop and verification.
 
 **Registering a wait.** `registerWait` reads each dependency's current terminal
 revision *inside* its transaction, so a task that finished before registration is
@@ -132,6 +191,7 @@ dependency still resolves for interpretation.
 ```ts
 registerOperation / recordSupervision / releaseSupervision / recordTerminalOutcome
 getOperation / listOperations / listOperationEvidence
+listAssignmentCleanupOperations
 listRunningSupervisedBy / readDiscoveryClaim / tryClaimDiscovery / releaseDiscoveryClaim
 getChangeRevision
 

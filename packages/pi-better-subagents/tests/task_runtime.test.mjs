@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -42,6 +42,20 @@ function fixture(t, permissions = {}, fixtureParent = process.platform === 'win3
 }
 
 const supported = describeSandboxSupport().supported;
+
+test('a pinned worker bridge uses current permissions and protects its saved release', { skip: !supported }, t => {
+    const f = fixture(t);
+    const bridge = join(f.base, 'old-runtime', 'child-operations.ts');
+    mkdirSync(join(f.base, 'old-runtime')); writeFileSync(bridge, '');
+    const prepared = prepareTaskRuntime({root: f.project, controlDir: f.control,
+        tools: ['read', 'wait_for_operations'], permissions: {...parseTaskPolicy(f.policy).permissions, network: false, commands: false},
+        extensionPaths: [bridge], operationBridgePath: bridge});
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.policy.operationBridge, true);
+    assert.equal(prepared.policy.permissions.network, false);
+    assert.equal(prepared.policy.permissions.commands, false);
+    assert.ok(prepared.policy.denyWrite.some(path => bridge.startsWith(path + '/')));
+});
 
 test('standalone launch defaults allow credential maintenance but keep process inventory Off', { skip: !supported }, (t) => {
     const f = fixture(t);
@@ -237,6 +251,7 @@ test('SDK-loaded guarded tools confine writes and reject unclassified extension 
 });
 
 test('Process access activates the fixed inventory without general commands and stays immutable', { skip: !supported }, async (t) => {
+    const { observeOwnedProcess, executableDiagnostic } = await import('../../task-sandbox/test-support/owned-process.mjs');
     const f = fixture(t, { processAccess: 'read', commands: false, network: false,
         storedCredentials: process.platform === 'linux' ? 'read' : 'off' });
     f.policy.tools = ['process_list', 'bash'];
@@ -244,18 +259,17 @@ test('Process access activates the fixed inventory without general commands and 
     const name = 'pi-task-proc';
     const executable = join(f.project, name);
     copyFileSync('/bin/sleep', executable);
-    const owned = spawn(executable, ['60'], { stdio: 'ignore' });
-    t.after(async () => {
-        if (owned.pid && owned.exitCode === null && owned.signalCode === null) {
-            const closed = once(owned, 'close');
-            owned.kill('SIGKILL');
-            await closed;
-        }
-    });
+    const owned = spawn(executable, ['60'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const lifecycle = observeOwnedProcess(owned);
+    t.after(() => lifecycle.stop());
     await once(owned, 'spawn');
     const listed = await execute(session, 'process_list', { name, limit: 200 });
     const details = JSON.parse(listed.content.find((part) => part.type === 'text').text);
     assert.equal(details.scope, 'current-user');
+    const ownedRow = details.processes.find((row) => row.pid === owned.pid);
+    if (ownedRow?.name !== name) t.diagnostic(JSON.stringify({ fixture: lifecycle.diagnostic(), ownedRow,
+        source: executableDiagnostic('/bin/sleep'), executable: executableDiagnostic(executable),
+        helper: executableDiagnostic('/usr/bin/pgrep'), platform: process.platform, node: process.version }));
     assert.ok(details.processes.some((row) => row.pid === owned.pid && row.name === name), 'the confined inventory sees its owned fixture process');
     assert.ok(details.processes.every((row) => Object.keys(row).sort().join(',') === 'name,pid'));
     assert.equal(session.agent.state.tools.some((tool) => tool.name === 'bash'), false,
@@ -442,7 +456,7 @@ test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !s
 test('default Outside Write: caches work, sibling repos stay, controls and provenance stay unwritable', { skip: !supported || process.platform === 'win32' }, async (t) => {
     // A home outside every temp root: temp is always removable, so a fixture
     // home there would prove nothing about the home rules.
-    const f = fixture(t, { outsideProject: 'write' }, fileURLToPath(new URL('.', import.meta.url)));
+    const f = fixture(t, { outsideProject: 'write' }, homedir());
     const home = f.policy.home;
     const sibling = join(home, 'projects', 'other-repo');
     mkdirSync(join(home, '.cache'), { recursive: true });

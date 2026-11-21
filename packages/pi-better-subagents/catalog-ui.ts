@@ -6,8 +6,17 @@ import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-set
 import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
 
 type Theme = { fg(color: string, text: string): string; bg?(color: string, text: string): string; bold?(text: string): string; inverse?(text: string): string };
+type EditResult = { ok: boolean; message: string };
+type PendingEdit = EditResult | Promise<EditResult>;
+
+function settleEdit(result: PendingEdit, done: (result: EditResult) => void, failed: (error: unknown) => void) {
+    if (result instanceof Promise) void result.then(done, failed);
+    else done(result);
+}
 
 export interface CatalogEditor {
+    beginEdit?(id: string): void;
+    onChange?(changed: () => void): void;
     get(): OperationList;
     /** Available foreground models, used only when the session scope is empty. */
     models(): readonly string[];
@@ -16,12 +25,12 @@ export interface CatalogEditor {
     settings(): AgentSessionOverrides;
     change(id: string, key: AgentSettingKey, value: string | null): void;
     /** Skill exposure is edited through the definition save path, not session settings. */
-    changeSkills?(entry: OperationView, edit: SkillExposureEdit): { ok: boolean; message: string };
+    changeSkills?(entry: OperationView, edit: SkillExposureEdit): PendingEdit;
     /** Loaded Pi skill metadata for the checkbox picker. */
     discoverSkills?(): readonly DiscoveredSkill[];
-    save(id: string): { ok: boolean; message: string };
-    resetToBundled?(entry: OperationView): { ok: boolean; message: string };
-    resetDefinition?(entry: OperationView): { ok: boolean; message: string };
+    save(id: string): PendingEdit;
+    resetToBundled?(entry: OperationView): PendingEdit;
+    resetDefinition?(entry: OperationView): PendingEdit;
 }
 
 function stateLabel(entry: OperationView): string {
@@ -208,12 +217,13 @@ export function createCatalogComponent(
     const highlight = (text: string, width: number) => theme.bg?.("selectedBg", theme.bold?.(cell(text, width)) ?? cell(text, width)) ?? theme.fg("accent", text);
     function report(text: string, failed = false) { message = text; error = failed; requestRender(); }
     function refresh() { if (editor) catalog = editor.get(); }
+    editor?.onChange?.(() => { refresh(); requestRender(); });
     function save() {
         if (!editor || !selected()) return;
         try {
-            const result = editor.save(selected()!.id);
-            refresh();
-            report(result.message, !result.ok);
+            settleEdit(editor.save(selected()!.id), result => {
+                refresh(); report(result.message, !result.ok);
+            }, cause => report(String(cause), true));
         } catch (cause) { report(String(cause instanceof Error ? cause.message : cause), true); }
     }
     function canReset(entry: OperationView | undefined): boolean {
@@ -227,13 +237,14 @@ export function createCatalogComponent(
     function reset(entry = selected(), definition = false) {
         if (!entry || !(definition ? canResetDefinition(entry) : canReset(entry))) return;
         try {
-            const result = definition ? editor!.resetDefinition!(entry) : editor!.resetToBundled!(entry);
+            settleEdit(definition ? editor!.resetDefinition!(entry) : editor!.resetToBundled!(entry), result => {
             refresh();
             settingRow = 0;
             scroll = 0;
             resetPointerRows = [];
             resetPointerEntry = undefined;
             report(result.message, !result.ok);
+            }, cause => report(String(cause), true));
         } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
     }
     /** Selectable setting rows in display order; Reset is a row, not a save action. */
@@ -268,9 +279,10 @@ export function createCatalogComponent(
             apply(paths) {
                 if (!editor?.changeSkills) return { ok: false, message: "Skill editing is unavailable." };
                 try {
-                    const result = editor.changeSkills(current, paths.length === 0
+                    const pending = editor.changeSkills(current, paths.length === 0
                         ? { mode: "none" }
                         : { mode: "explicit", paths: [...paths] });
+                    const finish = (result: EditResult) => {
                     if (result.ok) {
                         refresh();
                         report(paths.length === 0
@@ -278,6 +290,8 @@ export function createCatalogComponent(
                             : result.message, false);
                     }
                     return { ok: result.ok, message: result.message };
+                    };
+                    return pending instanceof Promise ? pending.then(finish) : finish(pending);
                 } catch (cause) {
                     return { ok: false, message: cause instanceof Error ? cause.message : String(cause) };
                 }
@@ -308,10 +322,11 @@ export function createCatalogComponent(
         picker.onSelect = (item) => {
             if (item.value === "select") { openSkillPaths(current); return; }
             try {
-                const result = editor!.changeSkills!(current, item.value === "none" ? { mode: "none" } : { mode: "inherit" });
+                settleEdit(editor!.changeSkills!(current, item.value === "none" ? { mode: "none" } : { mode: "inherit" }), result => {
                 refresh();
                 picker = undefined;
                 report(result.message, !result.ok);
+                }, cause => report(String(cause), true));
             } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
         };
         const selectedIndex = skillChoiceIndex(current);
@@ -320,6 +335,7 @@ export function createCatalogComponent(
     function edit() {
         const current = selected();
         if (!current || !editor) return;
+        editor.beginEdit?.(current.id);
         const keys = settingKeys(current);
         const key = keys[settingRow];
         if (!key) { settingRow = 0; return; }
