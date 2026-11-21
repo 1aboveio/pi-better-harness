@@ -7,6 +7,16 @@ import { gzipSync } from "node:zlib";
 import { createServerArtifact, decodeServerArtifact, ownPackageDir, readStagedRuntime } from "../src/startup/artifact.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 
+test("Pi supplies the extension's TypeBox while the private runtime installs its own", () => {
+  const extension = JSON.parse(readFileSync(join(ownPackageDir, "package.json"), "utf8"));
+  const runtime = JSON.parse(readFileSync(join(ownPackageDir, "scripts/private-runtime/package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(ownPackageDir, "scripts/private-runtime/package-lock.json"), "utf8"));
+  assert.equal(extension.dependencies.typebox, undefined);
+  assert.equal(extension.peerDependencies.typebox, "*");
+  assert.match(runtime.dependencies.typebox, /^\d+\.\d+\.\d+$/);
+  assert.equal(lock.packages["node_modules/typebox"].version, runtime.dependencies.typebox);
+});
+
 function fixture(t: any) {
   const root = mkdtempSync(join(tmpdir(), "pi-artifact-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
