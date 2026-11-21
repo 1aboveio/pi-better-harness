@@ -328,13 +328,13 @@ function readText(path) {
     catch (error) {
         if (error.code === "ENOENT")
             return { missing: true };
-        return { missing: true, error: error instanceof Error ? error.message : String(error) };
+        return { missing: false, error: error instanceof Error ? error.message : String(error) };
     }
 }
 function readJsonRecord(path, problem) {
     const read = readText(path);
-    if (read.missing)
-        return { missing: true, error: read.error };
+    if (read.value === undefined)
+        return { missing: read.missing, error: read.error };
     let parsed;
     try {
         parsed = JSON.parse(read.value);
