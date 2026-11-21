@@ -4,6 +4,54 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.51.0] - 2026-11-22
+
+### Changed
+
+- Find related controls together in `/harness-settings` and `/subagents`. Subagent settings show help for the focused row, wrap long values in narrow terminals, and display the configured shortcuts for editing. (#876)
+- Choose Clone or Worktree for isolated subagent work and select **No limit** for the run timeout. Both workspace modes preserve files and partial results for recovery. (#875)
+- A Goal bound to an Outcome now checks its acceptance evidence and unfinished work before completing. Rush Todo stages keep their blockers until delivery evidence arrives. (#854, #873)
+- Bundle Subagents 0.37.0, Background Tasks 0.20.0, Goal 0.16.0 and Sandbox 0.15.1. Background Tasks and Subagents carry the Server 0.7.0 runtime.
+
+## [pi-better-subagents@0.37.0] - 2026-11-22
+
+### Added
+
+- Select Clone (default) or Worktree for isolated Git writers. Cleanup verifies that files and Git state can be recovered, and a stopped run retains its output and pending checks. Select **No limit** on the Run timeout row. (#875)
+- Navigate launch settings, timing, skills and agent roles in task order. The focused row explains its effect and the footer follows configured keys. (#876)
+
+### Fixed
+
+- Cancel pending catalog setup when the launch is cancelled. Retry transient terminal observation reads and recover parked workers after the server restarts. (#873, #832, #839)
+
+## [pi-better-server@0.7.0] - 2026-11-22
+
+### Changed
+
+- Recover isolated subagent workspaces and serve retained partial results after live rows are evicted. (#875)
+- Validate the runtime socket before registering its transport and use the host-provided TypeBox module when loading the extension. (#865, #864)
+- Deliver supervised background stall alerts to the waiting parent and recheck task state before delivering warnings. (#863, #869)
+
+## [pi-better-background-tasks@0.20.0] - 2026-11-22
+
+### Changed
+
+- Configure when a waiting parent reviews a background task. Supervised tasks can notify their parent of stalled progress. (#863, #868)
+- Keep durable waits pending when supervisor records are unreadable, deduplicate wait completions, and recheck warnings before delivery. (#867, #770, #869)
+- Bundle the Server 0.7.0 runtime.
+
+## [pi-better-goal@0.16.0] - 2026-11-22
+
+### Changed
+
+- Complete a bound Goal after supplying an observed result for each acceptance criterion and resolving remaining Todo or ledger work. Reopening a command-bound Goal retains its workflow binding. (#854)
+
+## [pi-better-sandbox@0.15.1] - 2026-11-22
+
+### Documentation
+
+- Link directly from the installed README to the sandbox tool-loading and Background admission contracts. (#874)
+
 ## [pi-better-harness@0.50.1] - 2026-11-22
 
 ### Changed
