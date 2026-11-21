@@ -4,9 +4,53 @@ vi.mock('./managed-client.js', () => ({ requestBackgroundTool: fixture.request }
 vi.mock('./work-observation.js', () => ({ onBackgroundObservation: (_pi: unknown, callback: () => void) => { fixture.observe = callback; return () => { }; } }));
 vi.mock('./shared-callback-batcher.js', () => ({ getCallbackBatcher: () => ({ enqueue: fixture.enqueue,deliverUrgent:fixture.urgent }) }));
 import { createManagedBackgroundFrontend } from './managed-frontend.js';
+import { createBackgroundTasksNavigator } from './navigator-provider.js';
+import { NAVIGATOR_PANEL_WIDGET_KEY, setNavigatorPanel } from './shared-navigator-panels.ts';
 const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
+    it('keeps running tasks beside the todo when an older server includes a pending callback pointer', async () => {
+      const pi = { registerTool() {} } as any;
+      const frontend = createManagedBackgroundFrontend(pi);
+      const navigator = createBackgroundTasksNavigator(undefined, frontend.ui);
+      let widget: { render(width: number): string[] } | undefined;
+      const theme = { fg: (_color: string, text: string) => text };
+      const ctx = { ...context(), mode: 'tui', hasUI: true, ui: {
+        theme, setEditorComponent() {},
+        setWidget(key: string, factory: any) {
+          if (key === NAVIGATOR_PANEL_WIDGET_KEY) widget = factory?.({ requestRender() {} }, theme);
+        },
+      } };
+      const running = (name: string, kind: string) => ({
+        durable: true, id: kind, name, kind, status: 'running', active: true, terminal: false,
+        startedAt: Date.now(), waits: [], cwd: ctx.cwd, exitCode: null,
+      });
+      const pointer = { durable: true, id: 'old-failure', operationId: 'old-op', status: 'failed',
+        terminal: true, active: false, endedAt: Date.now() - 60000, callbackPending: true };
+      fixture.request.mockResolvedValue({
+        tasks: [pointer, running('PostgreSQL check', 'process'), running('Android CI watch', 'watch')],
+        deliveries: [{ token: 'lease', receiptId: 'receipt', notification: {
+          taskId: pointer.id, origin: { cwd: ctx.cwd, sessionId: 'native' }, status: 'failed', event: {},
+        } }],
+      });
+      try {
+        frontend.host.start(ctx, false);
+        navigator.ensureBackgroundTasksNavigatorProvider(pi);
+        navigator.ensureBackgroundTasksNavigator(ctx);
+        setNavigatorPanel(ctx, 'pi-better-plan', () => ({ render: () => ['todo 1/4 complete'], invalidate() {} }));
+        await frontend.host.reconcileNow();
+        const screen = widget?.render(120).join('\n');
+        expect(screen).toContain('todo 1/4 complete');
+        expect(screen).toContain('PostgreSQL check');
+        expect(screen).toContain('Android CI watch');
+        expect(frontend.host.readDurableTask({ cwd: ctx.cwd, sessionId: 'native' }, pointer.id)).toBeUndefined();
+        expect(fixture.enqueue).toHaveBeenCalledOnce();
+      } finally {
+        setNavigatorPanel(ctx, 'pi-better-plan', undefined);
+        navigator.clearBackgroundTasksNavigatorSession();
+        frontend.host.close();
+      }
+    });
     it('opens observation once on demand and discards a pending poll after a session switch', async () => {
       let release!: (snapshot: unknown) => void;
       const poll = new Promise(resolve => { release = resolve; });

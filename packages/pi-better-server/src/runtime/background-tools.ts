@@ -234,7 +234,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     trace?.(slot, 'read-returned');
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
-                    const visibleRows = snapshot.rows.filter((row: any) => !row.meta.parentRecipient?.branchId || record.branchIds.includes(row.meta.parentRecipient.branchId));
+                    // Callback pointers carry a delivery obligation but no navigator detail.
+                    const visibleRows = snapshot.rows.filter(({ meta }: any) => !meta.callbackPending
+                        && (!meta.parentRecipient?.branchId || record.branchIds.includes(meta.parentRecipient.branchId)));
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
                     let projection = projections.get(viewKey);
                     if (projection?.revision !== revision) {
@@ -260,7 +262,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             let task = service.readDurableTask({cwd: record.owner.workspace, sessionId: record.owner.sessionId}, id);
                             if (!task) {
                                 const exact = await observe({background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId, id});
-                                task = exact.rows.find((row: any) => row.meta.id === id)?.meta;
+                                task = exact.rows.find((row: any) => row.meta.id === id && !row.meta.callbackPending)?.meta;
                             }
                             if (task && task.dismissedAt === undefined && (!task.parentRecipient?.branchId || record.branchIds.includes(task.parentRecipient.branchId))) { tasks.push(task); present.add(id); }
                         }

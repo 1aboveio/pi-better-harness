@@ -65,7 +65,8 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             if (snapshot.recoveryPending === true) dirty = true;
             // A rebuilding snapshot is not evidence that visible tasks vanished.
             if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
-                rows = snapshot.tasks ?? [];
+                // Older servers include compact callback pointers in the task list.
+                rows = (snapshot.tasks ?? []).filter((task: any) => !task.callbackPending);
                 // Detail remains inspectable while Navigator retains a terminal row.
                 for (const task of rows) {
                     retainedTasks.delete(task.id); retainedTasks.set(task.id, task);
