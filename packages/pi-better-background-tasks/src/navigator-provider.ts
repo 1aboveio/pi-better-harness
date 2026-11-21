@@ -16,8 +16,10 @@ import { actionableFailures, failureLabel, readFailureState } from "./shared-fai
 import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
-import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
-import { stopTask, type BackgroundTaskRuntime } from "./runtime.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import { describeSupervisedProgress } from "./supervised-progress.js";
+import type { DurableTaskProjection } from "./observed-waits.js";
+import type { BackgroundTaskRuntime } from "./runtime.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
@@ -30,12 +32,13 @@ let durableRowCache: {
 } | undefined;
 
 export interface ManagedBackgroundNavigator {
+  onOpen?(): void;
   rows(): BackgroundWorkRow[];
   prepareDetail(id:string,options?:{logTailLines?:number}): void;
   detail(id: string, now: number, options?: {logTailLines?: number}): BackgroundWorkDetail | null;
   close(id: string): {action:string;providerId:string;id:string;status?:string};
 }
-export function createBackgroundTasksNavigator(runtime: Pick<BackgroundTaskRuntime, "stopTask"> = { stopTask }, managed?: ManagedBackgroundNavigator) {
+export function createBackgroundTasksNavigator(runtime?: Pick<BackgroundTaskRuntime, "stopTask">, managed?: ManagedBackgroundNavigator) {
 const owner = Symbol("background-tasks navigator factory");
 let unregister: (() => void) | undefined;
 let navigatorContext: ExtensionContext | undefined;
@@ -93,6 +96,7 @@ const provider: BackgroundWorkProvider = {
   id: "background-tasks",
   label: "Background Tasks",
   priority: 20,
+  onOpen: managed?.onOpen,
   visibleCount: () => {
     const now = Date.now();
     return (managed ? managed.rows().filter(row => row.status === "running").length : visibleMetas(now).filter((meta) => meta.status === "running").length)
@@ -130,7 +134,9 @@ const provider: BackgroundWorkProvider = {
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      void runtime.stopTask(piRef as ExtensionAPI, id);
+      const pi = piRef as ExtensionAPI;
+      if (runtime) void runtime.stopTask(pi, id);
+      else void import("./runtime.js").then(({ stopTask }) => stopTask(pi, id));
       return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
@@ -186,6 +192,8 @@ function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWor
   const command = durableCommandLabel(task);
   const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
   const facts: string[] = [];
+  const progress = task.progress && describeSupervisedProgress(task.progress, now);
+  if (progress) facts.push(progress);
   if (task.attention && task.reason) facts.push(task.reason);
   else if (task.attention) facts.push(task.status);
   if (task.kind === "watch" && task.intervalSeconds) facts.push(`every ${formatDuration(task.intervalSeconds * 1000)}`);
@@ -223,6 +231,7 @@ function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines
     { label: "kind", value: task.kind },
     ...(task.parentAgentId ? [{label: "agent", value: task.parentAgentId}] : []),
     { label: "operation", value: task.operationId },
+    ...(task.progress ? [{ label: "last progress", value: new Date(task.progress.observedAt).toISOString() }] : []),
     { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
     { label: "started", value: new Date(task.startedAt).toISOString() },
     ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),

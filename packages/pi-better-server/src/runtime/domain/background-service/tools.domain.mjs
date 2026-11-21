@@ -1,22 +1,18 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/tools.ts. Do not edit directly.
 import { Type } from "typebox";
 import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
-import { formatBatchLaunch, spawnTaskBatch } from "./batch.domain.mjs";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
 import { classifyOwnership, formatLaunch, formatList, formatLog, formatMissingTask, formatMutationRefusal, formatStatus, formatDurableStatusMetadata, formatStopResult, } from "./output.domain.mjs";
 import { cursorKind, readOutputControls } from "./shared-log-utils.domain.mjs";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
 import { registerDeliveryObserver } from "./delivery-observer.domain.mjs";
-import { formatWaitView, getObservedWaitHost, observedWaitServiceUnavailableReason, } from "./observed-waits.domain.mjs";
-import { backgroundObservation } from "./work-observation.domain.mjs";
+import { getObservedWaitHost } from "./observed-wait-client.domain.mjs";
+import { backgroundListNeedsHistory, backgroundObservation } from "./work-observation.domain.mjs";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.domain.mjs";
-import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.domain.mjs";
-import { runTaskMaintenance } from "./maintenance.domain.mjs";
 import { backgroundProcessDiagnosticsAccess, ForegroundSandboxBlockedError } from "./sandbox.domain.mjs";
 import { inspectTaskProcess } from "./task-diagnostics.domain.mjs";
-import { isTerminalStatus } from "./types.domain.mjs";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.domain.mjs";
 export { formatLaunch } from "./output.domain.mjs";
-const defaultRuntime = { awaitFirstWatchCheck, resumeRunningTask, spawnTask, startWatchTask, stopTask };
 const JsonPathSchema = Type.String({
     pattern: "^\\$",
     description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
@@ -136,7 +132,7 @@ const IdParams = Type.Object({
     ...CursorFields,
 });
 const HistoryField = {
-    diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires current Process access Read in both Main and Background tasks. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
+    diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires Process access Read in each enabled sandbox profile (Main and Background tasks); unavailable under Main confinement. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
     history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
 };
 const StatusParams = Type.Object({
@@ -247,8 +243,7 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
     "When a structured plan is active, keep it as the coordinator ledger: launch relevant background work early, continue unblocked foreground work without polling, and update the plan after inspecting each terminal result or failure.",
     "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
-export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options = {}) {
-    const { resumeRunningTask, spawnTask } = runtime;
+export function registerTools(pi, runtime, refreshNavigator = refreshBackgroundTasksNavigator, options = {}) {
     let activeSession;
     const getActiveSession = () => activeSession;
     const schemas = new Map();
@@ -263,6 +258,8 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         setCallbackBatchContext(pi, ctx);
         activeSession = getCallbackOrigin(ctx);
         if (options.resumeLocal !== false) {
+            const { resumeRunningTask } = runtime ?? await import("./runtime.domain.mjs");
+            const { runTaskMaintenance } = await import("./maintenance.domain.mjs");
             for (const meta of listMetasForOrigin(activeSession)) {
                 if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
                     resumeRunningTask(pi, meta, getActiveSession);
@@ -306,6 +303,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
                 refreshNavigator(ctx);
                 return text(durable, launchReceipt(receipt));
             }
+            const { spawnTask } = runtime ?? await import("./runtime.domain.mjs");
             const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, origin, getActiveSession));
             refreshNavigator(ctx);
             return text(launched);
@@ -319,6 +317,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         parameters: BatchParams,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             activeSession = getCallbackOrigin(ctx);
+            const { formatBatchLaunch, spawnTaskBatch } = await import("./batch.domain.mjs");
             const launched = spawnTaskBatch(pi, params, ctx.cwd, activeSession, getActiveSession, {}, runtime);
             refreshNavigator(ctx);
             return text(formatBatchLaunch(launched), launched);
@@ -398,7 +397,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
                 refreshNavigator(ctx);
                 return text(durable);
             }
-            const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime);
+            const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime ?? await import("./runtime.domain.mjs"));
             refreshNavigator(ctx);
             return text(result);
         },
@@ -414,7 +413,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         },
         async execute(toolCallId, params, signal, _onUpdate, ctx) {
             activeSession = getCallbackOrigin(ctx);
-            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
+            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime ?? await import("./runtime.domain.mjs"), refreshNavigator);
         },
     });
     register({
@@ -427,7 +426,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         },
         async execute(toolCallId, params, _signal, _onUpdate, ctx) {
             activeSession = getCallbackOrigin(ctx);
-            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
+            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime ?? await import("./runtime.domain.mjs"), refreshNavigator);
         },
     });
     register({
@@ -442,14 +441,14 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const host = getObservedWaitHost(pi);
             if (!host?.available) {
-                return text(observedWaitServiceUnavailableReason(pi)
+                return text((await import("./observed-waits.domain.mjs")).observedWaitServiceUnavailableReason(pi)
                     ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
             }
             try {
                 const wait = host.usesServerResults
                     ? await host.superviseParentWait(ctx, params.task_ids, params.continuation_note)
                     : host.waitForParent(ctx, params.task_ids, params.continuation_note);
-                return text(formatWaitView(wait), wait);
+                return text((await import("./observed-waits.domain.mjs")).formatWaitView(wait), wait);
             }
             catch (error) {
                 return text(`Wait was not registered: ${readableError(error)}`);
@@ -464,7 +463,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const host = getObservedWaitHost(pi);
             if (!host?.available) {
-                return text(observedWaitServiceUnavailableReason(pi)
+                return text((await import("./observed-waits.domain.mjs")).observedWaitServiceUnavailableReason(pi)
                     ?? "Observed waits are unavailable in this session; no wait was consumed.");
             }
             try {
@@ -513,6 +512,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
                 const waits = host.listWaitsForParent(ctx, { pendingOnly: params.pending_only === true });
                 if (waits.length === 0)
                     return text("No durable waits for this session.");
+                const { formatWaitView } = await import("./observed-waits.domain.mjs");
                 return text(waits.map((wait) => formatWaitView(wait)).join("\n\n"), waits);
             }
             catch (error) {
@@ -672,8 +672,7 @@ async function runAction(pi, params, ctx, callbackOrigin, getActiveSession, sign
 /** Ordinary lists reuse retained activity; explicit filtered/paged lists open history. */
 async function durableAwareList(pi, params, origin, ctx) {
     const options = listOptions(params, origin);
-    const history = params.all === true || params.limit !== undefined || params.status !== undefined
-        || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+    const history = backgroundListNeedsHistory(params);
     const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, history, params.all === true, { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
     if (snapshot && snapshot.status !== "ready")
         throw new Error(snapshot.reason ?? "Background activity is unverified");
@@ -840,8 +839,8 @@ function reportLaunch(launch) {
  * Start a watch and wait, bounded by `waitMs`, for its first check, so the launch result
  * shows what the check really prints (#359). Local and SSH watches share this path.
  */
-export async function launchWatch(pi, params, cwd, callbackOrigin, getActiveSession, waitMs = FIRST_WATCH_CHECK_WAIT_MS, signal, runtime = defaultRuntime) {
-    const { startWatchTask, awaitFirstWatchCheck } = runtime;
+export async function launchWatch(pi, params, cwd, callbackOrigin, getActiveSession, waitMs = FIRST_WATCH_CHECK_WAIT_MS, signal, runtime) {
+    const { startWatchTask, awaitFirstWatchCheck } = runtime ?? await import("./runtime.domain.mjs");
     let meta;
     try {
         meta = startWatchTask(pi, params, cwd, callbackOrigin, getActiveSession);
@@ -976,8 +975,8 @@ function truncateToVisibleWidth(value, width) {
     const max = Math.max(0, Math.floor(width || 0));
     return String(value ?? "").slice(0, max);
 }
-async function formatStop(pi, id, _ctx, getActiveSession, options = {}, runtime = defaultRuntime) {
-    const { stopTask } = runtime;
+async function formatStop(pi, id, _ctx, getActiveSession, options = {}, runtime) {
+    const { stopTask } = runtime ?? await import("./runtime.domain.mjs");
     const existing = inspectMeta(id);
     if (!existing.meta && !existing.found)
         return formatStopResult(existing, options);

@@ -34,6 +34,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
         traceSeen.add(line);
         try { console.error('[background-handoff-server]', output); } catch { /* diagnostics never own delivery */ }
     };
+    const isStallDelivery = (item: any) => item.notification.event?.customType === 'background-task-stall';
+    const sameNativeHost = (item: any, record: any) => item.scope.pid === record.pid && item.scope.start === record.start;
+    const deliveryLeaseMs = 30000;
     const ownerKey = (owner: any) => JSON.stringify([owner.workspace, owner.sessionId]);
     const forgetView = (view: string) => { projections.delete(view); recoveryVersions.delete(view); };
     const forgetOwner = (key: string) => {
@@ -193,7 +196,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getEntries: () => branch, getLeafId: () => record.branchIds.at(-1), getSessionFile: () => undefined } };
                 service.noteParentContext(ctx, { recover: false });
                 for (const [token, item] of deliveries)
-                    if (Date.now() - item.createdAt > 30000) {
+                    if (Date.now() - item.createdAt >= deliveryLeaseMs) {
                         item.delivery.defer('Native delivery lease expired');
                         forgetOwner(ownerKey(item.scope.owner));
                         deliveries.delete(token);
@@ -202,7 +205,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const item = deliveries.get(record.params.token);
                     traceHandoff('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
                         receiptId: item?.receiptId, found: Boolean(item), delivered: record.params.delivered === true });
-                    if (!item || ownerKey(item.scope.owner) !== key)
+                    if (!item || ownerKey(item.scope.owner) !== key || isStallDelivery(item) && !sameNativeHost(item, record))
                         throw new Error('delivery-receipt-refused');
                     if (record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId))
                         throw new Error('delivery-recipient-inactive');
@@ -234,7 +237,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     trace?.(slot, 'read-returned');
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
-                    const visibleRows = snapshot.rows.filter((row: any) => !row.meta.parentRecipient?.branchId || record.branchIds.includes(row.meta.parentRecipient.branchId));
+                    // Callback pointers carry a delivery obligation but no navigator detail.
+                    const visibleRows = snapshot.rows.filter(({ meta }: any) => !meta.callbackPending
+                        && (!meta.parentRecipient?.branchId || record.branchIds.includes(meta.parentRecipient.branchId)));
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
                     let projection = projections.get(viewKey);
                     if (projection?.revision !== revision) {
@@ -260,14 +265,39 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             let task = service.readDurableTask({cwd: record.owner.workspace, sessionId: record.owner.sessionId}, id);
                             if (!task) {
                                 const exact = await observe({background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId, id});
-                                task = exact.rows.find((row: any) => row.meta.id === id)?.meta;
+                                task = exact.rows.find((row: any) => row.meta.id === id && !row.meta.callbackPending)?.meta;
                             }
                             if (task && task.dismissedAt === undefined && (!task.parentRecipient?.branchId || record.branchIds.includes(task.parentRecipient.branchId))) { tasks.push(task); present.add(id); }
                         }
                     }
-                    const outgoing = [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId }));
+                    const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
+                    const liveStalls = new Set<string>();
+                    for (const task of tasks) {
+                        if (!task.active || !task.progress?.alertDue || !task.callback || task.owner.kind !== 'parent-session') continue;
+                        const alert = service.pendingStallAlert(origin, task.id, task.waits);
+                        if (!alert) continue;
+                        liveStalls.add(alert.delivery.receiptId);
+                        notifyParent(alert.notification, alert.delivery);
+                    }
+                    const outgoing = [];
+                    let retryAfterMs = liveStalls.size && deliveries.size >= 256 ? 1000 : undefined;
+                    for (const [token, item] of deliveries) {
+                        if (ownerKey(item.scope.owner) !== key) continue;
+                        if (isStallDelivery(item)) {
+                            if (item.notification.branchId && !record.branchIds.includes(item.notification.branchId)) continue;
+                            if (!liveStalls.has(item.receiptId)) { deliveries.delete(token); continue; }
+                            // Two frontends can share a session and branch. Only the holder may hand off
+                            // this incident. A survivor polls again at lease expiry if no receipt arrives.
+                            if (!sameNativeHost(item, record)) {
+                                const remaining = Math.max(1, item.createdAt + deliveryLeaseMs - Date.now());
+                                retryAfterMs = Math.min(retryAfterMs ?? remaining, remaining);
+                                continue;
+                            }
+                        }
+                        outgoing.push({ token, notification: item.notification, receiptId: item.receiptId });
+                    }
                     traceHandoff('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
-                    return { ...projection, tasks, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };
+                    return { ...projection, tasks, retryAfterMs, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };
                 }
                 const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                 if (record.tool === '__background_detail' || record.tool === '__background_action') {

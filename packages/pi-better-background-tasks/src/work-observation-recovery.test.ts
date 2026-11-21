@@ -51,3 +51,23 @@ for (const cancel of [false, true]) test(`background query survives listener gap
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('cancelling a cold paginated list stops before Background tool admission', async () => {
+  const { requestBackgroundTool } = await import('./managed-client.js');
+  const controller = new AbortController();
+  const reads: any[] = [];
+  const hosted = {
+    onChange() {}, async subscribe() {}, close() {},
+    async get(scope: any) {
+      reads.push(scope);
+      controller.abort();
+      return { status: 'rebuilding' };
+    },
+  };
+  const pi = { events: { emit(_event: string, port: any) { port.accept(hosted); } } } as any;
+  const ctx = { cwd: '/project', sessionManager: { getSessionId: () => 'owner' } } as any;
+  try {
+    await expect(requestBackgroundTool(pi, ctx, 'list', 'bg_task_list', { all: true, limit: 3 }, {}, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(reads).toEqual([expect.objectContaining({ sessionId: 'owner', backgroundAll: false, backgroundHistory: true, limit: 1 })]);
+  } finally { closeBackgroundObservation(pi); }
+});

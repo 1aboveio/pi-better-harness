@@ -1,3 +1,4 @@
+import { shouldRestoreWorkObservation } from "./shared-work-client.mjs";
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.ts";
 import { captureLaunchContext } from "./launch-context.ts";
 /**
@@ -26,7 +27,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
+import { workObservation, workObservationStarted, workObservationFailure, configureWorkObservation, activateWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
@@ -44,13 +45,13 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
-import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./finalization.ts";
 import { completeOwnedExit } from "./owned-exit.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
-import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
+import { BUILTIN_TOOLS } from "./extensions.ts";
+import { ORDINARY_TOOL_PROVIDERS, activeChildProviders, ordinaryChildConfig, addEditablePatch, loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
 import { deliverSubagentPrompt, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
@@ -79,17 +80,14 @@ import {
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
-import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
-import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
-import { prepareTaskRuntime, applyDirectApplicationLoadout, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
+import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
-import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.ts";
+import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.ts";
 import {
-    announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
+    announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
-import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { dirname, isAbsolute, join } from "node:path";
 import {
     baseDir,
@@ -1625,7 +1623,7 @@ const pendingNavigatorDismissals = new Set<string>();
 function navigatorRunningCount(): number {
     const snapshot = workObservation();
     return (snapshot?.rows.filter((row: any) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt && ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
-        (!snapshot || snapshot.status !== "ready" ? 1 : 0);
+        (workObservationStarted() && snapshot?.status !== "ready" ? 1 : 0);
 }
 
 /**
@@ -1744,7 +1742,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: formatNavigatorHealthFacts(health), sortStartedAt: meta.startedAt,
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
-    if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
+    if (workObservationStarted() && snapshot?.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
         status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", readOnly: true, elapsed: "", primary: "Task status unconfirmed · enter for details", sortStartedAt: now });
     return rows;
 }
@@ -1934,6 +1932,7 @@ function ensureSubagentProvider(): void {
         id: "subagents",
         label: "Subagents",
         priority: 10,
+        onOpen: () => { void activateWorkObservation(); },
         visibleCount: () => navigatorRunningCount(),
         // The last worker becoming terminal must not hide its retained result.
         showSection: (rows) => rows.length > 0,
@@ -2746,6 +2745,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ctx = captureLaunchContext(ctx);
             catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
+            void activateWorkObservation();
             return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params)) as never;
         } });
     };
@@ -2900,6 +2900,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         /** Set only when a catalog run's model or effort differs from its role or agent default. */
         modelNote?: string;
     }> {
+        const { resolveChildClosure, resolveChildLaunch, configSnapshot } = await import("./child-dependencies.mjs");
+        const { resolveSubagentWorkspace } = await import("./git-workspace.ts");
+        const { PREFLIGHT_ENV } = await import("./child-preflight.mjs");
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
         // before any attempt directory or capacity effect exists. A continuation
@@ -2918,13 +2921,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         // frozen confinement intent. Historical metadata can never widen authority,
         // and a profile that would change confinement refuses instead of silently
         // moving a live conversation into a different sandbox.
-        const permissionPlan = resolveSubagentPermissions(pi, resume ? resume.recipe.sandbox : p.sandbox);
-        if (resume && permissionPlan.sandboxEnabled !== resume.recipe.sandbox) {
-            throw new ContinuationError(
-                `Cannot continue ${resume.prior.id}: current sandbox permissions would change its confinement. ` +
-                `Launch a new run instead of continuing this conversation.`,
-            );
-        }
+        const permissionPlan = resolveSubagentPermissions(pi, p.sandbox,
+            resume && { runId: resume.prior.id, sandbox: resume.recipe.sandbox });
+        const processPolicy = describeSubagentProcessPolicy(permissionPlan, process.platform);
+        const processAccess = effectiveWorkerProcessAccess(permissionPlan);
+        const taskPermissions = permissionPlan.inactiveProfile
+            ? { ...DEFAULT_TASK_PERMISSIONS, processAccess }
+            : permissionPlan.permissions;
         const cfg = loadConfig();
         // Harness-owned timing (soft deadline, ceiling, tool-wait and stuck windows); validated before any side effect.
         resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
@@ -3072,8 +3075,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     .filter(Boolean).join(",");
             }
 
-            // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
-            // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+            // Exclusions apply to the worker selection before provider admission (ADR 0027).
             const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
 
             // Supervised worker operations. This only decides which names the
@@ -3122,14 +3124,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
             }
 
-            if (sandboxEnabled && !clean) {
+            if (!clean) {
                 const names = allow.split(",").filter(Boolean);
-                // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
-                if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write")) names.push(APPLY_PATCH);
-                if (requestedTools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+                // Derive the editable loadout before applying the resource policy.
+                if (!resume) addEditablePatch(names, requestedExcludes);
                 allow = [...new Set(names)].join(",");
             }
-            if (sandboxEnabled && requestedTools === undefined && permissionPlan.permissions?.processAccess === "read") {
+            if (sandboxEnabled && requestedTools === undefined && processAccess === "read") {
                 allow = [...new Set([...allow.split(","), "process_list"])].join(",");
             }
             // Shell Off confines the child to directly launched applications: a requested bash
@@ -3156,12 +3157,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 const path = resolveExtensionPath(spec);
                 return path ? workerPath(path) : path;
             };
+            const normalProviders = ordinaryChildConfig(cfg, managed?.activeProviders?.() ?? activeChildProviders(pi));
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
-                processAccess: permissionPlan.permissions?.processAccess ?? "off",
+                processAccess,
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
+                toolExtensions: normalProviders.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3182,11 +3184,11 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 throw resume
                     ? new ContinuationError(
                         `Cannot continue ${resume.prior.id}: its frozen launch requires tool(s) this parent can no longer provide: ${detail}. ` +
-                        `Launch a new run instead of continuing this conversation.`,
+                        `Launch a new run instead of continuing this conversation. ${processPolicy}`,
                     )
                     : new Error(
                         `Requested tool(s) are not available in the task sandbox: ${detail}. ` +
-                        `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`,
+                        `Check the child tool provider and the Subagents resource permissions; nothing was launched.`,
                     );
             }
             if (toolSelection) {
@@ -3195,26 +3197,36 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 }
                 allow = toolSelection.tools.join(",");
             }
+            // Older recipes were frozen before isolated workers gained Harness providers
+            // and inherited workers began loading mappings explicitly.
+            const legacyToolLoading = resume !== undefined && !resume.recipe.toolLoadingVersion;
+            let extensionConfig = cfg;
+            if (!sandboxEnabled && !legacyToolLoading) extensionConfig = normalProviders;
+            if (legacyToolLoading && cfg.inheritExtensions) extensionConfig = { ...cfg, toolExtensions: {} };
             const dependencyOptions = {
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
                     return slash > 0 && ctx.modelRegistry?.find?.(model!.slice(0, slash), model!.slice(slash + 1))?.api === "pi-virtual";
-                })(), config: cfg, resolvePath: workerResolvePath,
+                })(), config: extensionConfig, resolvePath: workerResolvePath,
                 configPaths: [configPath(), workerPath(join(selfDir(), "config.json"))],
             };
             // Bridge tools are supplied by the worker bridge extension, not by a
             // configured toolExtensions mapping: keep them out of extension
             // resolution so `unmapped` stays an accurate operator warning and the
             // frozen launch recipe never depends on bridge availability.
-            const extensionAllowlist = () => (bridgeEnabled
-                ? allow.split(",").filter((name) => !(bridgePlan.tools as readonly string[]).includes(name)).join(",")
-                : allow);
+            const extensionAllowlist = () => allow.split(",")
+                .filter(name => !requestedExcludes.has(name) && !bridgeToolNames.has(name)).join(",");
             const { resolution, fullResolution } = await resolveChildLaunch({ ...dependencyOptions, resolution: resolveExtensions({
                 // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
                 // are task builtins that the mandatory guard installs and activates itself.
                 tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
-                model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
             }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
+            if (!sandboxEnabled && resolution.mode === "isolated" &&
+                fullResolution.specs.every((spec: string) => Object.values(ORDINARY_TOOL_PROVIDERS).includes(spec))) {
+                const missingTools = resolution.unmapped.filter((name: string) => requiredToolNames.has(name));
+                if (missingTools.length) throw new Error(`No provider for required child tools: ${missingTools.join(", ")}. Configure toolExtensions or change the requested tools.`);
+            }
             const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? workerResolvePath(spec));
             const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
                 .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
@@ -3234,7 +3246,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 const reference = model === resume.recipe.model ? resolution : await resolveChildClosure({
                     ...dependencyOptions, model: resume.recipe.model, virtual: false, resolution: resolveExtensions({
                     tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
-                    model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                    model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
                 }) });
                 const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? workerResolvePath(spec)).args, ...codemodeArgs,
                     ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
@@ -3293,7 +3305,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
                 tools: selectedTools,
-                permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
+                permissions: taskPermissions && { ...taskPermissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
                 extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => ({ ...tool, root: workerPath(tool.root) })) ?? [],
                 // The sandboxed child's policy enables the guarded operation bridge
@@ -3433,6 +3445,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             }
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
+                ...(!legacyToolLoading ? { toolLoadingVersion: 1 as const } : {}),
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
@@ -3531,8 +3544,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 if (workerBridge) workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
-                await settleResumedAttemptExit({
+                if (internal?.resumeWait && resume) await settleResumedAttemptExit({
                     attemptId: id,
+                    priorPark: { runId: resume.prior.id, ...internal.resumeWait },
                     service: workerOperations.service,
                     status: readMeta(id)?.status ?? "exited",
                     // The exit handler releases the conversation writer lease just
@@ -3575,7 +3589,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
             // The resolved skill exposure rides with the runtime summary, which every
             // launch and continuation message already prints.
-            return { id, meta, spawned, runtime: `${runtime}${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
+            const inventoryNote = taskRuntime?.policy.permissions?.processAccess === "read" &&
+                !taskRuntime.policy.tools.includes("process_list") ? " process_list is not in this launch's tool loadout." : "";
+            return { id, meta, spawned, runtime: `${runtime}${processPolicy}${inventoryNote}\n${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
         } catch (error) {
             // A launch that never committed metadata is not a run: drop
             // everything the attempt created so the registry keeps no
@@ -3586,6 +3602,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
+                const { abortUncommittedLaunch } = await import("./launch-abort.ts");
                 await abortUncommittedLaunch(id, {
                     child: spawned, lease,
                     artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
@@ -3708,7 +3725,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                         admissionRevision: input.admissionRevision,
                         permissionsUnchanged: () => samePermissionPlan(
                             permissionPlan,
-                            resolveSubagentPermissions(pi, target.recipe.sandbox),
+                            resolveSubagentPermissions(pi, undefined, { runId: target.prior.id, sandbox: target.recipe.sandbox }),
                         ),
                         capacityAvailable: () => resumeCapacity().recheck(),
                     }),
@@ -3745,7 +3762,10 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             };
             return JSON.stringify(sort(value));
         };
-        return canonical(left) === canonical(right);
+        // Describe provenance to the caller, but fence on authority, not its display label.
+        const { activationSource: _leftSource, ...leftAuthority } = left;
+        const { activationSource: _rightSource, ...rightAuthority } = right;
+        return canonical(leftAuthority) === canonical(rightAuthority);
     }
 
     /** Preserve the original assignment deadline across parking; never extend it. */
@@ -4405,6 +4425,28 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         pi.events?.emit("harness-settings:register", contribution);
         pi.events?.emit("harness-settings:register", agentsContribution);
     };
+    const unsubscribeToolLoading = pi.events?.on?.("pi-better-subagents:default-tool-loading", (request: unknown) => {
+        const query = request as { reply?: (rows: { name: string; provider: string }[]) => void } | undefined;
+        if (typeof query?.reply !== "function") return;
+        const config = ordinaryChildConfig(loadConfig(), activeChildProviders(pi));
+        const names = normalizeTools(config.defaultTools ?? SAFE_DEFAULT_TOOLS).split(",").filter(Boolean);
+        addEditablePatch(names, new Set());
+        const rows = [...new Set(names)].map(name => {
+            if (name === "codemode") {
+                const supported = "createCodemodeExtension" in PiCodingAgent && typeof PiCodingAgent.createCodemodeExtension === "function";
+                return { name, provider: supported ? "Harness" : "SDK unavailable" };
+            }
+            if (BUILTIN_TOOLS.includes(name)) return { name, provider: "Pi" };
+            const spec = config.toolExtensions?.[name];
+            const sources = typeof spec === "string" ? [spec] : spec ?? [];
+            const providers = sources.map(source => {
+                const label = source === ORDINARY_TOOL_PROVIDERS[name] ? "Harness" : source;
+                return resolveExtensionPath(source) ? label : `${label} (missing)`;
+            });
+            return { name, provider: providers.join(", ") || (config.inheritExtensions ? "Session extensions" : "No provider mapped") };
+        });
+        query.reply(rows);
+    });
     const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
     const unsubscribeOutcomeWorkflow = pi.events?.on?.("pi-better-workflow:changed", () => recoverAssignmentOutcomes(pi));
     registerSettings();
@@ -4564,7 +4606,14 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     // Capture a UI-bearing context and, if runs from a prior session are still
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
-    pi.on("session_start", async (_event, ctx) => {
+    let restoreObservation: NodeJS.Immediate | undefined;
+    let offFirstAssignment: (() => void) | undefined;
+    const cancelDeferredObservation = () => {
+        if (restoreObservation) clearImmediate(restoreObservation);
+        offFirstAssignment?.();
+        offFirstAssignment = undefined;
+    };
+    pi.on("session_start", async (event, ctx) => {
         // A session begins in this process again (reload, restart, or a session
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
@@ -4582,10 +4631,28 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         pendingRecipientRecovery.clear();
         observedRecipientRows.clear();
-        if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
-            refreshBackgroundWorkNavigator(ctx);
-            observeRecipientNotifications(pi);
-        });
+        cancelDeferredObservation();
+        if (!managed && activeCallbackOrigin) {
+            configureWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
+                refreshBackgroundWorkNavigator(ctx);
+                observeRecipientNotifications(pi);
+            });
+            if (!event?.reason) {
+                // Older hosts use completion of their untyped start callback as the readiness signal.
+                await activateWorkObservation();
+            } else if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
+                restoreObservation = setImmediate(() => { void activateWorkObservation(); });
+            } else {
+                // Another extension can assign work to this recipient before it calls a tool.
+                const origin = activeCallbackOrigin;
+                offFirstAssignment = onMetaChanged(meta => {
+                    if (!meta || !belongsToOrigin(meta, origin)) return;
+                    offFirstAssignment?.();
+                    offFirstAssignment = undefined;
+                    void activateWorkObservation();
+                });
+            }
+        }
         if (!managed) {
             recoverCompletionCallbacks(pi);
             observeRecipientNotifications(pi);
@@ -4635,6 +4702,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     });
 
     pi.on("session_before_switch", () => {
+        cancelDeferredObservation();
         closeCatalogHost();
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
@@ -4650,6 +4718,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
         closeCatalogHost();
+        cancelDeferredObservation();
         stopWorkObservation();
         pendingNavigatorDismissals.clear();
         if (outcomeTicker) clearInterval(outcomeTicker);
@@ -4657,6 +4726,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         outcomeAdmission.clear();
         closeOutcomeHost(outcomeHost);
         if (typeof unsubscribeOutcomeWorkflow === "function") unsubscribeOutcomeWorkflow();
+        if (typeof unsubscribeToolLoading === "function") unsubscribeToolLoading();
         if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
         // #625: subagent children are detached process groups that outlive this
         // foreground session. A controlled reload or quit must not destroy

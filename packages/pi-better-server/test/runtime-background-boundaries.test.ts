@@ -1,11 +1,13 @@
 import test from "node:test";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Socket } from "node:net";
+import { BackgroundHistory } from "../src/runtime/background-history.ts";
 import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
@@ -412,4 +414,75 @@ test("recent terminal cache follows atomic sidecar changes without timed rereads
     observation.refresh();
     assert.equal(observation.read(scope)[0]?.name, "changed", "atomic sidecar replacement invalidates the cached projection");
   } finally { await observation.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a malformed observed sidecar does not block scoped Background history or its repair", async () => {
+  const root = mkdtempSync("/tmp/bg-history-gap-"), directory = join(root, "supervisor");
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => Date.now() - 60000 });
+  const sessions = ["requested", "other"];
+  const ids = sessions.map((_, i) => "bgs_" + String(i + 1).padStart(20, "0"));
+  mkdirSync(join(directory, "observed"), { recursive: true });
+  const damaged = join(directory, "observed", ids[1] + ".json");
+  writeFileSync(damaged, '{"name":"old"}trailing bytes');
+  for (const [i, sessionId] of sessions.entries()) {
+    const owner = { kind: "parent-session", workspace: root, sessionId };
+    writer.registerOperation({ operationId: ids[i], taskId: ids[i], launchToken: ids[i], owner, observer: { kind: "local-supervisor", version: "1" } });
+    writer.recordTerminalOutcome({ operationId: ids[i], eventId: ids[i], owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: ids[i] }] });
+  }
+  const model = new WorkReadModel(root, "history-gap", { supervisorDirectory: directory, baseDir: join(root, "runs"), durableDir: join(root, "archives") });
+  const read = async (sessionId: string, expected: number, backgroundAll = false) => {
+    const scope = { cwd: root, sessionId, background: true, backgroundHistory: true, backgroundAll, limit: 3 };
+    const end = Date.now() + 3000;
+    for (;;) {
+      const page = model.snapshot(scope);
+      if (page.status === "ready" && page.rows.length === expected) return page;
+      assert.ok(Date.now() < end, String(page.reason ?? page.status)); await delay(20);
+    }
+  };
+  try {
+    await model.reconcile();
+    assert.equal((await read("requested", 1)).backgroundIndex.page.unreadable, 0);
+    assert.equal((await read("other", 0)).backgroundIndex.page.unreadable, 1);
+    assert.equal((await read("requested", 1, true)).backgroundIndex.page.unreadable, 1);
+    writeFileSync(damaged, '{"name":"repaired"}');
+    const recovered = await read("other", 1);
+    assert.equal(recovered.backgroundIndex.page.unreadable, 0);
+    assert.equal(recovered.rows[0]?.meta?.name, "repaired");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a cold Background history resumes its next page after the shared reader releases its snapshot", async () => {
+  const root = mkdtempSync("/tmp/bg-pinned-baseline-"), path = join(root, "operation-coordinator.sqlite");
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const writer = openStore({ path });
+  const source = new DatabaseSync(path, { readOnly: true }), index = new DatabaseSync(":memory:");
+  const owner = { kind: "parent-session", workspace: root, sessionId: "parent" };
+  const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: owner.sessionId, limit: 3 };
+  let projected = 0;
+  const history = new BackgroundHistory(index, root, () => source, operations => operations.map(op => {
+    assert.ok(!source.observationActive, "history writes must wait for the shared read snapshot");
+    if (++projected === 128) source.observationActive = true;
+    return { id: op.task_id, status: "succeeded", startedAt: op.created_at };
+  }), () => {});
+  try {
+    for (let i = 0; i < 129; i++) {
+      const id = String(i).padStart(4, "0");
+      writer.registerOperation({ operationId: id, taskId: `bgs_${id.padStart(20, "0")}`, launchToken: id, owner, observer: { kind: "local-supervisor", version: "1" } });
+      writer.recordTerminalOutcome({ operationId: id, eventId: id, owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: id }] });
+    }
+    history.read(scope);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(projected, 128);
+    await delay(30);
+    assert.equal(history.read(scope).page.total, 128);
+    assert.equal(String(history.queryStatus), "rebuilding");
+    assert.equal(index.prepare("SELECT count(*) AS n FROM background_history").get().n, 128);
+    source.observationActive = false;
+    const end = Date.now() + 3000;
+    while (history.queryStatus !== "ready") {
+      history.read(scope); assert.ok(Date.now() < end, history.reason); await delay(10);
+    }
+    assert.equal(history.read(scope).page.total, 129);
+    assert.equal(history.metrics.operationReads, 129, "a pinned owner cannot force the first page to repeat");
+  } finally { source.observationActive = false; await history.close(); source.close(); index.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });

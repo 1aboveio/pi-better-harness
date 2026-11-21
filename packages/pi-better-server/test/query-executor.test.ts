@@ -464,8 +464,11 @@ test("slow caller cancellation preserves other clients and ignores late replies"
 
 test("an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", { timeout: 10000 }, async t => {
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
+  const heartbeat = new URL("./support/bootstrap-heartbeat.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
-    import { parentPort } from "node:worker_threads";
+    import { parentPort, workerData } from "node:worker_threads";
+    import { bootstrapHeartbeat } from ${JSON.stringify(heartbeat)};
+    const stopHeartbeat = bootstrapHeartbeat(parentPort, workerData.heartbeat);
     const deferred = [];
     const buffer = message => {
       if (["query", "cancel"].includes(message.type)) deferred.push(message);
@@ -478,6 +481,7 @@ test("an 800 ms setup subscription cannot verify a source while fixture bootstra
       };
       parentPort.on("message", release);
     });
+    stopHeartbeat();
     await import(${JSON.stringify(implementation)});
     parentPort.off("message", buffer);
     for (const message of deferred) parentPort.emit("message", message);
@@ -542,23 +546,30 @@ test("shared callers have separate deadlines and queue timeouts retain bounded a
   } finally { await f.close(); }
 });
 
-test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async () => {
+test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async t => {
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
     import { workerData } from "node:worker_threads";
     workerData.fixtureHoldBootstrap = true;
     await import(${JSON.stringify(implementation)});
   `)}`);
-  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, workerUrl });
+  // Hold past the real watchdog budget. The shortened wedge-test budget is
+  // for a deliberate stall, not for loading the model and verifying inventory.
+  const watchdogMs = 4000;
+  const f = await fixture({ timeoutMs: 400, watchdogMs, workerUrl, logWatchdog: line => t.diagnostic(line) });
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await new Promise<void>((resolve, reject) => {
-      let heartbeats = 0;
+      let firstHeartbeat: number | undefined;
       const cleanup = () => { clearTimeout(timeout); f.worker.off("message", message); f.worker.off("exit", exit); };
-      const message = (value: any) => { if (value.type === "heartbeat" && ++heartbeats === 6) { cleanup(); resolve(); } };
+      const message = (value: any) => {
+        if (value.type !== "heartbeat") return;
+        firstHeartbeat ??= performance.now();
+        if (performance.now() - firstHeartbeat > watchdogMs) { cleanup(); resolve(); }
+      };
       const exit = () => { cleanup(); reject(new Error("responsive fixture worker exited before bootstrap")); };
       f.worker.on("message", message); f.worker.once("exit", exit);
-      timeout = setTimeout(() => { cleanup(); reject(new Error("fixture bootstrap heartbeat did not progress")); }, 3000);
+      timeout = setTimeout(() => { cleanup(); reject(new Error("fixture bootstrap heartbeat did not progress past the watchdog deadline")); }, 6000);
     });
     assert.equal(f.executor.metrics().executor.restarts, 0);
     assert.equal(f.executor.observation().status, "rebuilding");
@@ -620,9 +631,36 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
-test("delayed parent receipt does not kill a responsive read worker", { timeout: 10000 }, async () => {
-  const f = await fixture({ watchdogMs: 800 });
+test("system sleep gives the worker time to resume before the watchdog fires", async () => {
+  const f = await fixture({ watchdogMs: 800, workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
+    const client = await f.client();
+    await ready(client);
+    const gate = new Int32Array(new SharedArrayBuffer(4));
+    const sleeping = new Promise<void>(resolve => {
+      const listener = (message: any) => {
+        if (message.type === "sleeping") { f.worker.off("message", listener); resolve(); }
+      };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "sleep", gate });
+    await sleeping;
+    Atomics.wait(gate, 0, 0, 1100);
+    // The parent resumes first, while the worker heartbeat is still stale.
+    await new Promise(resolve => setTimeout(resolve, 250));
+    Atomics.store(gate, 0, 1);
+    Atomics.notify(gate, 0);
+    assert.equal((await client.get({})).status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { await f.close(); }
+});
+
+test("delayed parent receipt does not kill a responsive read worker", { timeout: 20000 }, async () => {
+  const watchdogMs = 4000;
+  const f = await fixture({ watchdogMs });
+  try {
+    await f.waitForSourceReady();
     const client = await f.client();
     await ready(client);
     const epoch = client.snapshot!.instanceId;
@@ -634,7 +672,7 @@ test("delayed parent receipt does not kill a responsive read worker", { timeout:
     const hold = (message: unknown) => queued.push(message);
     f.worker.off("message", receive).on("message", hold);
     try {
-      await new Promise<void>(resolve => setTimeout(resolve, 1100));
+      await new Promise<void>(resolve => setTimeout(resolve, watchdogMs + 300));
       assert.equal(f.executor.metrics().executor.status, "ready");
     } finally {
       f.worker.off("message", hold).on("message", receive);
@@ -794,6 +832,7 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
     assert.equal(f.executor.metrics().executor.timeouts, 0);
     assert.equal(f.executor.metrics().executor.worker, "running");
     f.worker.postMessage({ type: "release-inventory" });
+    await f.waitForSourceReady();
     await ready(client);
     assert.equal((await client.get({ id: "sa_initial_inventory", limit: 1 })).status, "ready");
   } finally { await f.close(); }

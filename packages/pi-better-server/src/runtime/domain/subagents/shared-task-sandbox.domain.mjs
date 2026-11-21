@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:p
 import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite } from "./shared-sandbox-core.domain.mjs";
 import { createTaskFileOperations } from "./shared-task-files.domain.mjs";
 import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./shared-task-apply-patch.domain.mjs";
-import { createProcessListToolDefinition, PROCESS_LIST_TOOL } from "./shared-task-process-list.domain.mjs";
+import { createProcessListToolDefinition, PROCESS_ACCESS_OFF, PROCESS_LIST_TOOL } from "./shared-task-process-list.domain.mjs";
 import { createRunApplicationToolDefinition, RUN_APPLICATION_TOOL } from "./shared-task-application.domain.mjs";
 import { createTaskExecutor, directShellInterpreter, SHELL_SCRIPTS_OFF, shellInterpreterOff } from "./shared-task-exec.domain.mjs";
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash", PROCESS_LIST_TOOL, RUN_APPLICATION_TOOL]);
@@ -141,7 +141,7 @@ export function installTaskTools(pi, options) {
         pi.registerTool(own(createEditToolDefinition(cwd, { operations: files.edit })));
         pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
         pi.registerTool(own(createRunApplicationToolDefinition(cwd, commandExec)));
-        pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"))));
+        pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"), processAccessDenied)));
         if (options.applyPatch) {
             const patchFiles = createTaskFileOperations(controller, options.diagnostics, "apply_patch");
             pi.registerTool(own(createApplyPatchToolDefinition(cwd, {
@@ -150,6 +150,7 @@ export function installTaskTools(pi, options) {
             }, PiCodingAgent.withFileMutationQueue)));
         }
     };
+    const processAccessDenied = options.processAccessDenied ?? (() => PROCESS_ACCESS_OFF);
     register(options.cwd);
     pi.on("user_bash", () => ({ operations: bash }));
     pi.on("tool_call", (event, ctx) => {
@@ -192,7 +193,7 @@ export function installTaskTools(pi, options) {
                     }
                 }
                 if (event.toolName === PROCESS_LIST_TOOL && options.processAccess?.() !== "read") {
-                    return blocked("Sandbox: Process access is Off. Enable Read in /sandbox.", "process-inspection");
+                    return blocked(processAccessDenied(), "process-inspection");
                 }
                 return;
             }

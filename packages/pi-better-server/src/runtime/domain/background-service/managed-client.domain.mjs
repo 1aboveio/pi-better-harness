@@ -4,14 +4,26 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { backgroundDigest } from "./managed-authority.domain.mjs";
-import { readProcessStartTokenFresh } from "./process-identity.domain.mjs";
+import { readAdmissionStartToken, readProcessStartTokenFresh } from "./process-identity.domain.mjs";
 import { currentForegroundSandboxPolicy, FOREGROUND_SANDBOX_POLICY_CHANNEL } from "./sandbox.domain.mjs";
-import { backgroundObservation } from "./work-observation.domain.mjs";
+import { backgroundListNeedsHistory, backgroundObservation } from "./work-observation.domain.mjs";
 /** Native host proof carries scope and captured policy, never a transcript or module path. */
 export async function requestBackgroundTool(pi, ctx, key, tool, params, parameters, signal) {
     if (signal?.aborted)
         throw new Error('Background request cancelled before admission');
-    await backgroundObservation(pi, ctx);
+    const input = params && typeof params === 'object' ? params : {};
+    const list = tool === 'bg_task_list' || (tool === 'bg_task' && input.action === 'list');
+    if (list && backgroundListNeedsHistory(input)) {
+        // The root history index is shared. Wait on its read plane before acquiring
+        // a grant or entering the serialized tool queue, even for an all-session list.
+        const snapshot = await backgroundObservation(pi, ctx, true, false, { limit: 1 }, { timeoutMs: 60000, signal });
+        if (snapshot.status !== 'ready')
+            throw new Error(snapshot.reason ?? `Background history is ${snapshot.status}`);
+    }
+    else {
+        await backgroundObservation(pi, ctx);
+    }
+    signal?.throwIfAborted();
     const root = realpathSync(getAgentDir()), registration = JSON.parse(readFileSync(join(root, 'server-registration-v1.json'), 'utf8'));
     if (registration.version !== 1 || registration.agentDir !== root)
         throw new Error('Invalid runtime registration');
@@ -34,9 +46,11 @@ export async function requestBackgroundTool(pi, ctx, key, tool, params, paramete
         const sessionId = ctx.sessionManager.getSessionId();
         if (!sessionId)
             throw new Error('Background tools require a native session identity');
-        const record = { version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
+        const version = hello.capabilities?.includes("runtime-background-admission-v2") ? 2 : 1;
+        const start = version === 2 ? readAdmissionStartToken(process.pid) : readProcessStartTokenFresh(process.pid);
+        const record = { version, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
             owner: { kind: 'parent-session', sessionId, workspace: realpathSync(ctx.cwd) }, branchIds, projectTrusted: ctx.isProjectTrusted(),
-            pid: process.pid, start: readProcessStartTokenFresh(process.pid), key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundDigest(parameters), policy };
+            pid: process.pid, start, key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundDigest(parameters), policy };
         const staged = `${path}.tmp`;
         writeFileSync(staged, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
         renameSync(staged, path);

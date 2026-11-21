@@ -29,6 +29,8 @@ Use background operations for established commands and external waits. Use model
 
 A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution. Stopping an assignment's owned background tasks is governed by [ADR 0025](0025-assignment-terminal-task-cleanup.md) and does not apply to parking.
 
+For Background dependencies, a stall alert can reach the owning session while its wait is pending. All dependencies must reach a terminal state before the wait delivers its completion notification. [Background task policy](0028-background-task-policy.md#waits-and-callbacks)
+
 ## Context and trade-off
 
 Session `01a1a186-2daa-7346-ac9e-24b10043ade9` used background delivery watchers, then delegated merge monitoring to a Bash-only subagent that made 33 Bash calls, including repeated sleeps, before the user corrected it. The parent combined mechanical waiting with a rich final report. Keeping these phases separate preserves model ownership without paying for model turns to observe unchanged state.

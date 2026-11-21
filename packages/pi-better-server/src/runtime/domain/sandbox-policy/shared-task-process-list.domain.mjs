@@ -8,6 +8,7 @@ import { unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { maybeBuildSandboxCommand } from "./shared-sandbox-core.domain.mjs";
 export const PROCESS_LIST_TOOL = "process_list";
+export const PROCESS_ACCESS_OFF = "Sandbox: Process access is Off. Enable Read in /sandbox.";
 const EXECUTABLE = "/usr/bin/pgrep";
 const MAX_STDOUT = 1024 * 1024;
 const MAX_STDERR = 2048;
@@ -147,11 +148,11 @@ function run(file, argv, cwd, home, signal) {
         });
     });
 }
-export function createProcessListToolDefinition(cwd, controller, access) {
+export function createProcessListToolDefinition(cwd, controller, access, accessDenied = () => PROCESS_ACCESS_OFF) {
     let identity;
     const checkAccess = () => {
         if (access() !== "read")
-            throw new Error("Sandbox: Process access is Off. Enable Read in /sandbox.");
+            throw new Error(accessDenied());
     };
     const checkExecutable = () => {
         const current = executableIdentity();

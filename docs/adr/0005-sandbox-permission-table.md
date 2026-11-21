@@ -1,5 +1,7 @@
 # Sandbox permission table and credential-file scope
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#permission-to-use-a-tool).
+
 ## Status
 
 Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in activation policy for all three profiles. Amended by [#572](https://github.com/1aboveio/pi-better-harness/issues/572) to add an independent Background tasks profile, replacing ADR 0004's Main inheritance for local background launches. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.

@@ -34,7 +34,7 @@
  * A builtin needs no extension, so it never counts as unmapped.
  */
 // codemode is supplied by the harness child adapter, not a discovered package.
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "codemode"];
+export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"];
 /** Marker spec meaning "this extension's own package" (for allow_nested). */
 export const SELF_SPEC = "self";
 /**
@@ -87,11 +87,11 @@ export function toolList(tools) {
  * @returns {{mode: "isolated"|"clean"|"inherit", specs: string[], unmapped: string[], reasons: Record<string,string[]>}}
  *   mode     — "isolated" passes --no-extensions + explicit -e (the default);
  *              "clean" passes --no-extensions with no -e;
- *              "inherit" passes neither (operator opt-out, NOT model-selectable).
+ *              "inherit" keeps discovery and adds explicitly selected mappings.
  *   specs    — extension specs to load, deduped, in a stable order.
  *   unmapped — requested tools that are neither builtin nor mapped to an
- *              extension. They simply will not exist in the child; surfaced so
- *              the human sees it instead of the child silently lacking a tool.
+ *              extension. Admission rejects a known missing required provider.
+ *              Preflight verifies registrations supplied by loaded extensions.
  *   reasons  — spec -> what pulled it in, for the spawn diagnostic.
  */
 export function resolveExtensions(a = {}) {
@@ -107,13 +107,11 @@ export function resolveExtensions(a = {}) {
     };
     // allow_nested is honored in every mode: it is an explicit caller request,
     // and without our own package loaded the child has no subagent tools at all.
-    if (a.allowNested)
+    const inherit = cfg.inheritExtensions === true;
+    if (a.allowNested && !inherit)
         add(SELF_SPEC, "allow_nested");
-    if (cfg.inheritExtensions === true) {
-        return { mode: "inherit", specs: [], unmapped: [], reasons: {} };
-    }
     if (a.clean === true) {
-        return { mode: "clean", specs, unmapped: [], reasons };
+        return { mode: inherit ? "inherit" : "clean", specs, unmapped: [], reasons };
     }
     const toolMap = cfg.toolExtensions ?? {};
     const unmapped = [];
@@ -122,13 +120,15 @@ export function resolveExtensions(a = {}) {
             continue;
         const mapped = toSpecList(toolMap[tool]);
         if (mapped.length === 0) {
-            if (!unmapped.includes(tool))
+            if (!inherit && !unmapped.includes(tool))
                 unmapped.push(tool);
             continue;
         }
         for (const spec of mapped)
             add(spec, `tool:${tool}`);
     }
+    if (inherit)
+        return { mode: "inherit", specs, unmapped, reasons };
     // Model auth is not tool-shaped: xai/grok needs pi-xai-oauth loaded or the
     // child cannot authenticate at all, whatever tools it was granted. A user
     // entry for a provider wins over the built-in one, including an empty list
@@ -150,9 +150,7 @@ export function resolveExtensions(a = {}) {
  * @returns {{args: string[], missing: string[]}}
  */
 export function extensionArgs(resolution, resolvePath) {
-    if (resolution.mode === "inherit")
-        return { args: [], missing: [] };
-    const args = ["--no-extensions"];
+    const args = resolution.mode === "inherit" ? [] : ["--no-extensions"];
     const missing = [];
     for (const spec of resolution.specs) {
         const path = resolvePath(spec);

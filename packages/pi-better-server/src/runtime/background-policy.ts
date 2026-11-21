@@ -4,8 +4,14 @@ export function effectiveBackgroundPolicy(captured: any, fresh: any, workspace: 
         return undefined;
     if (captured && ['failed', 'unavailable'].includes(captured.state))
         return captured;
-    const old = captured?.permissions ?? fresh, access = ['off', 'read', 'write', 'read-write'];
-    const profile = { ...fresh, enabled: Boolean(old.enabled || fresh.enabled) };
+    const old = captured?.permissions;
+    const finish = (profile: any) => ({ ...captured, state: profile.enabled ? 'enabled' : captured?.state ?? 'inactive',
+        writableRoot: captured?.writableRoot ?? workspace, denyWrite: captured?.denyWrite ?? [], permissions: profile,
+        reason: 'Captured Background authority intersected with current mandatory profile' });
+    if (!fresh.enabled) return finish(old?.enabled ? { ...old } : { ...fresh });
+    if (!old?.enabled) return finish({ ...fresh });
+    const access = ['off', 'read', 'write', 'read-write'];
+    const profile = { ...fresh };
     for (const key of ['projectFiles', 'outsideProject', 'storedCredentials']) {
         if (!access.includes(old[key]) || !access.includes(fresh[key]))
             throw new Error('permission-unavailable: invalid Background profile');
@@ -17,6 +23,5 @@ export function effectiveBackgroundPolicy(captured: any, fresh: any, workspace: 
     profile.processAccess = old.processAccess === 'read' && fresh.processAccess === 'read' ? 'read' : 'off';
     const limits = [old.commandTimeoutSeconds, fresh.commandTimeoutSeconds].filter(n => typeof n === 'number' && n > 0);
     profile.commandTimeoutSeconds = limits.length ? Math.min(...limits) : null;
-    return { ...captured, state: profile.enabled ? 'enabled' : captured?.state ?? 'inactive', writableRoot: captured?.writableRoot ?? workspace,
-        denyWrite: captured?.denyWrite ?? [], permissions: profile, reason: 'Captured Background authority intersected with current mandatory profile' };
+    return finish(profile);
 }

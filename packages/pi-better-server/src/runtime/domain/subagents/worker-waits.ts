@@ -70,6 +70,7 @@ import {
     effectiveStatus,
     isPendingPark,
     listParkRecordCandidates,
+    scanParkRecords,
     listMetas,
     listPendingParkedRuns,
     readMeta,
@@ -1106,7 +1107,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     note: typeof params.note === "string" ? params.note : "",
                     owner,
                 }) as unknown as WorkerAcknowledgeView;
-                const parked = parkedWaitByGeneration(waitId, generation);
+                const parked = await parkedWaitByGeneration(waitId, generation);
                 if (parked) updateParkRecord(parked.runId, { phase: "consumed" });
                 return view;
             };
@@ -1679,14 +1680,15 @@ export function parkedWaits(): ParkedWait[] {
 }
 
 export function parkedWaitForRun(runId: string): ParkedWait | null {
-    return parkedWaits().find((entry) => entry.runId === runId) ?? null;
+    const meta = readMeta(runId);
+    const record = meta && readParkRecord(runId);
+    return meta && record && isPendingPark(record) ? parkedEntry(meta, record) : null;
 }
 
 /** A parked attempt's record for one wait generation, in any phase. */
-export function parkedWaitByGeneration(waitId: string, generation: number): ParkedWait | null {
-    for (const meta of listMetas()) {
-        const record = readParkRecord(meta.id);
-        if (!record || record.waitId !== waitId || record.generation !== generation) continue;
+export async function parkedWaitByGeneration(waitId: string, generation: number): Promise<ParkedWait | null> {
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.waitId !== waitId || record.generation !== generation) continue;
         return parkedEntry(meta, record);
     }
     return null;
@@ -2181,14 +2183,14 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                     || record.waitId !== event.waitId || record.generation !== event.generation) return "deferred";
                 park = parkedEntry(meta, record);
             } else {
-                park = parkedWaitByGeneration(event.waitId, event.generation);
+                park = await parkedWaitByGeneration(event.waitId, event.generation);
             }
             if (!park) return "delivered";
             const outcome = await resume(park);
             return outcome === "skipped" ? "deferred" : "delivered";
         },
         async onWaitCancelled(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            const park = await parkedWaitByGeneration(event.waitId, event.generation);
             if (!park || park.record.phase === "cancelled") return;
             const cancellation = await stopPublishedAttempt(park, event.reason, options.stopAttempt, options.now);
             updateParkRecord(park.runId, {
@@ -2410,6 +2412,7 @@ export function isTerminalAttempt(meta: RunMeta): boolean {
 export interface ResumedAttemptExitInput {
     /** The attempt id published by the resume claim (NOT the parked attempt). */
     attemptId: string;
+    priorPark?: { runId: string; waitId: string; generation: number };
     service: WorkerOperationService | undefined;
     /** Recorded status for the reason text. */
     status?: string;
@@ -2458,7 +2461,20 @@ export function conversationWriterLeaseLive(
  * remain unchanged, even if writer exit cannot yet be proved.
  */
 export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): Promise<ResumedAttemptExitResult> {
-    return settleResumedAttemptExitForParks(input, parkedWaitsForResumedAttempt(input.attemptId));
+    if (input.priorPark) {
+        const { runId, waitId, generation } = input.priorPark;
+        const meta = readMeta(runId);
+        const record = meta && readParkRecord(runId);
+        if (!meta || !record || record.waitId !== waitId || record.generation !== generation || record.resumedBy !== input.attemptId) {
+            return { outcome: "ignored" };
+        }
+        return settleResumedAttemptExitForParks(input, [parkedEntry(meta, record)]);
+    }
+    const candidates: ParkedWait[] = [];
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.resumedBy === input.attemptId) candidates.push(parkedEntry(meta, record));
+    }
+    return settleResumedAttemptExitForParks(input, candidates);
 }
 
 async function settleResumedAttemptExitForParks(input: ResumedAttemptExitInput, candidates: readonly ParkedWait[]): Promise<ResumedAttemptExitResult> {
@@ -2703,12 +2719,10 @@ export async function reconcileParkedWaits(
     // Consumed waits cannot resume, but a missed exit observer may have left
     // their published writer claim behind. Reconcile that exact claim once.
     const candidates: ParkedWait[] = [];
-    for (const meta of listParkRecordCandidates()) {
-        const snapshot = meta.park ?? readParkRecord(meta.id);
-        if (!snapshot || (!isPendingPark(snapshot) && !(snapshot.phase === "consumed" && snapshot.resumedBy
-            && snapshot.resumeClaimId && snapshot.resumeExitReconciledClaimId !== snapshot.resumeClaimId))) continue;
-        const record = readParkRecord(meta.id);
-        if (record) candidates.push(parkedEntry(meta, record));
+    for await (const { meta, record } of scanParkRecords()) {
+        if (!isPendingPark(record) && !(record.phase === "consumed" && record.resumedBy
+            && record.resumeClaimId && record.resumeExitReconciledClaimId !== record.resumeClaimId)) continue;
+        candidates.push(parkedEntry(meta, record));
     }
     // Release earlier writers before admitting later waits in the conversation.
     candidates.sort((a, b) => a.record.parkedAt - b.record.parkedAt);

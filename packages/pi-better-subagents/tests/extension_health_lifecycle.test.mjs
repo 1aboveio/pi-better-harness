@@ -1880,6 +1880,9 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 const epoch = readMeta(id).management.epoch;
                 await h.shutdown(); stage("initial-ui-stopped");
                 const branch = fixture.makeHarness({ ui: true }); await branch.ready;
+                // A fresh UI connects on first use. Observe a real connected-to-degraded transition.
+                await branch.tools.get("subagent_list").execute("open-work", { limit: 1 });
+                assert.equal((await branch.inspect()).observation?.status, "ready");
                 stage("other-branch-ready"); await fixture.pauseRuntime(); stage("runtime-paused");
                 if (!await waitFor(async () => (await branch.inspect()).observation?.status === "degraded")) throw new Error("actual canonical disconnect was not observed");
                 assert.equal((await branch.inspect()).healthActive, false, "degraded UI never falls back to frontend reconciliation");

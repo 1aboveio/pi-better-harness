@@ -1,14 +1,8 @@
 // Generated fixed launch domain from packages/pi-better-subagents/subagent-tools.ts. Do not edit directly.
-/**
- * Launch-time plan for a confined child's extension tools (ADR 0009).
- *
- * Guarded: apply_patch, a harness adapter on the guarded file operations.
- * Trusted: a tool ticked in /sandbox, admitted by name AND owning package, whose
- * package is loaded into the child. `toolExtensions` in config.json still picks
- * the package to load (an override), but the loaded package must be the ticked one.
- */
+/** Bind selected tools to their confined adapter or canonical provider before startup (ADR 0027). */
+import { supportedChildEntrypoint } from "./config.domain.mjs";
 import { canonicalizePath } from "./shared-sandbox-core.domain.mjs";
-import { isNetworkTool, packageLabel, toolPackage } from "./shared-task-tools.domain.mjs";
+import { isNetworkTool, packageLabel, discoverTrustedTools, RESERVED_TOOL_NAMES } from "./shared-task-tools.domain.mjs";
 export const APPLY_PATCH = "apply_patch";
 function specList(value) {
     if (typeof value === "string")
@@ -17,6 +11,7 @@ function specList(value) {
 }
 export function planTaskTools(options) {
     const plan = { applyPatch: false, trusted: [], refused: [] };
+    const registered = discoverTrustedTools(options.registered);
     for (const name of options.requested) {
         if (name === "process_list" && options.processAccess !== "read") {
             plan.refused.push({ name, reason: "Process access is Off; enable Read in /sandbox" });
@@ -25,15 +20,11 @@ export function planTaskTools(options) {
         if (options.builtins.includes(name))
             continue;
         if (name === APPLY_PATCH) {
-            if (options.settings.applyPatch)
-                plan.applyPatch = true;
-            else
-                plan.refused.push({ name, reason: "apply_patch is off in /sandbox (Subagents · Tools)" });
+            plan.applyPatch = true;
             continue;
         }
-        const ticked = options.settings.trusted.filter((entry) => entry.name === name);
-        if (!ticked.length) {
-            plan.refused.push({ name, reason: "not a guarded tool and not ticked as trusted in /sandbox (Subagents · Tools)" });
+        if (RESERVED_TOOL_NAMES.includes(name)) {
+            plan.refused.push({ name, reason: "no supported task adapter" });
             continue;
         }
         const network = isNetworkTool(name);
@@ -41,39 +32,32 @@ export function planTaskTools(options) {
             plan.refused.push({ name, reason: "needs Network access, which is Off for subagents" });
             continue;
         }
-        // Which package to load: a config override, else the package that registers
-        // the tool in this Pi, else an installed npm package by its spec.
-        const override = specList(options.toolExtensions?.[name]);
+        // The selected mapping identifies the implementation. Old saved entries can
+        // still identify its package when the worker has no configured mapping.
+        const mapped = specList(options.toolExtensions?.[name]);
+        const packages = mapped.length ? mapped : options.settings.trusted.filter(tool => tool.name === name).map(tool => tool.package);
         let chosen;
-        let problem;
-        for (const entry of ticked) {
-            if (override.length) {
-                if (!override.includes(entry.package))
-                    continue;
-                const loadPath = options.resolvePath(entry.package);
-                if (loadPath) {
-                    chosen = { package: entry.package, loadPath };
-                    break;
-                }
-                problem = `its package ${packageLabel(entry.package)} is not installed`;
-                continue;
-            }
-            const owner = options.registered.map(toolPackage).find((tool) => tool?.name === name && tool.package === entry.package);
-            const loadPath = owner?.root ?? (entry.package.startsWith("npm:") ? options.resolvePath(entry.package) : undefined);
-            if (loadPath) {
-                chosen = { package: entry.package, loadPath };
+        for (const pkg of packages) {
+            const owner = registered.find(tool => tool.name === name && tool.package === pkg);
+            const path = mapped.length ? options.resolvePath(pkg) : owner?.root ?? (pkg.startsWith("npm:") ? options.resolvePath(pkg) : undefined);
+            if (path) {
+                chosen = { package: pkg, loadPath: path };
                 break;
             }
-            problem = `its package ${packageLabel(entry.package)} can't be found (not installed or not loaded in this Pi)`;
         }
         if (!chosen) {
-            plan.refused.push({ name, reason: problem ?? `config.json toolExtensions maps it to ${override.map(packageLabel).join(", ")}, not the ticked package ${ticked.map((t) => packageLabel(t.package)).join(", ")}` });
+            const reason = packages.length ? `provider ${packages.map(packageLabel).join(", ")} is unavailable` : "no provider selected for this worker";
+            plan.refused.push({ name, reason });
             continue;
         }
         // A directory is admitted as a package root; a file admits only itself.
         let root;
         try {
             root = canonicalizePath(chosen.loadPath);
+            if (!supportedChildEntrypoint(name, chosen.package, root)) {
+                plan.refused.push({ name, reason: "provider requires a supported task adapter" });
+                continue;
+            }
         }
         catch {
             plan.refused.push({ name, reason: `its package path ${chosen.loadPath} can't be resolved` });

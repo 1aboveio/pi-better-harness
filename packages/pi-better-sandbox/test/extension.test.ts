@@ -305,6 +305,11 @@ nodeTest("Subagents execution restrictions block incompatible consumers even wit
             assert.match(refusal.reason, /no compatible application execution adapter/);
         }
         assert.equal(recorded.published.at(-1)?.state, "disabled");
+        settings.subagents.enabled = false;
+        recorded.branch.push(sessionEntry({ version: 1, permissions: settings }, "subagents-off"));
+        await recorded.handlers.get("session_tree")!({}, started.ctx);
+        assert.equal(guard({ toolName: "subagent_spawn", input: { sandbox: true } }, started.ctx), undefined);
+        assert.equal(guard({ toolName: "subagent_spawn_batch", input: { shared: { sandbox: true }, jobs: [{}] } }, started.ctx), undefined);
         await recorded.handlers.get("session_shutdown")!({}, started.ctx);
     }
 });
@@ -773,7 +778,7 @@ nodeTest("old session snapshots inherit Main once and do not re-link Background 
     await recorded.handlers.get("session_shutdown")!({}, started.ctx);
 });
 
-test("UI edits persist both profiles and tools to session only and immediately enforce restrictions", async () => {
+test("UI edits persist resource profiles to the session and immediately enforce restrictions", async () => {
     forgetDenyOverride();
     forgetSandboxPreference();
     writePermissionSettings(defaultSandboxPermissions());
@@ -797,19 +802,13 @@ test("UI edits persist both profiles and tools to session only and immediately e
         await press(" "); // Subagents on.
         for (let i = 0; i < 7; i++) await press("\x1b[B");
         await press(" "); // Subagents network off.
-        await press("\x1b[B"); // Skip the independent Process access row.
-        await press("\x1b[B");
-        await press(" "); // Guarded apply_patch off.
-        await press("\x1b[B");
-        await press(" "); // Default trusted group off.
-        assert.doesNotMatch(page.render(120).join("\n"), /Save as defaults/);
-        page.handleInput?.("\r"); // Fold, not save.
+        assert.doesNotMatch(page.render(120).join("\n"), /\[[ x]\] apply_patch|Subagents · Tools/);
+        page.handleInput?.("\r");
     });
     const expected = defaultSandboxPermissions();
     Object.assign(expected.main, { enabled: true, projectFiles: "off", commands: false, network: false });
     Object.assign(expected.subagents, { enabled: true, network: false });
-    expected.subagentTools = { applyPatch: false, trusted: [] };
-    assert.equal(recorded.branch.length, 8, "each policy edit creates one custom entry");
+    assert.equal(recorded.branch.length, 6, "each policy edit creates one custom entry");
     const last = recorded.branch.at(-1)!;
     assert.equal(last.type, "custom");
     assert.deepEqual((last as { data: unknown }).data, { version: 1, permissions: expected });
@@ -1538,22 +1537,74 @@ test("saved permissions reach file tools, command gates, and consumer snapshots"
     forgetSandboxPreference();
 });
 
-test("saved Process access Off remains enforced even when Main confinement is inactive", async () => {
+test("Main reports its own Process access source through live edits, reload, and new defaults", async () => {
     forgetSandboxPreference();
     const settings = defaultSandboxPermissions();
     settings.main.processAccess = "off";
+    settings.subagents.enabled = true;
+    settings.subagents.processAccess = "read";
     writePermissionSettings(settings);
     const recorded = record();
     piBetterSandbox(recorded.pi);
-    const started = await startSession(recorded, project("process-off"), "startup", false, false);
-    assert.equal(recorded.published.at(-1)?.permissions?.processAccess, "off");
-    await assert.rejects(() => recorded.tools.get("process_list")!.execute("process-off", {}, undefined, undefined, started.ctx), /Process access is Off/);
+    const root = project("main-process-transition");
+    const started = await startSession(recorded, root, "startup", false, false);
+    const tool = recorded.tools.get("process_list")!;
+    const call = () => tool.execute("process", { name: 123 }, undefined, undefined, started.ctx);
+    const gate = () => recorded.toolCallHandlers[0]!({ toolName: "process_list", input: {} }, started.ctx);
+    const checkStatus = async (expected: RegExp) => {
+        await runSandbox(recorded, "status", started.ctx);
+        assert.match(started.notifications.at(-1)?.text ?? "", expected);
+    };
+
+    try {
+        await assert.rejects(call, /process_list name must be a string/);
+        await checkStatus(/allowed by policy \(Main confinement Off; retained Process access: Off, from saved defaults\)/);
+        assert.equal(recorded.published.at(-1)?.subagentPermissions?.processAccess, "read");
+
+        await runSandbox(recorded, "on", started.ctx);
+        const mainDenial = /Main process_list: Process access is Off \(this session branch\).*Main > Process access.*without a restart/;
+        assert.match((gate() as { reason: string }).reason, mainDenial);
+        await assert.rejects(call, mainDenial);
+        await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
+        await assert.rejects(call, /process_list name must be a string/);
+        await checkStatus(/allowed by policy \(Main confinement Off; retained Process access: Off, from this session branch\)/);
+
+        // Another session saves a new global default. Neither this existing branch
+        // nor a reload of it should silently replace the branch's Off setting.
+        settings.main.processAccess = "read";
+        settings.subagents.enabled = false;
+        writePermissionSettings(settings);
+        await assert.rejects(call, /process_list name must be a string/);
+        await startSession(recorded, root, "reload", false, false);
+        await checkStatus(/Main confinement Off; retained Process access: Off, from this session branch/);
+        await runSandbox(recorded, "on", started.ctx);
+        await assert.rejects(call, mainDenial);
+
+        await permissionsPage(recorded, root, async (_page, press) => {
+            for (let row = 0; row < 8; row++) await press("\x1b[B");
+            await press(" "); // Main Process access Off -> Read.
+        });
+        assert.equal(recorded.tools.get("process_list"), tool);
+        assert.equal(gate(), undefined);
+        await assert.rejects(call, /process_list name must be a string/);
+        await checkStatus(/Main process_list: Process access is Read \(this session branch\)/);
+        await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
+        await assert.rejects(call, /process_list name must be a string/);
+        await checkStatus(/Main confinement Off; retained Process access: Read, from this session branch/);
+
+        await startSession(recorded, root, "new", false, false);
+        await checkStatus(/Main confinement Off; retained Process access: Read, from saved defaults/);
+        assert.equal(recorded.published.at(-1)?.subagentPermissions?.enabled, false);
+    } finally {
+        await recorded.handlers.get("session_shutdown")!({}, started.ctx);
+        forgetSandboxPreference();
+    }
 });
 
 test("completions cover activation defaults and deny actions", () => {
     assert.deepEqual(
         sandboxArgumentCompletions("").map((entry) => entry.value),
-        ["on", "off", "default", "deny", "rules", "diagnostics"],
+        ["on", "off", "default", "deny", "rules", "diagnostics", "status"],
     );
     assert.deepEqual(
         sandboxArgumentCompletions("de").map((entry) => entry.value),
