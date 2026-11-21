@@ -91,6 +91,12 @@ function animationUI(components, requestRender) {
 }
 const rendered = (component) => component.render(100).join("\n");
 
+function compactionTokenLine(tokensBefore) {
+  // The rendered token count uses the ambient locale's grouping separator.
+  const expectedTokens = new Intl.NumberFormat().format(tokensBefore).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`Compaction.*${expectedTokens} tokens`);
+}
+
 test("fallback tools show arguments even with a definition but no custom call renderer", () => {
   const hook = install();
   hook.setEnabled(true);
@@ -114,10 +120,6 @@ test("compaction summaries fold to one quiet row, expand original details, and r
   const hook = installMinimalOutputHook(ToolExecutionComponent.prototype, () => themeModule.theme, prototype);
   handles.push(hook);
   const message = { summary: "COMPACTION_SUMMARY_SENTINEL", tokensBefore: 12345 };
-  // The SDK formats the token count with the ambient locale ("12,345" in en,
-  // "12 345" with a narrow no-break space in fr): derive the expectation the
-  // same way instead of assuming an English grouping separator.
-  const expectedTokens = new Intl.NumberFormat().format(12345).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const component = new CompactionSummaryMessageComponent(message);
   const normal = rendered(component);
   hook.setEnabled(true);
@@ -127,7 +129,7 @@ test("compaction summaries fold to one quiet row, expand original details, and r
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     assert.doesNotMatch(lines.join("\n"), /COMPACTION_SUMMARY_SENTINEL|\x1b\[(?:48|4[0-7])[;m]/);
   }
-  assert.match(stripVTControlCharacters(rendered(component)), new RegExp(`Compaction.*${expectedTokens} tokens`));
+  assert.match(stripVTControlCharacters(rendered(component)), compactionTokenLine(message.tokensBefore));
   assert.equal(component.message, message);
   component.setExpanded(true);
   assert.match(rendered(component), /COMPACTION_SUMMARY_SENTINEL/);
@@ -1311,7 +1313,8 @@ test("minimal mode patches the running bundled host and retains only its bash he
     const compactionPrototype = await loadCompactionPrototype();
     assert.equal(compactionPrototype, host.CompactionSummaryMessageComponent.prototype);
     const originalCompactionRender = compactionPrototype.render;
-    const summary = new host.CompactionSummaryMessageComponent({ summary: "BUNDLED_COMPACTION_SUMMARY", tokensBefore: 12345 });
+    const compactionMessage = { summary: "BUNDLED_COMPACTION_SUMMARY", tokensBefore: 12345 };
+    const summary = new host.CompactionSummaryMessageComponent(compactionMessage);
     const customPrototype = await loadCustomMessagePrototype();
     assert.equal(customPrototype, host.CustomMessageComponent.prototype);
     const originalCustomRender = customPrototype.render;
@@ -1331,7 +1334,7 @@ test("minimal mode patches the running bundled host and retains only its bash he
     assert.doesNotMatch(rendered(callback), /BUNDLED_CALLBACK_DETAIL/);
     callback.setExpanded(true);
     assert.match(rendered(callback), /BUNDLED_CALLBACK_DETAIL/);
-    assert.match(rendered(summary), /Compaction.*12,345 tokens/);
+    assert.match(stripVTControlCharacters(rendered(summary)), compactionTokenLine(compactionMessage.tokensBefore));
     summary.setExpanded(true);
     assert.match(rendered(summary), /BUNDLED_COMPACTION_SUMMARY/);
     summary.setExpanded(false);
