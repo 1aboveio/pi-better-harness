@@ -126,6 +126,7 @@ describe("withWindowsLogRedirect", () => {
   });
 
   it("pins the argv trampoline shape: redirect, MSYS2 exclusion, verbatim exec", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "C:\\Git\\bin\\bash.exe");
     const result = withWindowsLogRedirect(
       { shell: false, argv: ["cmd.exe", "/c", "echo", "ok"], cwd: "C:\\work", env: { A: "1" } },
       "C:\\Temp\\log.log",
@@ -207,11 +208,11 @@ describe("resolveDefaultShell", () => {
     expect(mockExists).not.toHaveBeenCalled();
   });
 
-  it("prefers the first existing Git for Windows candidate", () => {
+  it("uses the first existing Git for Windows candidate when shellPath is unavailable", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     fakePlatform("win32");
     mockExists.mockImplementation((p) => norm(String(p)) === norm("C:\\Program Files\\Git\\bin\\bash.exe"));
-    expect(resolveDefaultShell()).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
+    expect(resolveDefaultShell("Z:/missing/bash.exe")).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
   });
 
   it("prefers an earlier Git candidate over a later one", () => {
