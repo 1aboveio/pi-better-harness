@@ -56,7 +56,9 @@ jobs:
         with:
           node-version: 24.14.1
           cache: npm
-      - run: npm ci
+      # Resource measurements need the locked dependency tree. Extra registry lookups
+      # can hold this step open after npm has printed the installation summary.
+      - run: npm ci --no-audit --no-fund --update-notifier=false
         id: install
       - name: Export pinned private runtime Node
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
@@ -126,6 +128,13 @@ jobs:
           fi
           bwrap --ro-bind / / -- /bin/true
           node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
+      - name: Accept isolated Git writers, workspace recovery and partial results
+        if: matrix.group == 'confinement'
+        run: |
+          node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test --test-concurrency=1 \
+            packages/pi-better-subagents/tests/isolated-workspace.test.mjs \
+            packages/pi-better-subagents/tests/git_clone_workspace_live.test.mjs \
+            packages/pi-better-subagents/tests/timing_lifecycle.test.mjs
       - name: Verify Node 24 confinement and fixture cleanup
         if: matrix.group == 'confinement'
         run: |
@@ -699,6 +708,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Accept checkout recovery under macOS Seatbelt
+        if: matrix.shard == 1
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/isolated-workspace.test.mjs
       - name: Accept tool loading and use permissions in a real SDK worker
         if: matrix.shard == 1
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs

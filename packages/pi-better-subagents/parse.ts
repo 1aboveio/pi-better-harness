@@ -28,7 +28,7 @@ import {
 } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
 import { readAppendedLines, parseLogEvent, logReadMetrics, type LogCursor } from "./log-cursor.ts";
-import { logPathFor } from "./registry.ts";
+import { evidenceLogPath } from "./registry.ts";
 
 interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
 interface Cost { total?: number }
@@ -91,7 +91,7 @@ const readTail: (path: string, maxBytes: number) => TailRead = readBoundedTail;
 
 /** Last `n` terminal display rows of a run's log, or a placeholder if empty/unreadable. */
 export function tailLog(id: string, n: number, maxBytes = maxRawTailBytes()): string {
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(evidenceLogPath(id), maxBytes);
     if (tail.error || tail.text.trim() === "") return "(no output yet)";
     const out = tailTerminalDisplay(tail.text, n).trim();
     return out === "" ? "(no output yet)" : out;
@@ -125,6 +125,7 @@ export interface ParsedRun {
     finalText: string;
     /** Latest streamed text/thinking, for a live progress peek. */
     lastActivity: string;
+    deniedWorktreeGitOperation?: string;
     /** Names of tools the child invoked, in order (deduped-adjacent). */
     toolCalls: string[];
     /** Every tool execution start seen, including adjacent repeats (opt-in `include: ["tools"]`). */
@@ -187,7 +188,7 @@ export function readRunTranscript(
 ): RunTranscript {
     const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
     const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
-    const tail = readTail(options.logPath ?? logPathFor(id), maxBytes);
+    const tail = readTail(options.logPath ?? evidenceLogPath(id), maxBytes);
     if (tail.error) return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
 
     const lines = tail.text.split(/\r?\n/);
@@ -927,7 +928,7 @@ function feedStructuralRecordChar(scan: StructuralRecordScan, ch: string): void 
  * only after a record is grammar-valid; unfinished/malformed records fail closed.
  */
 export function scanLifecycleEvidence(id: string): LifecycleEvidence {
-    const path = logPathFor(id);
+    const path = evidenceLogPath(id);
     let totalBytes = 0;
     try {
         totalBytes = statSync(path).size;
@@ -1103,6 +1104,7 @@ interface ParseState {
     usage: Usage;
     finalText: string;
     lastActivity: string;
+    deniedWorktreeGitOperation?: string;
     toolCalls: string[];
     toolCallCount: number;
     openToolCalls: Map<string, UnmatchedToolCall>;
@@ -1307,6 +1309,8 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
         state.openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, { id: toolCallId, toolName });
     }
     if (type === "tool_execution_end") {
+        const operation = (e.result as { details?: { deniedWorktreeGitOperation?: unknown } } | undefined)?.details?.deniedWorktreeGitOperation;
+        if (e.isError && typeof operation === "string" && /^[a-z-]{1,24}$/.test(operation)) state.deniedWorktreeGitOperation = operation;
         if (toolCallId) {
             state.openToolCalls.delete(toolCallId);
         } else if (typeof e.toolName === "string") {
@@ -1328,7 +1332,7 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
     const key = options.logPath ?? id;
     const states = options.states ?? parseStates;
     const previous = states.get(key);
-    const path = options.logPath ?? logPathFor(id);
+    const path = options.logPath ?? evidenceLogPath(id);
     let catchUp = false;
     if (options.summaryOnly) {
         try { catchUp = statSync(path).size > 1024 * 1024; } catch { /* read reports errors */ }
@@ -1392,6 +1396,7 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
     return {
         finalText: view.finalText,
         lastActivity: view.lastActivity,
+        ...(view.deniedWorktreeGitOperation ? { deniedWorktreeGitOperation: view.deniedWorktreeGitOperation } : {}),
         toolCalls: [...view.toolCalls],
         toolCallCount: view.toolCallCount,
         unmatchedToolCalls: [...view.openToolCalls.values()],

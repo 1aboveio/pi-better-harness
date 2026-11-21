@@ -25,6 +25,7 @@ import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from ".
 export interface SubagentConfig extends TimingSettings {
     /** Foreground delegation policy; /subagents mode overrides this for the current session. */
     delegationMode?: DelegationMode | null;
+    gitWorkspace?: "clone" | "worktree";
     defaultModel?: string | null;
     defaultTools?: string | null;
     /**
@@ -197,6 +198,7 @@ export function writeSubagentSettings(
     settings: {
         delegationMode: DelegationMode;
         maxConcurrent: number;
+        gitWorkspace?: "clone" | "worktree";
         maxMinutes?: number;
         /** Omit to preserve the saved value; `null` explicitly records discovery. */
         defaultSkills?: string[] | null;
@@ -211,11 +213,15 @@ export function writeSubagentSettings(
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
     const next: {
         delegationMode: DelegationMode; maxConcurrent: number; maxMinutes?: number; defaultSkills?: string[] | null;
-        toolWaitMinutes?: number; stuckMinutes?: number;
+        toolWaitMinutes?: number; stuckMinutes?: number; gitWorkspace?: "clone" | "worktree";
     } = {
         delegationMode: settings.delegationMode,
         maxConcurrent: settings.maxConcurrent,
     };
+    if (settings.gitWorkspace !== undefined) {
+        if (settings.gitWorkspace !== "clone" && settings.gitWorkspace !== "worktree") throw new Error("Unknown Git workspace mode.");
+        next.gitWorkspace = settings.gitWorkspace;
+    }
     if (settings.maxMinutes !== undefined) {
         next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
     }

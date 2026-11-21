@@ -1,5 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-subagents/failures.ts. Do not edit directly.
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { resultDir } from "./session-store.domain.mjs";
+import { existsSync, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { logPathFor, runDir, taskRuntimeTrust } from "./registry.domain.mjs";
 import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, findIncident, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered, observeFailures, pendingFailureAttention, readFailureState } from "./shared-failure-observations.domain.mjs";
@@ -16,7 +17,10 @@ const workerDiagnostics = new SandboxDiagnostics({ context: "worker",
 });
 export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
 export const failurePath = (id) => join(runDir(id), "failures.jsonl");
-export const readRunFailures = (id) => readFailureState(failurePath(id));
+export function readRunFailures(id) {
+    const retained = !existsSync(runDir(id)) && resultDir(id);
+    return readFailureState(retained ? join(retained, "failures.jsonl") : failurePath(id));
+}
 const scans = new Map();
 /** When each run's trust first could not be read, for the bounded wait (#325). */
 const trustUnknownSince = new Map();
@@ -176,6 +180,11 @@ function exactRuleLeftovers(path, prior) {
 /** Scan complete source records, independent of the finite progress/transcript tail. */
 export function collectRunFailures(id, cwd, terminal = false, assertCurrent = () => { }) {
     assertCurrent();
+    if (!existsSync(runDir(id))) {
+        const retained = resultDir(id);
+        if (retained && existsSync(join(retained, "result.json")))
+            return readRunFailures(id);
+    }
     const path = failurePath(id);
     let fd;
     try {

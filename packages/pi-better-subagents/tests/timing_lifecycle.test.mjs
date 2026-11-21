@@ -583,8 +583,11 @@ describe("harness timing: a steer queued behind a long tool call", () => {
         await withFakeClock(async () => {
             const h = await makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
-                appendEvents(run.id, longCallStart("hang"));
+                const directory = mkdtempSync(join(tmpdir(),"partial-result-"));
+                const artifact = join(directory,"profile.txt");
+                const run = await spawnRun(h, { cwd:directory, callback:false, deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
+                writeFileSync(artifact, "observed profile\n");
+                appendEvents(run.id, [{type:"message_end",message:{role:"assistant",content:[{type:"text",text:"Captured profile.txt before verification."}]}},...longCallStart("hang")]);
                 await untilSteerRequested(run.id);
                 rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 await tick();
@@ -595,7 +598,23 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "killed");
                 assert.equal(meta.timing.stopReason, "ceiling");
+                const read = () => h.tools.get("subagent_result").execute("result", { id: run.id }, undefined, undefined, h.ctx);
+                const result = (await read()).content[0].text;
+                for (const evidence of ["ceiling", "unverified", "bash", "Captured profile.txt", directory]) {
+                    assert.ok(result.includes(evidence), result);
+                }
+                assert.equal(readFileSync(artifact, "utf8"), "observed profile\n");
+                // Retire the quiescent attempt, then read through the same registered tool.
+                const { retainResult } = await import("../retained-result.ts");
+                retainResult(meta, join(runDir(run.id), "output.log"));
                 await reap(run);
+                const archived = await read();
+                assert.equal(archived.details.snapshot, undefined, "a saved attempt needs no live observation");
+                const retained = archived.content[0].text;
+                for (const evidence of ["ceiling", "unverified", "Captured profile.txt", directory]) {
+                    assert.ok(retained.includes(evidence), retained);
+                }
+                assert.equal(readFileSync(artifact, "utf8"), "observed profile\n");
             } finally { await h.shutdown(); }
         });
     });
@@ -753,10 +772,17 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 1);
                 await tick();
                 assert.equal(wakes(h, "stuck").length, 1, "once per stuck spell");
-                const previousStuckAnchor = readMeta(run.id).timing.stuckAnchorAt;
+                // The recipient can see the wake before the supervisor folds its durable receipt.
+                const previousStuckAnchor = await waitFor(async () => {
+                    await tick();
+                    return readMeta(run.id).timing.stuckAnchorAt;
+                });
+                assert.ok(previousStuckAnchor, "the supervisor acknowledged the first stuck wake");
                 appendEvents(run.id, editEvents("fix"));
-                await tick();
-                assert.equal(readMeta(run.id).timing.lastProgressAt > previousStuckAnchor, true,
+                assert.ok(await waitFor(async () => {
+                    await tick();
+                    return readMeta(run.id).timing.lastProgressAt > previousStuckAnchor;
+                }),
                     "the edit advances progress beyond the previous stuck spell");
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.doesNotMatch(result, /Timing: stuck/, "progress clears the stuck reason");

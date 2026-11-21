@@ -132,6 +132,11 @@ export function writeSubagentSettings(settings, path = configPath()) {
         delegationMode: settings.delegationMode,
         maxConcurrent: settings.maxConcurrent,
     };
+    if (settings.gitWorkspace !== undefined) {
+        if (settings.gitWorkspace !== "clone" && settings.gitWorkspace !== "worktree")
+            throw new Error("Unknown Git workspace mode.");
+        next.gitWorkspace = settings.gitWorkspace;
+    }
     if (settings.maxMinutes !== undefined) {
         next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
     }

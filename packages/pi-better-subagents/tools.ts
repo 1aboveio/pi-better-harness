@@ -18,7 +18,6 @@ import { createHash } from "node:crypto";
 import { assignmentFor, projectAssignment, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
-import { buildSubagentResultPayload } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
 import {
     SUBAGENT_LIST_DEFAULT_LIMIT,
@@ -41,6 +40,7 @@ import {
     requestScopeKey,
     resolveActiveOrigin,
     resolveRunAccess,
+    assembleSubagentResult,
     unknownRunError,
     type SubagentToolSession,
 } from "./output-payload.ts";
@@ -531,7 +531,8 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
-            const observed = await session.observeAssignment?.(meta.id);
+            // A saved result remains readable after its row leaves the live observation.
+            const observed = access.retained ? undefined : await session.observeAssignment?.(meta.id);
             const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params as Record<string, unknown>, ctx) : undefined;
             // Exact inspection has already checked recipient and read authority.
             // Its immutable terminal record supersedes an older shared projection
@@ -563,11 +564,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 }
                 return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
-            const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
-            if (body === null) {
-                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
-            }
-            return resultText(body);
+            return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey));
             });
         },
     } as ToolDefinition;

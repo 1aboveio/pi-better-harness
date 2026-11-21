@@ -1,3 +1,4 @@
+import { hasWorkspaceCheckpoint } from "./isolated-workspace.ts";
 /**
  * Subagent continuation.
  *
@@ -536,11 +537,12 @@ export function planContinuation(options: {
 
     let workspaceIsDir = false;
     try { workspaceIsDir = statSync(recipe.cwd).isDirectory(); } catch { workspaceIsDir = false; }
-    if (!workspaceIsDir) throw refusal(id, `its workspace ${recipe.cwd} is missing.`);
+    const recoverable = !workspaceIsDir && recipe.workspace && hasWorkspaceCheckpoint(recipe.workspace);
+    if (!workspaceIsDir && !recoverable) throw refusal(id, `its workspace ${recipe.cwd} is missing.`);
     if (recipe.sandboxDir !== undefined) {
         let sandboxIsDir = false;
         try { sandboxIsDir = statSync(recipe.sandboxDir).isDirectory(); } catch { sandboxIsDir = false; }
-        if (!sandboxIsDir) throw refusal(id, `its sandbox workspace ${recipe.sandboxDir} is missing.`);
+        if (!sandboxIsDir && !recoverable) throw refusal(id, `its sandbox workspace ${recipe.sandboxDir} is missing.`);
     }
 
     const lookup: ConversationLookup = findSavedConversation({

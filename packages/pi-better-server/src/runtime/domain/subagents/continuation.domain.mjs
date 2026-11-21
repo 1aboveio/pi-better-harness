@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/continuation.ts. Do not edit directly.
+import { hasWorkspaceCheckpoint } from "./isolated-workspace.domain.mjs";
 /**
  * Subagent continuation.
  *
@@ -452,7 +453,8 @@ export function planContinuation(options) {
     catch {
         workspaceIsDir = false;
     }
-    if (!workspaceIsDir)
+    const recoverable = !workspaceIsDir && recipe.workspace && hasWorkspaceCheckpoint(recipe.workspace);
+    if (!workspaceIsDir && !recoverable)
         throw refusal(id, `its workspace ${recipe.cwd} is missing.`);
     if (recipe.sandboxDir !== undefined) {
         let sandboxIsDir = false;
@@ -462,7 +464,7 @@ export function planContinuation(options) {
         catch {
             sandboxIsDir = false;
         }
-        if (!sandboxIsDir)
+        if (!sandboxIsDir && !recoverable)
             throw refusal(id, `its sandbox workspace ${recipe.sandboxDir} is missing.`);
     }
     const lookup = findSavedConversation({

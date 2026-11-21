@@ -1,4 +1,8 @@
 // Generated fixed launch domain from packages/pi-better-subagents/output-payload.ts. Do not edit directly.
+import { existsSync } from "node:fs";
+import { readRetainedResult } from "./retained-result.domain.mjs";
+import { worktreeDenialText } from "./worktree-feedback.domain.mjs";
+import { workspaceDelivery } from "./isolated-workspace.domain.mjs";
 /**
  * Model-facing subagent payloads (#312).
  *
@@ -14,7 +18,7 @@ import { assemblePriorityEnvelope, budgetFor, cursorKind, formatUnchangedEvidenc
 import { collectRunFailures, failurePath } from "./failures.domain.mjs";
 import { formatLifecycleDiagnostics, formatLostResult, formatOrphanedResult, resolveLifecycle, } from "./lifecycle.domain.mjs";
 import { parseRun, parseRunForLifecycle } from "./parse.domain.mjs";
-import { ABANDONED_LAUNCH_GRACE_MS, belongsToOrigin, effectiveStatus, inspectRunMeta, logPathFor, originOf, } from "./registry.domain.mjs";
+import { ABANDONED_LAUNCH_GRACE_MS, belongsToOrigin, effectiveStatus, inspectRunMeta, runDir, evidenceLogPath, originOf, } from "./registry.domain.mjs";
 import { actionableFailures, failureJournalFingerprint, fileChangeIdentity, failureRevision, formatIncidentSummary, formatTerminalIncidentSummary, incidentCursorScope, incidentPageHeading, incidentResource as sharedIncidentResource, incidentVerbatimPage, isIncidentCursor, requiresAction, scopedFailures, } from "./shared-failure-observations.domain.mjs";
 import { fmtElapsed, fmtSpend } from "./widget.domain.mjs";
 /** Bytes of a continuation answer page left for the incident count line. */
@@ -34,7 +38,11 @@ function isAll(value) {
  * run directory is missing.
  */
 export function loadRunRecord(id) {
-    return inspectRunMeta(id);
+    const live = inspectRunMeta(id);
+    if (live.kind === "unreadable" || (live.kind === "ok" && existsSync(runDir(id))))
+        return live;
+    const retained = readRetainedResult(id);
+    return retained ? { kind: "ok", meta: retained, retained: true } : live;
 }
 export function isRawMode(mode) {
     return String(mode ?? "").trim().toLowerCase() === "raw";
@@ -99,7 +107,7 @@ function contentRevisionFor(id, meta) {
         meta.endedAt ?? null,
         meta.lifecycleClassification ?? null,
         meta.failureReason ?? null,
-    ], logPathFor(id));
+    ], evidenceLogPath(id));
 }
 function assignmentLabel(meta) {
     const a = assignmentFor(meta, effectiveStatus(meta));
@@ -125,7 +133,7 @@ function outputIdentity(id, status, elapsed) {
 }
 function logGaps(id) {
     try {
-        statSync(logPathFor(id));
+        statSync(evidenceLogPath(id));
         return [];
     }
     catch (error) {
@@ -270,7 +278,7 @@ function wantsTail(request) {
     return isAll(request.tail);
 }
 function rawPage(ctx, cursor, remaining) {
-    const page = pageRetainedFile(logPathFor(ctx.id), {
+    const page = pageRetainedFile(evidenceLogPath(ctx.id), {
         cursor,
         maxBytes: remaining,
         resource: `raw:${ctx.scopeKey}:${ctx.id}`,
@@ -356,14 +364,14 @@ export function resolveRunAccess(id, request, session) {
     if (loaded.kind === "unreadable")
         return loaded;
     if (isAll(request.all))
-        return { kind: "ok", meta: loaded.meta };
+        return loaded;
     const resolved = resolveActiveOrigin(session);
     // Unwired factories (no session provider) exist only for unit tests that
     // build a tool without the extension. index.ts always passes a provider,
     // so registered tools never take this branch; see the
     // "registered tools fail closed" test in subagent_output_budget.test.mjs.
     if (!resolved.wired)
-        return { kind: "ok", meta: loaded.meta };
+        return loaded;
     if (!resolved.available || !resolved.origin) {
         return { kind: "denied", payload: assembleOwnershipGap(id, "unavailable", request) };
     }
@@ -371,7 +379,7 @@ export function resolveRunAccess(id, request, session) {
     if (owner !== "own") {
         return { kind: "denied", payload: assembleOwnershipGap(id, owner, request) };
     }
-    return { kind: "ok", meta: loaded.meta };
+    return loaded;
 }
 function defaultScope() {
     return listScopeKey(false, undefined, process.pid);
@@ -521,6 +529,13 @@ export function assembleSubagentResult(id, meta, request = {}, healthLine = "", 
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", true);
     const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
     const run = parseRunForLifecycle(id);
+    const stop = meta.timing?.stopReason;
+    const delivery = meta.recipe?.workspace ? workspaceDelivery(meta.recipe.workspace, meta.cwd, Boolean(meta.sandbox), id) : undefined;
+    const partial = stop ? `Partial result · stopped: ${stop}. Unfinished checks remain unverified.${run.unmatchedToolCalls.length ? "\nOpen at stop: " + run.unmatchedToolCalls.map(call => call.toolName).join(", ") : ""}${delivery ? "" : "\nWorkspace: " + meta.cwd}` : undefined;
+    const denial = meta.sandbox && meta.recipe?.workspace?.mode === "worktree" && run.deniedWorktreeGitOperation
+        ? worktreeDenialText(run.deniedWorktreeGitOperation, meta.cwd) : undefined;
+    const scratch = meta.taskScratch ? "Task scratch: " + meta.taskScratch : undefined;
+    healthLine = joinSections([partial, delivery, denial, scratch, healthLine]) ?? "";
     const lifecycle = resolveLifecycle(meta, run);
     const identity = resultIdentity(id, assignmentLabel(meta), exit, elapsedFor(meta), lifecycle.classification);
     if (wantsIncidentPage(request))
@@ -621,7 +636,7 @@ const listIncidentCache = new Map();
 const LIST_INCIDENT_CACHE_MAX = 4096;
 let listIncidentComputations = 0;
 function listIncidentKey(id, terminal) {
-    return JSON.stringify([terminal, fileChangeIdentity(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
+    return JSON.stringify([terminal, fileChangeIdentity(evidenceLogPath(id)), failureJournalFingerprint(failurePath(id))]);
 }
 export function listIncidentCount(id, cwd, terminal) {
     const cacheId = `${id}\0${cwd}`;

@@ -1,4 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-subagents/session-selection.ts. Do not edit directly.
+/** Exact-name selection of saved conversations; attempt IDs never become session IDs. */
+import { discoveryWorkspace } from "./workspace-scope.domain.mjs";
 /**
  * Select a single conversation in the caller's workspace scope. Several attempts
  * of one conversation count once; distinct conversations with the same display
@@ -18,7 +20,7 @@ export function selectSessionByName(metas, name, inWorkspace) {
             latest.set(meta.sessionId, meta);
     }
     const matches = [...latest.values()]
-        .filter((meta) => meta.name === requested && inWorkspace(meta.cwd))
+        .filter((meta) => meta.name === requested && inWorkspace(discoveryWorkspace(meta)))
         .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     if (matches.length === 0) {
         throw new Error(`No saved subagent conversation named ${JSON.stringify(requested)} in the current folder. Use subagent_list({all:true}) to find its session_id.`);

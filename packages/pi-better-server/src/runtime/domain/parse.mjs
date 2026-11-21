@@ -23,7 +23,7 @@
 import { closeSync, openSync, readSync, statSync, } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.mjs";
 import { readAppendedLines, parseLogEvent, logReadMetrics } from "./log-cursor.mjs";
-import { logPathFor } from "./log-paths.mjs";
+import { evidenceLogPath } from "./log-paths.mjs";
 const DEFAULT_PARSE_TAIL_BYTES = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_RAW_TAIL_BYTES = 256 * 1024; // 256 KiB
 function envBytes(name, fallback) {
@@ -58,7 +58,7 @@ function fmtBytes(n) {
 const readTail = readBoundedTail;
 /** Last `n` terminal display rows of a run's log, or a placeholder if empty/unreadable. */
 export function tailLog(id, n, maxBytes = maxRawTailBytes()) {
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(evidenceLogPath(id), maxBytes);
     if (tail.error || tail.text.trim() === "")
         return "(no output yet)";
     const out = tailTerminalDisplay(tail.text, n).trim();
@@ -97,7 +97,7 @@ function transcriptContent(msg) {
 export function readRunTranscript(id, options = {}) {
     const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
     const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
-    const tail = readTail(options.logPath ?? logPathFor(id), maxBytes);
+    const tail = readTail(options.logPath ?? evidenceLogPath(id), maxBytes);
     if (tail.error)
         return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
     const lines = tail.text.split(/\r?\n/);
@@ -724,7 +724,7 @@ function feedStructuralRecordChar(scan, ch) {
  * only after a record is grammar-valid; unfinished/malformed records fail closed.
  */
 export function scanLifecycleEvidence(id) {
-    const path = logPathFor(id);
+    const path = evidenceLogPath(id);
     let totalBytes = 0;
     try {
         totalBytes = statSync(path).size;
@@ -1083,6 +1083,9 @@ function foldParseEvent(state, e) {
         state.openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, { id: toolCallId, toolName });
     }
     if (type === "tool_execution_end") {
+        const operation = e.result?.details?.deniedWorktreeGitOperation;
+        if (e.isError && typeof operation === "string" && /^[a-z-]{1,24}$/.test(operation))
+            state.deniedWorktreeGitOperation = operation;
         if (toolCallId) {
             state.openToolCalls.delete(toolCallId);
         }
@@ -1105,7 +1108,7 @@ export function parseRun(id, options = {}) {
     const key = options.logPath ?? id;
     const states = options.states ?? parseStates;
     const previous = states.get(key);
-    const path = options.logPath ?? logPathFor(id);
+    const path = options.logPath ?? evidenceLogPath(id);
     let catchUp = false;
     if (options.summaryOnly) {
         try {
@@ -1172,6 +1175,7 @@ export function parseRun(id, options = {}) {
     return {
         finalText: view.finalText,
         lastActivity: view.lastActivity,
+        ...(view.deniedWorktreeGitOperation ? { deniedWorktreeGitOperation: view.deniedWorktreeGitOperation } : {}),
         toolCalls: [...view.toolCalls],
         toolCallCount: view.toolCallCount,
         unmatchedToolCalls: [...view.openToolCalls.values()],

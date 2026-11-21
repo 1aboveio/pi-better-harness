@@ -5,7 +5,7 @@ date: 2026-11-22
 
 # Clone and Worktree for isolated subagent work
 
-Parallel writers need separate checkouts. At adoption, callers could explicitly request a disposable clone with `git_clone_workspace: true`. This decision specifies the default and the Worktree selector to be delivered under #622. Both modes follow the common rules for preserving work and delivering results to the parent. [Subagent lifecycle](0007-subagent-lifecycle.md) · [Issue #622](https://github.com/1aboveio/pi-better-harness/issues/622)
+Parallel writers need separate checkouts. Callers can select a workspace mode or explicitly request a disposable clone with `git_clone_workspace: true`. Both modes follow the common rules for preserving work and delivering results to the parent. [Subagent lifecycle](0007-subagent-lifecycle.md) · [Issue #622](https://github.com/1aboveio/pi-better-harness/issues/622)
 
 ## Workspace selection
 

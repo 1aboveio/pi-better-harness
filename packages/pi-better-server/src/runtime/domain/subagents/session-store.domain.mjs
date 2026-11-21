@@ -72,6 +72,13 @@ export function durableSubagentRoot(env = process.env, home = homedir()) {
     const agentDir = env.PI_CODING_AGENT_DIR?.trim();
     return join(agentDir || join(home, ".pi", "agent"), "subagents");
 }
+export function resultDir(id) {
+    return /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id) ? join(durableSubagentRoot(), "results", id) : undefined;
+}
+export function retainedLogPath(id) {
+    const dir = resultDir(id);
+    return dir && join(dir, "output.log");
+}
 /** Durable `--session-dir` for new child launches. */
 export function durableSessionsDir() {
     return join(durableSubagentRoot(), "sessions");

@@ -88,26 +88,36 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
 }
 
 const LABELS = [
-    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert", "Timeout (minutes)",
+    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert", "Run timeout",
     "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
 ];
 
-test("timeout starts at 60 minutes, accepts zero and rejects invalid values, then saves and resets", () => {
+test("run timeout accepts minutes or No limit, supports the existing zero value, and restores saved defaults", () => {
     const h = harness();
     assert.equal(h.settings().maxMinutes, 60);
-    selectLabel(h.page, "Timeout (minutes)");
+    selectLabel(h.page, "Run timeout");
+    assert.match(selectedText(h.page), /60 min/);
+    assert.match(h.page.render(40).join("\n"), /Space No limit/);
+    h.page.handleInput(" ");
+    assert.match(selectedText(h.page), /No limit/);
     h.page.handleInput("\r");
     typeAndSubmit(h.page, "-1");
-    assert.equal(h.settings().maxMinutes, 60);
+    assert.equal(h.settings().maxMinutes, 0);
+    assert.match(h.page.render(100).join("\n"), /Enter No limit or a duration/);
     typeAndSubmit(h.page, "10081");
-    assert.equal(h.settings().maxMinutes, 60);
+    assert.equal(h.settings().maxMinutes, 0);
     typeAndSubmit(h.page, "90");
     assert.equal(h.settings().maxMinutes, 90);
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
     h.page.handleInput("\r");
+    typeAndSubmit(h.page, " nO LiMit ");
+    assert.equal(h.settings().maxMinutes, 0);
+    assert.match(selectedText(h.page), /No limit/);
+    h.page.handleInput("\r");
     typeAndSubmit(h.page, "0");
     assert.equal(h.settings().maxMinutes, 0);
+    assert.match(selectedText(h.page), /No limit/);
     selectLabel(h.page, "Reset to defaults");
     h.page.handleInput("\r");
     assert.equal(h.settings().maxMinutes, 90, "reset restores the saved timeout default");
