@@ -66,7 +66,7 @@ test("saved task display defaults on without enabling hooks or writing configura
   assert.equal(existsSync(f.settingsPath), false);
   for (const width of [40, 100]) {
     const lines = f.render(width);
-    assert.match(lines[1], /^todo\s+0\/1 complete\s+active\s+\d+:\d\d$/);
+    assert.match(lines[1], /^todo\s+0\/1 complete · ●\s+active\s+\d+:\d\d$/);
     assert.equal(lines[2], "  Customers can finish checkout");
     assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
     assert.doesNotMatch(lines.join("\n"), /resolve-issues|Outcome \(/);
