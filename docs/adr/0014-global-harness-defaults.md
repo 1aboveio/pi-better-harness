@@ -9,7 +9,7 @@ session-only tool-output decision and its separate callback preference file.
 ## Decision
 
 Store Harness-owned defaults in global `<agent-dir>/settings.json` under the
-`piBetterHarness` namespace. Keys are `toolOutput`, `subagents`, `callbacks`,
+`piBetterHarness` namespace. Package-owned keys include `toolOutput`, `subagents`, `callbacks`,
 `goal`, `sandbox`, `sandboxPermissions`, and `sandboxDenyRules`. Each package
 continues to validate its own payload and own its settings UI.
 

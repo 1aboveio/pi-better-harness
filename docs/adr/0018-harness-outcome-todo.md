@@ -11,6 +11,8 @@ to add the independent durable work ledger described below, and by
 [#680](https://github.com/1aboveio/pi-better-harness/issues/680) to define its
 explicit session association and recovery contract.
 
+The joint lifecycle invariants and acceptance cases for Goal and Todo are recorded in [Goal and Todo lifecycle](0030-goal-and-todo-lifecycle.md). This record specifies the bridge, storage and ownership behind that contract.
+
 ## Decision
 
 ### Delegated execution authority (#708)
@@ -23,6 +25,8 @@ current mandatory permissions, cancellation epoch, writer lease, launch identity
 and capacity. Missing required authority fails closed. No host means queued work,
 not provider execution while Pi is shut down. This amends the active-parent/Goal
 restriction in the older observed-waits proposal without changing parent gates.
+
+### Outcome ownership and settings
 
 `pi-better-harness` absorbs Plan as its **Outcome & Todo** runtime. The original
 accepted decision made the runtime off by default behind one human-controlled
@@ -46,12 +50,14 @@ Goal keeps a compatibility trigger, not outcome authority. Its stored
 `snapshot.objective` remains the raw original trigger, including a bound command
 or skill invocation, so `/goal resume` can re-enter the same work. When Harness
 owns the structured outcome, that raw trigger is not the authoritative business
-outcome. Goal continues to own `/goal`, goal status, clocks, pause and permission
-holds, workflow gates, scheduler waits, and background-drain wakes. Existing
-continuation messages may still repeat the original trigger to resume work.
-Completing the Harness checklist does not complete the Goal; the existing
-explicit `update_goal complete`, permission, and scheduler gates remain the Goal
-completion authority.
+outcome. Goal owns `/goal`, goal status, clocks, pauses, workflow gates,
+scheduler waits and background-drain wakes. Permission reports supply evidence
+about a failed operation. The runtime enforces permissions on each attempted
+operation. [Permission report amendment](0012-actionable-permission-blockers.md#amendment-permission-reports-do-not-control-the-goal-loop)
+
+Continuation messages may repeat the original trigger to resume work. Completing
+the checklist leaves the Goal open. Goal handles an explicit completion request
+under the [Goal and Todo completion rules](0030-goal-and-todo-lifecycle.md#core-invariants).
 
 In shared session state, Harness owns the outcome and checklist records. It reads
 existing todo/plan entries and appends changes under their existing identities;
@@ -93,8 +99,8 @@ execution plan:
   canonical task plans, Goal lifecycle, permissions, or Outcome & Todo
   display/hooks. Creating or listing a ledger does not associate it with a
   session, inject old work, start a Goal, or execute anything. Explicit
-  association, recovery reminders, detaching, and UI remain the separate
-  contract in [#680](https://github.com/1aboveio/pi-better-harness/issues/680).
+  association, recovery reminders, detaching and UI follow the
+  [session association contract](#explicit-session-association).
 - Temporary widget visibility and cleanup remain separate from durable records.
   Hiding or clearing a display never deletes ledger history or completed evidence.
 
@@ -306,7 +312,7 @@ contract listener: start/pause/resume/complete/clear actions carry the bound
 `goalId`, only `start` carries the raw objective, replacement goals have distinct
 ids, Harness on/off suppresses duplicated objective text while paused resume
 constraints remain, and standalone prompts are unchanged. Existing Goal tests
-continue to cover permission holds, workflow gates, scheduler waits, explicit
+cover permission-report handling, workflow gates, scheduler waits, explicit
 resume, and autonomous wake policy. The alias workflow test no longer imports
 the removed legacy Plan package; its coordinator binding, handback, reload, and
 resume assertions remain.

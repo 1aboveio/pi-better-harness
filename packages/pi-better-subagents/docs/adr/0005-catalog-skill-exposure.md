@@ -18,7 +18,7 @@ option.
 
 ## Why this does not reopen ADR 0003's execution boundary
 
-ADR 0003 keeps tool selection, sandbox mode, extensions, workspace, and nested
+[Subagents 0003](0003-native-agent-catalog-live-inheritance.md) keeps tool selection, sandbox mode, extensions, workspace, and nested
 delegation on the spawn path: a catalog file can preserve them but cannot use
 them, because honoring a host control it cannot reproduce would make the file
 look like enforcement. `skills` is different in exactly one respect, and that

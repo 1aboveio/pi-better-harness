@@ -2,7 +2,7 @@
 
 > Decision history. The current Background task ownership and cleanup policy is maintained in [ADR 0028](0028-background-task-policy.md#execution-and-ownership).
 
-Status: accepted decision; implementation pending.
+Accepted. The [server cleanup tests](../../packages/pi-better-server/test/runtime-assignment-cleanup.test.ts) exercise cleanup after a terminal assignment outcome.
 
 ## Decision
 

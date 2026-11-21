@@ -1,6 +1,6 @@
 # Harness work ownership
 
-This vocabulary describes the proposed observed-wait lifecycle in [ADR 0020](docs/adr/0020-observed-waits-retain-an-owner.md). It complements the existing subagent [context](packages/pi-better-subagents/CONTEXT.md); it does not describe shipped lifecycle states.
+These terms describe who owns an observed wait and who can resume a parked worker. [Wait ownership](docs/adr/0020-observed-waits-retain-an-owner.md) defines the coordinator protocol. The [subagent lifecycle](packages/pi-better-subagents/docs/adr/0007-subagent-lifecycle.md) defines what the parent can recover and inspect.
 
 ## Language
 

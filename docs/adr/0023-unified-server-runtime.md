@@ -2,9 +2,11 @@
 
 ## 状态
 
-已接受，待实现。2026-11-14 确认采用与 `pi-better-server` 合并的方案。本文记录目标架构，当前运行时尚未迁移或启用。详细协议、生命周期、迁移和验收见[统一运行时设计](../plans/unified-server-runtime.md)。
+2026-11-14 接受了将本机共享运行时并入 `pi-better-server` 的决定。本文记录架构和后续修订。迁移范围、协议和验收条件见[统一运行时设计](../plans/unified-server-runtime.md)。
 
 ## 决策
+
+本 ADR 记录运行时架构、构建兼容与进程恢复的细节。共享 Server 的连接、任务接管、订阅恢复和通知投递遵循统一约定。[Server 与通知机制](0029-notification-delivery.md)
 
 由每个 canonical Pi agent 目录的单个 `pi-better-server` 统一承担 Subagents 与 Background Tasks 的共享状态索引、投影、机械监督和恢复调度，并保留按需会话托管。普通本地 Pi 通过轻量客户端接入，不因此创建 HostedSession。共享 coordinator 保留领域事实；现有任务 runner、writer lease、权限和执行 token 保留各自职责。
 

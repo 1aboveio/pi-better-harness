@@ -12,17 +12,19 @@ permissions or settings ownership.
 Provider cache hit rate depends on the leading prompt bytes never changing.
 Within one conversation:
 
-1. **Prompt content is append-only.** New guidance arrives after the content
-   already sent, never as a message rebuilt for the request.
+1. **Keep the prefix stable between requests.** Append new conversational
+   guidance after content already sent. A deliberate settings change follows
+   the next-agent-start rule below.
 2. **No request-local prompt blocks.** A block created per request is written to
    the provider cache once and never read back, and it invalidates everything the
    previous request cached after that point.
 3. **No volatile state in the prompt.** Occupancy counters, live counts, elapsed
    time and progress rows belong in tools (`subagent_settings`,
    `bg_task_status`), not in prompt text.
-4. **Package guidance is a named section.** Delivery through `before_agent_start`
-   `sections` is the only mechanism; returning `systemPrompt` sets
-   `forceSystemPrompt` and replaces the whole prefix, as ADR 0016 requires.
+4. **Publish package guidance as a named section.** Packages return
+   `sections` from `before_agent_start`. Returning `systemPrompt` sets
+   `forceSystemPrompt` and replaces the whole prefix, bypassing other packages'
+   sections. [Shared execution policy](0016-unified-execution-concurrency.md)
 5. **A mid-session settings change applies at the next agent start** and then
    stays fixed. That change costs one cold write, not one per request.
 

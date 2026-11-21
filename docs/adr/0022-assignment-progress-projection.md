@@ -2,6 +2,8 @@
 
 Status: accepted for #709 under the approved five-slice #707 plan.
 
+## Reading assignment state
+
 Subagents owns one read-only projection with exactly five states: Running,
 Waiting, Completed, Failed and Cancelled. Result/output tools, list rows,
 navigator rows/details and Goal activity use the same implementation. Goal's
@@ -17,20 +19,27 @@ cache locates the relationship but cannot prove completion or cancellation.
 Pending authoritative waits take precedence over exited attempts and final prose.
 A consumed wait records interpretation; it does not complete a parked assignment.
 A failed dependency command does not set assignment failure. Legacy attempts without
-an immutable assignment binding retain their ordinary completion semantics. For bound
-assignments (#744), exit zero alone cannot establish assignment completion. An explicit
-`report_assignment_result` judgment with retained actual workspace evidence supplies
-that decision without requiring Background or a dependency wait. The authenticated
-child bridge derives the immutable assignment and attempt; the versioned report is
-attempt evidence, not a terminal outcome. The existing exact `assignment-complete`
-dependency acknowledgement remains compatible when there is no explicit report.
-An explicit incomplete report takes precedence over that acknowledgement. Otherwise an
-ended attempt with no outstanding interpretation commits `failed` with an explicit
-completion-unverified reason, preserving its separate completed process status. This
-uses the existing terminal contract to report failure to establish completion, not
-failure of the child process. Parent inspection and acceptance remain separate;
-an explicit follow-up can continue the same conversation as a new assignment.
-Existing attempt failures and explicit stops retain their diagnostic records.
+an immutable assignment binding retain their ordinary completion semantics.
+
+## Completion evidence for bound assignments
+
+For a bound assignment (#744), the worker can call `report_assignment_result`
+with workspace evidence even when it has no Background task or dependency wait.
+The authenticated child bridge binds the report to that assignment and attempt.
+After a normal exit and any required wait interpretation, the finalizer uses the
+following evidence.
+
+| Available evidence | Assignment outcome |
+| --- | --- |
+| Accepted complete report with valid retained evidence | Succeeded |
+| Accepted incomplete report | Failed with its recorded reason, even if a dependency acknowledgement said `assignment-complete` |
+| No report, with an exact `assignment-complete` acknowledgement | Succeeded under the existing dependency protocol |
+| Neither form of completion evidence, or retained evidence that cannot be verified | Failed with the recorded rejection or unverified-completion reason |
+
+The process retains its own exit status. A parked attempt or a normal exit with
+an outstanding dependency interpretation leaves the assignment open. Failed
+attempts and explicit stops retain their diagnostic records. The parent inspects
+the deliverable separately and may start a new assignment in the same conversation.
 
 Evidence reports may retain explicit byte excerpts from larger workspace files.
 The 65,536-byte bound applies to each retained file or excerpt, with a zero-based
@@ -65,8 +74,10 @@ The assigned canonical workspace is the report evidence boundary. Worker prompts
 state that boundary, and outside-workspace refusals explain how to correct the
 source. Sibling output directories and escaping symlinks remain outside it.
 
-The atomic assignment terminal decision and delivery contract is defined by
-ADR 0020's #710 extension. A committed coordinator outcome takes precedence over
+## Terminal outcomes and revisions
+
+The coordinator commits the terminal decision and outbox event in one transaction
+under [Harness 0020](0020-observed-waits-retain-an-owner.md#terminal-assignment-outcomes-710). A committed coordinator outcome takes precedence over
 held dependency waits without implying those waits were interpreted. New launch
 bindings scope reads by immutable assignment ID; conversation identity alone
 cannot attach a later explicit follow-up's wait to an earlier terminal result.
@@ -88,9 +99,11 @@ does not establish assignment completion. Diagnostic references identify retaine
 run metadata/logs and exact wait generations. Reading never acknowledges a wait,
 changes a cancellation epoch or releases a writer fence.
 
+## When supervision is unavailable
+
 When the coordinator or its compatible read capability is unavailable, supervised
 assignments show Waiting with an explicit unverified-state reason. This does not
 promise provider execution without a runtime host. Legacy runs without supervised
 operation bindings keep their recorded attempt outcomes; uncertain legacy exits
-show Waiting. No repair, terminal delivery, manual recovery or new UI control is
-introduced. Existing explicit stop remains the cancellation path.
+show Waiting. Reading the projection leaves repair and delivery to the supervisor.
+Explicit stop remains the cancellation path.

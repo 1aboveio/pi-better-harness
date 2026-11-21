@@ -29,8 +29,10 @@ Inline controls may publish `{ id, label, values, get, change }` on the same
 trusted bus. Their owning extension retains runtime state and persistence;
 Harness only renders the native selector and waits for successful changes.
 Tool output contributes Normal/Minimal through this contract. The existing
-`/tool-output` command uses the same change path, with session-only persistence,
-branch restoration, and failed-save rollback. Callback Ctrl+S remains scoped to
+`/tool-output` command uses the same change path, saves the active branch value
+and future-session default, and rolls back a failed save. Existing branch entries
+take precedence on restore. [Global defaults](0014-global-harness-defaults.md)
+governs persistence. Callback Ctrl+S remains scoped to
 callback defaults and does not save a tool-output default.
 
 The user selected prototype B (inline context) and requested full expansion on
