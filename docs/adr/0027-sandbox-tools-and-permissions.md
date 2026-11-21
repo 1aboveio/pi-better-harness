@@ -2,6 +2,13 @@
 
 **Status** — Accepted. This is the current decision for Main, Subagents and Background tasks. Use this record for future sandbox changes. The earlier records linked below preserve the rationale, platform details and evidence for previous implementations.
 
+## Core invariants
+
+- **Select a tool once.** The task's loadout determines which tools it can call and which providers supply them. Each operation must satisfy the applicable resource rules. The same rule covers `apply_patch`, other guarded tools and selected extensions.
+- **Each scope owns its policy.** Main, Subagents and local Background tasks have independent switches. A running child or process keeps its admitted confinement. New launches use the applicable settings at admission, including any enclosing boundary.
+- **Verify the execution path.** Before running a confined operation, establish the provider or adapter identity and that the backend can enforce the requested protection. Refuse the operation if either check fails. A retry, continuation or workspace change cannot grant broader access.
+- **Report the actual decision.** Distinguish an unavailable implementation, a confirmed policy denial and an ordinary execution failure. Identify the affected tool, scope and rule when known. The caller can retrieve the diagnostic under the applicable read permissions.
+
 ## Decision
 
 **Tool loading answers “What can this task call, and which implementation supplies it?” Permission answers “May that implementation perform this operation on this resource?”** The sandbox switch controls enforcement for its own scope. Turning it Off restores ordinary tool behavior. Turning it On selects the confined execution path and enforces the active profile. **Loading a tool for a task permits that task to call it. The user selects it once.** Each operation must still satisfy the active resource rules. A permission grant alone cannot supply a missing implementation.

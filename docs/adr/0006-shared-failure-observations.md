@@ -18,13 +18,13 @@ An operation may be running while it has unresolved failures. A successful comma
 
 Expected failures require explicit structured producer metadata. They remain visible but do not request attention. The system does not infer expectedness from natural language. A later unexpected failure can open an actionable incident even when earlier failures were expected.
 
-All reporting surfaces put the common failure summary before ordinary progress text. Bounded summaries prioritize unexpected failures and explicitly count additional retained observations. Missing, unreadable, or truncated evidence cannot be reported as proof of health.
+Result, output and status tools put actionable failures and observation gaps before ordinary progress. They count other incidents as history and return them on request. The [navigator exception](#navigator-presentation-exception) governs its compact display. Missing, unreadable or truncated evidence cannot establish health.
 
 Notification receipts are separate from observation and recovery. A successful handoff records which incidents were delivered; merely preparing or attempting a callback does not. Temporary errors reading delivery or ownership state defer the handoff rather than recording permanent suppression; an explicit ownership mismatch still suppresses delivery to the wrong session. Running actionable incidents become eligible after a grace period (see the amendment for which incidents are actionable); terminal failures and broken observation can be eligible immediately. Existing callback batching and origin routing are reused. `callback:false` disables unsolicited delivery, not failure visibility. Reload must recover pending observations/receipts. Delivery is at least once: a crash between successful handoff and receipt persistence can cause a duplicate; it must not cause silent loss.
 
 Failed writes retain every pending event and receipt in process memory and retry on subsequent reads. Pending receipts prevent repeated handoffs within that process; a visible observation-incomplete state remains until persistence succeeds. While storage is unavailable, this memory-only backlog cannot survive process loss. The existence marker can still report that evidence is missing when it was written successfully. Journals and markers follow existing run/task retention and explicit cleanup.
 
-Background Tasks applies this shared delivery contract to suspected stalls during a pending wait. Its progress rules, recipient behavior, and acceptance criteria are maintained in the [Background task policy](0028-background-task-policy.md#progress-and-suspected-stalls).
+The [Background task policy](0028-background-task-policy.md#progress-and-suspected-stalls) determines when a suspected stall produces an alert. [Server and notification delivery](0029-notification-delivery.md#notification-invariants) governs routing, handoff, receipts and replay for all producers.
 
 ## Amendment: incident lifecycle (#315)
 

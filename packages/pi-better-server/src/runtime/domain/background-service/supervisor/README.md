@@ -1,9 +1,6 @@
 # Detached local supervisor
 
-Slice 2 of [ADR 0020](../../../../docs/adr/0020-observed-waits-retain-an-owner.md) and the
-[observed-waits design](../../../../docs/plans/observed-waits-design.md): local process and command-watch
-supervision that survives the process that launched it. Nothing in this directory is wired into the
-Background Tasks tools yet; the parent owns that integration.
+The detached supervisor runs local processes and command watches after the launching frontend exits. The coordinator retains the wait and its owner. [Observed waits](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0020-observed-waits-retain-an-owner.md) · [Supervisor design](https://github.com/1aboveio/pi-better-harness/blob/main/docs/plans/observed-waits-design.md)
 
 ## Contract
 
