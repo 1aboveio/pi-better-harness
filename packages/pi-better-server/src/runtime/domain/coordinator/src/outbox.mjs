@@ -155,6 +155,13 @@ export function listOutbox(ctx, filter = {}) {
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     return getRows(ctx, `SELECT * FROM outbox_events ${where} ORDER BY created_at, event_id`, ...params).map((row) => mapOutbox(ctx, row));
 }
+/** Check a wait handoff without loading the retained evidence for its generations. */
+export function hasDeliveredWaitDependency(ctx, operationId, terminalRevision, recipient) {
+    const owner = ownerClause("recipient", recipient);
+    return getRows(ctx, `SELECT 1 FROM outbox_events
+        WHERE operation_id = ? AND terminal_revision = ? AND event_type = 'dependency-ready'
+          AND delivered_at IS NOT NULL AND ${owner.sql} LIMIT 1`, requireId("operationId", operationId), requireCounter("terminalRevision", terminalRevision), ...owner.params).length > 0;
+}
 /** Find recipients with deliverable dependencies without loading each event's evidence. */
 export function listDispatchableOutboxRecipients(ctx) {
     return getRows(ctx, `SELECT recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id,

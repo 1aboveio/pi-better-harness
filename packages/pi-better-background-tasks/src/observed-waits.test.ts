@@ -2493,6 +2493,85 @@ describe("callback origin and delivery receipt", () => {
     expect(ack.phase).toBe("consumed");
   });
 
+  it("does not replay a delivered wait as a standalone completion after consumption", async () => {
+    const root = workspace("consumed-wait-dedup");
+    const notifier = deferredNotifier();
+    const harness = createHarness();
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+      notifyParent: notifier.notify,
+    };
+    let host = createObservedWaitHost(harness.pi, options);
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "dedup-owner", "dedup-branch");
+    host.start(ctx);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: true },
+      ctx,
+    });
+    const wait = host.waitForParent(ctx, [launch.id], "wait owns completion");
+    await host.stopForParent(ctx, launch.id);
+    await until(host, () => notifier.calls.length === 1);
+    expect(notifier.calls[0]?.notification.waitId).toBe(wait.waitId);
+    notifier.deliver(notifier.calls[0]!);
+
+    const ready = host.listWaitsForParent(ctx, { pendingOnly: true }).find((entry) => entry.waitId === wait.waitId)!;
+    host.statusForParent(ctx, launch.id);
+    expect(host.acknowledgeForParent(ctx, {
+      waitId: ready.waitId,
+      generation: ready.generation,
+      terminalRevisions: revisions(ready),
+      disposition: "continue",
+      note: "read and consumed",
+    }).phase).toBe("consumed");
+    host.statusForParent(ctx, launch.id);
+    await host.reconcileNow();
+    host.close();
+    host = createObservedWaitHost(harness.pi, options);
+    host.start(ctx);
+    await host.reconcileNow();
+    const store = openStore({ path: options.storePath });
+    try {
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 1, launch.owner)).toBe(true);
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 2, launch.owner)).toBe(false);
+      expect(store.hasDeliveredWaitDependency(launch.operationId, 1, { ...launch.owner, branchId: "other" })).toBe(false);
+      expect(store.listPendingParentCallbacks({ workspace: root, sessionId: ctx.sessionManager.getSessionId() })).toHaveLength(0);
+    } finally { store.close(); }
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("still delivers a standalone completion after an undelivered wait is cancelled", async () => {
+    const root = workspace("cancelled-wait-delivery");
+    const notifier = deferredNotifier();
+    const host = createObservedWaitHost(createHarness().pi, {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+      notifyParent: notifier.notify,
+    });
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "cancel-owner", "cancel-branch");
+    host.start(ctx);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => process.exit(0), 400)"), shell: false, callback: true },
+      ctx,
+    });
+    const wait = host.waitForParent(ctx, [launch.id], "temporary wait");
+    await until(host, () => notifier.calls.length === 1);
+    expect(notifier.calls[0]?.notification.waitId).toBe(wait.waitId);
+    expect(host.cancelWaitForParent(ctx, wait.waitId, wait.generation, "not needed").phase).toBe("cancelled");
+    host.statusForParent(ctx, launch.id);
+    await until(host, () => notifier.calls.length === 2);
+    expect(notifier.calls[1]?.notification.waitId).toBeUndefined();
+    notifier.deliver(notifier.calls[1]!);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(2);
+  });
+
   it("does not let a standalone callback receipt receipt a later wait", async () => {
     const root = workspace("receipt-scope");
     const notifier = deferredNotifier();

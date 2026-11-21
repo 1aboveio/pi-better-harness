@@ -3584,7 +3584,7 @@ export class ObservedWaitHost {
       return;
     }
     this.options.logger?.(`observed waits: ${operation.taskId} ${status} (revision ${recorded.operation.terminalRevision})`);
-    this.attemptTerminalCallback(operation, status, outcome, refs, { pendingWithoutContext: true });
+    this.attemptTerminalCallback(recorded.operation, status, outcome, refs, { pendingWithoutContext: true });
     this.emitDurableTaskChange(operation.owner);
     // The parent callback is independent from the worker's wait: a worker may be
     // parked, while the parent session still learns that the supervised task ended.
@@ -3627,6 +3627,11 @@ export class ObservedWaitHost {
       this.store?.setParentCallbackPending(operation.taskId, false);
       this.pendingTerminalCallbacks.delete(operation.taskId);
       skip("already delivered");
+      return;
+    }
+    if (this.waitDeliveredTerminalRevision(operation, context)) {
+      this.pendingTerminalCallbacks.delete(operation.taskId);
+      this.store?.setParentCallbackPending(operation.taskId, false);
       return;
     }
     const waitPending = this.store?.listWaits({ owner: operation.owner, pendingOnly: true })
@@ -3802,6 +3807,12 @@ export class ObservedWaitHost {
     const proof = this.currentLaunchContext(taskId)?.outboxDelivered?.[event.eventId];
     return !!proof && proof.waitId === event.waitId && proof.generation === event.generation
       && proof.terminalRevision === event.terminalRevision;
+  }
+
+  private waitDeliveredTerminalRevision(operation: OperationRecord, context: LaunchContext): boolean {
+    if (operation.terminalRevision === 0) return false;
+    return Object.values(context.outboxDelivered ?? {}).some(proof => proof.terminalRevision === operation.terminalRevision)
+      || (this.store?.hasDeliveredWaitDependency(operation.operationId, operation.terminalRevision, operation.owner) ?? false);
   }
 
   private recordOutboxHandoffProof(taskId: string, event: OutboxEventRecord): void {
@@ -4015,7 +4026,13 @@ export class ObservedWaitHost {
                 } catch { /* the store closed between handoff and receipt */ }
                 // Key the recovered receipt to this exact event. Never use the
                 // standalone task callback's receipt as proof for a wait.
-                if (!receipted && taskId) this.recordOutboxHandoffProof(taskId, event);
+                if (taskId) {
+                  this.pendingTerminalCallbacks.delete(taskId);
+                  if (!receipted) this.recordOutboxHandoffProof(taskId, event);
+                  else {
+                    try { store.setParentCallbackPending(taskId, false); } catch { /* the wait receipt survives for recovery */ }
+                  }
+                }
               },
               defer: (reason: string) => {
                 if (settled) return;
@@ -4426,8 +4443,8 @@ export class ObservedWaitHost {
     try {
       const operation = this.operationForTask(taskId);
       const parent = operation?.owner.kind === "parent-session";
-      const outboxDelivered = operation && Object.values(context.outboxDelivered ?? {}).some(proof => proof.terminalRevision === operation.terminalRevision);
-      const pending = context.callback !== false && context.callbackDeliveredAt === undefined && !outboxDelivered;
+      const pending = context.callback !== false && context.callbackDeliveredAt === undefined
+        && (!parent || !this.waitDeliveredTerminalRevision(operation, context));
       // Publish the obligation before the sidecar: a crash may leave a pending
       // candidate, but cannot hide an accepted callback. Retire only after the
       // delivered/disabled sidecar is durable, so replay can prove suppression.

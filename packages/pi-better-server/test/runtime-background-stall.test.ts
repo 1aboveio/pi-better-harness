@@ -193,4 +193,9 @@ test("supervised stall reaches the native parent during single and multi-task wa
   const ack = await call("acknowledge_operation_result", { wait_id: group.waitId, generation: group.generation, terminal_revisions: revisions,
     disposition: "continue", note: "Android failed, CI observed failure, PostgreSQL cancelled" });
   assert.equal(ack.details?.phase, "consumed", JSON.stringify(ack));
+  for (const id of [android.id, ci.details.id, pg.id]) await call("bg_task_status", { id });
+  for (const operationId of Object.keys(revisions)) {
+    assert.equal(db.prepare("SELECT 1 FROM background_parent_callbacks WHERE operation_id=?").get(operationId), undefined,
+      "a wait receipt retires the standalone completion for every dependency");
+  }
 });
