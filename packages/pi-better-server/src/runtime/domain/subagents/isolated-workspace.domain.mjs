@@ -142,7 +142,6 @@ const withoutGit = new Set([".git"]);
 const worktreePointers = new Set(["commondir", "gitdir"]);
 const sharedGitEntries = new Set(["config", "objects", "packed-refs", "refs", "logs", "info", "shallow", "hooks"]);
 const pendingOperation = [
-    "index.lock",
     "rebase-merge",
     "rebase-apply",
     "MERGE_HEAD",
@@ -296,6 +295,10 @@ function checkpoint(w, attempt) {
     const { root, record, store } = paths(w);
     const info = inspectOwned(w);
     const linked = w.mode === "worktree";
+    const indexLock = join(info.gitDir, "index.lock");
+    if (existsSync(indexLock)) {
+        throw new Error(`Git index lock blocks workspace recovery at ${indexLock}. Original checkout retained at ${root}.`);
+    }
     if (pendingOperation.some((name) => existsSync(join(info.gitDir, name))) ||
         existsSync(join(info.commonGitDir, "objects/info/alternates")) ||
         (existsSync(join(info.commonGitDir, "worktrees")) && !linked)) {
