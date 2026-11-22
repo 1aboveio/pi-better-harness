@@ -213,6 +213,26 @@ test("automatic workflow decision roundtrip", async () => {
   }
 });
 
+test("update_todo persists the exact scope a user removed for the completion audit", async () => {
+  const issue = "example/repo#42";
+  const h = await boundHarness({ plan: planFixture({ excluded: [{ issue }] }) });
+  try {
+    const decision = {
+      id: "defer-rollout", source: "user", humanWords: "Leave unit 1202 and the rollout for later.",
+      changes: "Remove both from this run.", removedUnits: ["1202", issue], supersedes: "d-1",
+    };
+    const tool = h.tools.get("update_todo")!;
+    const result = await exposedUpdate(h, { workflow: { revision: 12, event: "scope-changed", decision } });
+    const saved = h.plan();
+    assert.deepEqual(saved.decisions.at(-1), { ...decision, timestamp: saved.updatedAt });
+    assert.equal(tool.parameters.properties.workflow.properties.decision.properties.removedUnits.items.type, "string");
+    assert.deepEqual(saved.excluded, [{ issue }]);
+    assert.deepEqual(readEvents(result.details.profilingPath).map((e) => [e.planRevision, e.decision]), [[13, decision.id]]);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("malformed decision metadata rejects the entire exposed or direct transition", async () => {
   const h = await boundHarness({ profiling: { "profiling/run.jsonl": `{"planRevision":12}\n` } });
   try {
@@ -224,6 +244,9 @@ test("malformed decision metadata rejects the entire exposed or direct transitio
       { answers: {} }, { answers: ["results/127-impl-1.json", {}] },
       { answers: [""] }, { answers: ["   "] },
       { source: {} }, { source: "" }, { source: "   " },
+      { source: "user", removedUnits: {} }, { source: "user", removedUnits: ["1202", {}] },
+      { source: "user", removedUnits: ["   "] }, { removedUnits: ["1202"] },
+      { source: "agent-recommendation", removedUnits: ["1202"] },
     ];
     for (const metadata of cases) {
       const params = { workflow: {
@@ -236,10 +259,10 @@ test("malformed decision metadata rejects the entire exposed or direct transitio
         const tool = h.tools.get("update_todo")!;
         assert.throws(() => validateToolArguments(tool, {
           type: "toolCall", id: "invalid-decision", name: tool.name, arguments: params,
-        }), /answers|source/, "the exposed schema rejects malformed metadata before the handler");
+        }), /answers|source|removedUnits/, "the exposed schema rejects malformed metadata before the handler");
       }
       for (const update of [(p: unknown) => exposedUpdate(h, p), h.update]) {
-        await assert.rejects(update(params), /answers|source/);
+        await assert.rejects(update(params), /answers|source|removedUnits/);
         assert.equal(readFileSync(h.path, "utf8"), before);
         assert.equal(readFileSync(logPath, "utf8"), logBefore);
         assert.deepEqual(h.entries, entriesBefore);

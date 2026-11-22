@@ -22,6 +22,7 @@ export interface RushDecisionInput {
   changes: string;
   supersedes?: string | undefined;
   answers?: string[] | undefined;
+  removedUnits?: string[] | undefined;
   source?: string | undefined;
 }
 
@@ -387,6 +388,12 @@ function appendDecision(plan: Record<string, unknown>, decision: RushDecisionInp
   if (decision.source !== undefined && (typeof decision.source !== "string" || !decision.source.trim())) {
     throw new Error("workflow.decision.source must be non-empty text.");
   }
+  if (decision.removedUnits !== undefined) {
+    if (decision.source !== "user") throw new Error("workflow.decision.removedUnits requires source user.");
+    if (!Array.isArray(decision.removedUnits) || !decision.removedUnits.every((ref) => typeof ref === "string" && ref.trim())) {
+      throw new Error("workflow.decision.removedUnits must list non-empty unit IDs or excluded issue references.");
+    }
+  }
   const decisions = plan.decisions === undefined || plan.decisions === null ? [] : plan.decisions;
   if (!Array.isArray(decisions)) throw new Error("The saved plan's decisions field is not a list.");
   const known = new Set(decisions.flatMap((entry) => isRecord(entry) && typeof entry.id === "string" ? [entry.id] : []));
@@ -398,6 +405,7 @@ function appendDecision(plan: Record<string, unknown>, decision: RushDecisionInp
     id, timestamp: ts, humanWords: decision.humanWords, changes: decision.changes,
     supersedes: decision.supersedes ?? null,
     ...(decision.answers === undefined ? {} : { answers: [...decision.answers] }),
+    ...(decision.removedUnits === undefined ? {} : { removedUnits: [...decision.removedUnits] }),
     ...(decision.source === undefined ? {} : { source: decision.source }),
   });
   plan.decisions = decisions;

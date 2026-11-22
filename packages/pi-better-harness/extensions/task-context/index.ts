@@ -92,6 +92,7 @@ const WorkflowUpdateSchema = Type.Object({
     changes: Type.String({ description: "What the decision changes: units, validation, forbidden actions." }),
     supersedes: Type.Optional(Type.String({ description: "Id of the earlier decision this one replaces." })),
     answers: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Answer-file keys resolved by this decision, e.g. results/127-impl-1.json." })),
+    removedUnits: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "For source user, list the exact unit IDs or excluded issue references the user explicitly removed from this Goal." })),
     source: Type.Optional(Type.String({ minLength: 1, description: "Decision provenance, e.g. agent-recommendation." })),
   }, { description: "A human decision to record with this transition." })),
   profiling: Type.Optional(Type.Object({}, {

@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.51.1] - 2026-11-22
+
+### Fixed
+
+- `update_todo` now saves the exact units and issues a user removes from a workflow Goal. The completion audit can finish once the remaining requirements are verified. (#878)
+
 ## [pi-better-harness@0.51.0] - 2026-11-22
 
 ### Changed
