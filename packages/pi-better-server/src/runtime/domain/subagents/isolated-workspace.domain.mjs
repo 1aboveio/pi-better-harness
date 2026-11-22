@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { inspectGitWorkspace, syncGitRemotes } from "./git-workspace.domain.mjs";
+import { inspectGitWorkspace, isIgnoredGitSubdirectory, syncGitRemotes } from "./git-workspace.domain.mjs";
 import { restoreTree, snapshotTree, verifyTree } from "./workspace-files.domain.mjs";
 import { durableSubagentRoot } from "./session-store.domain.mjs";
 import { taskWorkspaceDir } from "./registry.domain.mjs";
@@ -63,18 +63,8 @@ export function workspaceChoice(source, owner, mode, tools, exclude) {
         throw error;
     }
     const subdir = relative(info.repoRoot, realpathSync(source));
-    // A directory ignored by its enclosing checkout (e.g. a separate project in
-    // build output) is not part of that checkout's selected Git base.
-    if (subdir) {
-        try {
-            git(info.repoRoot, ["check-ignore", "--quiet", "--", subdir]);
-            return;
-        }
-        catch (error) {
-            if (error.status !== 1)
-                throw error;
-        }
-    }
+    if (isIgnoredGitSubdirectory(info.repoRoot, subdir))
+        return;
     let base;
     try {
         base = value(source, ["rev-parse", "--verify", "HEAD"]);

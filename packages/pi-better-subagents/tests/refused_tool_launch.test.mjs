@@ -312,6 +312,15 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         await waitForTerminal(id);
         assert.match(text, /linked worktree.*sandbox.*shared Git index.*git_clone_workspace:true/is);
         assert.match(readFileSync(registry.promptPathFor(id), "utf8"), /shared Git index/);
+
+        writeFileSync(join(source, ".git", "info", "exclude"), "nested/\n");
+        const ignored = await tools.subagent_spawn.execute("tc-ignored", {
+            prompt: "inspect separate project", cwd, isolation: false, tools: "read", callback: false,
+        }, undefined, undefined, makeCtx(cwd));
+        const ignoredId = ignored.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(ignoredId, ignored.content[0].text);
+        await waitForTerminal(ignoredId);
+        assert.equal(readFileSync(registry.promptPathFor(ignoredId), "utf8"), "inspect separate project");
     });
 
     it("drops an implicitly loaded unavailable tool from policy, preflight and recipe", { timeout: 30000 }, async (t) => {

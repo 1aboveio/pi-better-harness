@@ -21,7 +21,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { readGitRemotes, syncGitRemotes, type GitRemote } from "./git-remotes.ts";
 
@@ -40,23 +40,22 @@ export interface GitWorkspaceInfo {
 
 const GIT_WORKSPACE_COMMAND_TIMEOUT_MS = 60_000;
 
-function runGit(cwd: string, args: string[], opts?: { encoding?: BufferEncoding; stdio?: any }): string {
+function runGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
     try {
         return execFileSync("git", args, {
             cwd,
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "pipe"],
-            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+            env: { ...(env ?? process.env), GIT_TERMINAL_PROMPT: "0" },
             timeout: GIT_WORKSPACE_COMMAND_TIMEOUT_MS,
             killSignal: "SIGKILL",
-            ...opts,
         }).trim();
     } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-            throw new Error(`git ${args[0]} timed out after ${GIT_WORKSPACE_COMMAND_TIMEOUT_MS / 1_000} seconds in ${cwd}`);
+            throw new Error(`git ${args[0]} timed out after ${GIT_WORKSPACE_COMMAND_TIMEOUT_MS / 1_000} seconds in ${cwd}`, { cause: err });
         }
         const message = (err as Error).message ?? String(err);
-        throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${message}`);
+        throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${message}`, { cause: err });
     }
 }
 
@@ -306,15 +305,31 @@ function hasLinkedWorktreePointer(dir: string): boolean {
     }
 }
 
+/** An ignored subdirectory can contain a separate, non-Git workspace. */
+export function isIgnoredGitSubdirectory(root: string, subdir: string): boolean {
+    if (!subdir) return false;
+    try {
+        runGit(root, ["-c", "core.fsmonitor=false", "check-ignore", "--quiet", "--", subdir],
+            Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))));
+        return true;
+    } catch (error) {
+        if (((error as Error).cause as { status?: number } | undefined)?.status === 1) return false;
+        throw error;
+    }
+}
+
 /** Locate shared metadata even when a caller supplies a subdirectory of the checkout. */
 export function linkedWorktreeGitDir(cwd: string): string | undefined {
-    let directory = realPath(cwd);
+    const workspace = realPath(cwd);
+    let directory = workspace;
     for (;;) {
         const gitMarker = join(directory, ".git");
         if (existsSync(gitMarker)) {
             if (!hasLinkedWorktreePointer(directory)) return undefined;
             try {
-                return inspectGitWorkspace(directory).gitDir;
+                const info = inspectGitWorkspace(directory);
+                if (isIgnoredGitSubdirectory(info.repoRoot, relative(info.repoRoot, workspace))) return undefined;
+                return info.gitDir;
             } catch {
                 throw linkedWorktreeError(directory);
             }
@@ -370,7 +385,7 @@ export function prepareGitCloneWorkspace(options: PrepareGitCloneWorkspaceOption
     const cloneArgs = buildGitCloneArgs({ referenceRepo, cloneUrl, targetDir });
 
     try {
-        runGit(dirname(targetDir), cloneArgs, { stdio: ["ignore", "pipe", "pipe"] });
+        runGit(dirname(targetDir), cloneArgs);
     } catch (err) {
         if (info.isLinkedWorktree) {
             throw new Error(`${linkedWorktreeError(sourceDir).message} Clone preparation failed: ${(err as Error).message}`);
