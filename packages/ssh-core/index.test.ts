@@ -58,6 +58,19 @@ describe("ssh-core package contract", () => {
     }
   });
 
+  // @covers ssh-core.control-master
+  it("checks the absolute socket length for a relative Pi agent directory", (t) => {
+    t.mock.method(process, "cwd", () => resolve("/tmp", "workspace-".repeat(9)));
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = "agent";
+      assert.equal(defaultSshControlPathRoot(), join("/tmp", `pi-ssh-${process.getuid?.() ?? "user"}`));
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
+  });
+
   // @covers ssh-core.identity-argv
   // @level unit
   it("normalizes identity and enforces noninteractive SSH argv", () => {

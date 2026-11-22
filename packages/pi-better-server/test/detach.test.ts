@@ -325,6 +325,7 @@ describe("/detach and return between a local session and a daemon", { concurrenc
       let closed = 0;
       const resolved: unknown[] = [];
       const { handler } = loadExtension({
+        waitMs: 0,
         resolveTarget: async (options) => {
           resolved.push(options);
           return { socketPath: host.socketPath, forwardSocket: async (socketPath) => ({ socketPath, close: async () => undefined }), close: async () => void closed++ };
@@ -355,11 +356,13 @@ describe("/detach and return between a local session and a daemon", { concurrenc
       assert.equal((await sessionsOf(host.socketPath)).length, 0);
 
       idle = true;
-      await handler("testhost", ctx);
+      await handler("testhost --remote-dir /srv/x", ctx);
       const done = notes.at(-1)!;
       assert.equal(done.level, "info");
       assert.match(done.message, /Moved to testhost/);
-      assert.ok(done.message.includes(`pi-remote tail ${local.info.sessionId} --host testhost`), done.message);
+      const followUp = done.message.split("\n").filter((line) => line.includes("pi-remote"));
+      assert.equal(followUp.length, 3);
+      for (const line of followUp) assert.match(line, /--host testhost --remote-dir \/srv\/x/);
       assert.equal(closed, 2, "the target is closed after a move");
       assert.equal(readLocalRecord(join(process.env.PI_REMOTE_STATE_DIR, "local-sessions"), local.info.sessionId)?.state, "moved");
       assert.equal((await sessionsOf(host.socketPath)).length, 1);
@@ -438,6 +441,40 @@ describe("/detach and return between a local session and a daemon", { concurrenc
       for (const entry of ids) assert.ok(entry.parentId === null || byId.has(entry.parentId), `entry ${entry.id} has its parent ${entry.parentId} on disk`);
       assert.equal(readFileSync(local.sessionFile, "utf8").split("while fenced").length - 1, 1, "written once");
       assert.equal(SessionManager.open(local.sessionFile).getLeafId(), last);
+    } finally {
+      delete process.env.PI_REMOTE_STATE_DIR;
+    }
+  });
+
+  it("/detach persists a fenced entry after rollback without waiting for another write", async () => {
+    const local = makeLocal();
+    const host = await startHost();
+    process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");
+    try {
+      const stateDir = join(process.env.PI_REMOTE_STATE_DIR, "local-sessions");
+      const { handler } = loadExtension({
+        resolveTarget: async () => ({ socketPath: host.socketPath,
+          forwardSocket: async (socketPath) => ({ socketPath, close: async () => undefined }),
+          close: async () => undefined }),
+      });
+      const manager = SessionManager.open(local.sessionFile);
+      const text = "entry buffered during failed transfer";
+      const notes: string[] = [];
+      await handler("testhost", {
+        cwd: local.repo, sessionManager: manager, isIdle: () => true,
+        ui: { notify: (message: string) => {
+          if (message.startsWith("fenced ")) {
+            assert.equal(readLocalRecord(stateDir, local.info.sessionId)?.state, "fenced");
+            manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+            assert.ok(!readFileSync(local.sessionFile, "utf8").includes(text));
+            throw new Error("transfer interrupted");
+          }
+          notes.push(message);
+        } },
+      });
+      assert.match(notes.at(-1)!, /transfer interrupted/);
+      assert.equal(readLocalRecord(stateDir, local.info.sessionId)?.state, "owned");
+      assert.equal(readFileSync(local.sessionFile, "utf8").split(text).length - 1, 1);
     } finally {
       delete process.env.PI_REMOTE_STATE_DIR;
     }

@@ -122,7 +122,7 @@ export function wrapRemoteBashCommand(input) {
 }
 export function defaultSshControlPathRoot() {
     const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-    const root = join(agentDirectory, "ssh-control");
+    const root = resolve(agentDirectory, "ssh-control");
     // A long agent directory would push the socket past the unix path limit; fall back to a short per-user root.
     if (Buffer.byteLength(join(root, MUX_CONTROL_PATH_NAME_TEMPLATE)) <= MAX_SSH_CONTROL_PATH_BYTES)
         return root;
