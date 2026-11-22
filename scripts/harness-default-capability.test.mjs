@@ -57,6 +57,7 @@ test("the installer and bundle declare the same managed components", () => {
     [...harnessManifest.bundledDependencies].sort(),
     "the installer's components and bundled dependencies must be the same set",
   );
+  assert.ok(!componentPackages.includes("pi-better-model-router"));
 });
 
 // @covers harness.default-capability
@@ -154,6 +155,13 @@ test("the bundled tarball carries the sandbox extension and its synchronized sha
     );
 
     const packed = pack.files.map((file) => file.path);
+    const packedManifest = JSON.parse(readFileSync(join(unpackedDir, "package.json"), "utf8"));
+    for (const dependency of ["pi-better-model-router", "pi-ollama-cloud"]) {
+      assert.equal(packedManifest.dependencies[dependency], undefined);
+      assert.ok(!packed.some((path) => path.startsWith(`node_modules/${dependency}/`)));
+    }
+    assert.ok(!packed.some((path) => path.startsWith("extensions/model-router/")));
+
     const carries = (path) => {
       assert.ok(packed.includes(path), `bundled tarball is missing ${path}:\n${packed.join("\n")}`);
       assert.ok(existsSync(join(unpackedDir, path)), `${path} is listed but absent from the unpacked tarball`);

@@ -1,7 +1,7 @@
 {
   "name": "pi-better-harness",
-  "version": "0.51.1",
-  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, goals, model routing, and Outcome & Todo.",
+  "version": "0.51.2",
+  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, goals, and Outcome & Todo.",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -23,7 +23,6 @@
       "extensions/background-tasks/index.ts",
       "extensions/ssh/index.ts",
       "extensions/goal/index.ts",
-      "extensions/model-router/index.ts",
       "extensions/task-context/index.ts",
       "extensions/project-context/index.ts",
       "extensions/minimal-output/index.ts",
@@ -60,8 +59,6 @@
   "dependencies": {
     "pi-better-background-tasks": "0.20.0",
     "pi-better-goal": "0.16.0",
-    "pi-better-model-router": "0.1.4",
-    "pi-ollama-cloud": "0.13.1",
     "pi-better-sandbox": "0.15.1",
     "pi-better-ssh": "0.1.6",
     "pi-better-subagents": "0.37.0",
@@ -77,7 +74,6 @@
   "bundledDependencies": [
     "pi-better-background-tasks",
     "pi-better-goal",
-    "pi-better-model-router",
     "pi-better-sandbox",
     "pi-better-ssh",
     "pi-better-subagents"

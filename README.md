@@ -2,7 +2,7 @@
 
 <img src="docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` combines an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, Goal continuation, model routing, and optional Outcome & Todo.
+`pi-better-harness` combines an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, Goal continuation, and optional Outcome & Todo.
 
 ## Quick Answer
 
@@ -88,7 +88,7 @@ Do not use the bundle when you only need one extension; install that package dir
 - [`pi-better-model-router`](packages/pi-better-model-router/README.md): price-based routing between DeepSeek and Ollama Cloud.
 - Harness Outcome & Todo: session context and checklist progress, off until enabled in `/harness-settings`.
 
-The bundle includes `pi-better-model-router` 0.1.2 and its Ollama Cloud provider; the `npx` installer installs the router as a sixth standalone component. Select `router/deepseek-flash-auto` in `/model` to use it. The router prefers DeepSeek when prices tie and does not change the default selected model. It requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older hosts without that API, the bundle skips the router and shows an upgrade notice.
+To add model routing, install `pi-better-model-router` separately and select `router/deepseek-flash-auto` in `/model`. The router package includes the Ollama Cloud provider and requires Pi's `registerVirtualModel` API.
 
 `pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 

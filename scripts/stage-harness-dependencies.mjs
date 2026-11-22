@@ -15,7 +15,6 @@ const harnessDir = join(root, "packages/pi-better-harness");
 export const stagedPackageNames = [
   "pi-better-background-tasks",
   "pi-better-goal",
-  "pi-better-model-router",
   "pi-better-sandbox",
   "pi-better-ssh",
   "pi-better-subagents",
@@ -54,11 +53,6 @@ export function stageHarnessDependencies({ harnessRoot = harnessDir, ignoreScrip
   const nodeModulesDir = join(harnessRoot, "node_modules");
   try {
     for (const packageName of stagedPackageNames) {
-      // The router has its own bundled provider. Stage that dependency even in
-      // read-only packaging tests, which skip unrelated component sync scripts.
-      if (packageName === "pi-better-model-router") {
-        execFileSync(process.execPath, [join(root, "packages", packageName, "scripts/stage-dependencies.mjs")], { cwd: root });
-      }
       const packed = packPackage(join(root, "packages", packageName), stagingDir, ignoreScripts);
       if (!packed?.filename) {
         throw new Error(`npm pack did not return a tarball for ${packageName}`);

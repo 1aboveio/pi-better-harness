@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, model routing, and Outcome & Todo.
+`pi-better-harness` is a Pi meta package for an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and Outcome & Todo.
 
 ## Quick Answer
 
@@ -13,7 +13,6 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-ssh` for short remote commands over reusable SSH connections.
 - `pi-better-goal` for explicit triggers, pause/resume, and background-aware continuation.
-- `pi-better-model-router` for price-based routing between DeepSeek and Ollama Cloud.
 - Harness-owned Outcome & Todo for session context and checklist progress. Saved state displays by default; its hooks start off.
 
 `pi-better-read-aloud` is intentionally not included yet.
@@ -112,13 +111,9 @@ The single-bundle installation remains available:
 pi install npm:pi-better-harness
 ```
 
-The bundle includes `pi-better-model-router` 0.1.2 and its Ollama Cloud provider.
-The `npx` installer installs the router as a sixth standalone component. Select
-`router/deepseek-flash-auto` in `/model` to use it; the router prefers DeepSeek
-when prices tie. Installation does not change the default selected model. The
-router requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0.
-On older hosts without that API, the bundle skips the router and shows an upgrade
-notice.
+To add model routing, run `pi install npm:pi-better-model-router` and select
+`router/deepseek-flash-auto` in `/model`. The router package includes the Ollama
+Cloud provider and requires Pi's `registerVirtualModel` API.
 
 After a normal bundle install or `pi update`, Harness masks any separately loaded
 `pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
