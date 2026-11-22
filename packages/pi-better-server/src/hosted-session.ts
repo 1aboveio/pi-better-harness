@@ -128,7 +128,9 @@ export class HostedSession {
       if (event.type === "message_end") this.activeMessage = undefined;
       if (event.type === "tool_execution_start" || event.type === "tool_execution_update") this.activeTools.set(event.toolCallId, event);
       if (event.type === "tool_execution_end") this.activeTools.delete(event.toolCallId);
-      this.publish(event);
+      // Clients use lifecycle events to decide when a turn is idle. Flush those
+      // boundaries together with any preceding token or tool updates.
+      this.publish(event, event.type !== "message_update" && event.type !== "tool_execution_update");
       if (event.type === "agent_start") this.runIdle = session.waitForIdle().catch(() => undefined);
       if (event.type === "agent_end") for (const release of [...this.releaseOnAgentEnd]) release();
       this.onActivity("work");
@@ -247,10 +249,10 @@ export class HostedSession {
   /** Activation notices share the normal sequence and replay log, including after commitStop. */
   publishRuntimeEvent(event: unknown): void { this.publish(event); }
 
-  private publish(event: unknown): void {
+  private publish(event: unknown, flushImmediately = true): void {
     this.progressAt = Date.now();
     if (this.runtimeReleased) return;
-    this.log.append(event);
+    this.log.append(event, flushImmediately);
   }
 
   /**

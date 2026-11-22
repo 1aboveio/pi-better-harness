@@ -82,16 +82,17 @@ export class EventLog {
     this.committed = listener;
   }
 
-  append(event: unknown): LoggedEvent {
-    const logged: LoggedEvent = { seq: ++this.lastSeq, event };
+  append(event: unknown, flushImmediately = false): LoggedEvent {
+    const logged: LoggedEvent = { seq: this.lastSeq + 1, event };
     const line = `${JSON.stringify(logged)}\n`;
+    this.lastSeq = logged.seq;
     const size = Buffer.byteLength(line);
     this.pending.push(line);
     this.pendingBytes += size;
     this.fileEvents++;
     this.fileBytes += size;
     // Small batches are written after a short delay; a big one (or a quiet gap in the stream) does not wait.
-    if (this.pendingBytes >= 256 * 1024) this.flush();
+    if (flushImmediately || this.pendingBytes >= 256 * 1024) this.flush();
     else if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), this.flushMs);
       this.timer.unref();

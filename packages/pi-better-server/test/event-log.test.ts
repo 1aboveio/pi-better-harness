@@ -46,7 +46,10 @@ describe("event log size bound", () => {
 it("publishes live events only after their sequence can be replayed across a restart", () => {
   const path = tempLog("committed.jsonl");
   const log = new EventLog(path, { flushMs: 60_000 });
-  const host = new HostedSession({ subscribe: () => () => {} } as unknown as AgentSession, log, () => {});
+  let emit: ((event: unknown) => void) | undefined;
+  const host = new HostedSession({
+    subscribe(listener: (event: unknown) => void) { emit = listener; return () => {}; },
+  } as unknown as AgentSession, log, () => {});
   const observed: unknown[] = [];
   host.addListener(entry => {
     assert.deepEqual(new EventLog(path).since(entry.seq - 1).events[0], entry);
@@ -54,13 +57,13 @@ it("publishes live events only after their sequence can be replayed across a res
   });
 
   const event = { type: "message_update", text: "before mutation" };
-  host.publishRuntimeEvent(event);
+  emit!(event);
   event.text = "after mutation";
   assert.deepEqual(observed, []);
-  log.flush();
+  host.publishRuntimeEvent({ type: "runtime_upgrade" });
 
-  assert.deepEqual(observed, [{ type: "message_update", text: "before mutation" }]);
-  assert.equal(new EventLog(path).last, 1);
+  assert.deepEqual(observed, [{ type: "message_update", text: "before mutation" }, { type: "runtime_upgrade" }]);
+  assert.equal(new EventLog(path).last, 2);
 });
 
 it("repairs a partial final line before writing the next sequence", () => {
