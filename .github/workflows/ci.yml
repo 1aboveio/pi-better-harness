@@ -456,7 +456,6 @@ jobs:
             extensions/background-tasks/index.ts \
             extensions/ssh/index.ts \
             extensions/goal/index.ts \
-            extensions/model-router/index.ts \
             extensions/execution-policy.ts \
             extensions/minimal-output/index.ts \
             extensions/tool-call-guard/index.ts \
@@ -503,8 +502,6 @@ jobs:
             node_modules/pi-better-background-tasks/src/supervisor/generated/store.mjs \
             node_modules/pi-better-ssh/src/index.ts \
             node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
-            node_modules/pi-better-model-router/src/index.ts \
-            node_modules/pi-better-model-router/node_modules/pi-ollama-cloud/index.ts \
             node_modules/pi-better-goal/src/index.ts \
             extensions/task-context/index.ts \
             extensions/project-context/index.ts \
