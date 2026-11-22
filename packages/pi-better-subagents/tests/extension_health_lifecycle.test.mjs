@@ -237,7 +237,7 @@ async function reapRun({ id, pid }) {
             timeout = setTimeout(() => reject(new Error(`Owned finalizer did not settle for ${id}`)), 2000);
         })]);
     } finally { clearTimeout(timeout); }
-    rmSync(runDir(id), { recursive: true, force: true });
+    rmSync(runDir(id), { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
     retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
