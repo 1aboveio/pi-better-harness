@@ -28,6 +28,7 @@
  */
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { register } from "node:module";
 import {
@@ -290,6 +291,29 @@ function newSandboxDir(label) {
 }
 
 describe("refused task tools never reach the child loadout (#669)", () => {
+    it("warns at launch when the sandbox limits Git in an existing linked worktree", { timeout: 30000 }, async (t) => {
+        if (!requireSandbox(t)) return;
+        const source = newSandboxDir("source");
+        const checkout = join(RUNTIME, "linked-checkout");
+        const git = (...args) => execFileSync("git", args, { cwd: source, stdio: "pipe" });
+        git("init", "-q");
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "base");
+        git("worktree", "add", "--detach", checkout);
+        const cwd = join(checkout, "nested");
+        mkdirSync(cwd);
+        const { tools } = loadExtension(POLICY);
+
+        const result = await tools.subagent_spawn.execute("tc-worktree", {
+            prompt: "inspect worktree", cwd, isolation: false, tools: "read", callback: false,
+        }, undefined, undefined, makeCtx(cwd));
+        const text = result.content[0].text;
+        const id = text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(id, text);
+        await waitForTerminal(id);
+        assert.match(text, /linked worktree.*sandbox.*shared Git index.*git_clone_workspace:true/is);
+        assert.match(readFileSync(registry.promptPathFor(id), "utf8"), /shared Git index/);
+    });
+
     it("drops an implicitly loaded unavailable tool from policy, preflight and recipe", { timeout: 30000 }, async (t) => {
         if (!requireSandbox(t)) return;
         const { tools } = loadExtension(POLICY);

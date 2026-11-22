@@ -183,8 +183,28 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
         runGit(repo, `remote add origin ${upstream}`);
         runGit(repo, 'push -u origin HEAD');
 
+        // The clone can finish only after the foreground event loop sees it
+        // start. Synchronous Git deadlocks this handshake until the fixture exits.
+        const cloneStarted = join(base, 'clone-started');
+        const releaseClone = join(base, 'release-clone');
+        writeFileSync(join(stubDir, 'git'), `#!/bin/sh
+if [ "$1" = clone ]; then
+    test "$GIT_TERMINAL_PROMPT" = 0 || exit 11
+    touch ${JSON.stringify(cloneStarted)}
+    for attempt in $(seq 1 50); do
+        test -f ${JSON.stringify(releaseClone)} && break
+        sleep 0.02
+    done
+    test -f ${JSON.stringify(releaseClone)} || exit 12
+fi
+exec ${JSON.stringify(GIT_BIN)} "$@"
+`, { mode: 0o755 });
+
         const prevPath = process.env.PATH;
         process.env.PATH = `${stubDir}${prevPath ? `:${prevPath}` : ''}`;
+        const release = setInterval(() => {
+            if (existsSync(cloneStarted)) writeFileSync(releaseClone, '');
+        }, 10);
 
         try {
             const indexUrl = pathToFileURL(join(REPO_ROOT, 'index.ts')).href + `?live=${Date.now()}`;
@@ -228,6 +248,7 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             );
 
             const text = JSON.stringify(result);
+            assert.ok(existsSync(releaseClone), 'the foreground kept running during clone preparation');
             assert.match(text, /Subagent launched/, `execute must return launch confirmation, got: ${text}`);
             assert.match(text, /id=sa_/, 'execute must return a run id');
 
@@ -275,6 +296,7 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
                 }
             }
         } finally {
+            clearInterval(release);
             if (prevPath === undefined) delete process.env.PATH;
             else process.env.PATH = prevPath;
             rmSync(base, { recursive: true, force: true });

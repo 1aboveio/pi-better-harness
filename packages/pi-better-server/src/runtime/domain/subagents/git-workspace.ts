@@ -38,15 +38,23 @@ export interface GitWorkspaceInfo {
     isLinkedWorktree: boolean;
 }
 
+const GIT_WORKSPACE_COMMAND_TIMEOUT_MS = 60_000;
+
 function runGit(cwd: string, args: string[], opts?: { encoding?: BufferEncoding; stdio?: any }): string {
     try {
         return execFileSync("git", args, {
             cwd,
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+            timeout: GIT_WORKSPACE_COMMAND_TIMEOUT_MS,
+            killSignal: "SIGKILL",
             ...opts,
         }).trim();
     } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+            throw new Error(`git ${args[0]} timed out after ${GIT_WORKSPACE_COMMAND_TIMEOUT_MS / 1_000} seconds in ${cwd}`);
+        }
         const message = (err as Error).message ?? String(err);
         throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${message}`);
     }
@@ -298,6 +306,25 @@ function hasLinkedWorktreePointer(dir: string): boolean {
     }
 }
 
+/** Locate shared metadata even when a caller supplies a subdirectory of the checkout. */
+export function linkedWorktreeGitDir(cwd: string): string | undefined {
+    let directory = realPath(cwd);
+    for (;;) {
+        const gitMarker = join(directory, ".git");
+        if (existsSync(gitMarker)) {
+            if (!hasLinkedWorktreePointer(directory)) return undefined;
+            try {
+                return inspectGitWorkspace(directory).gitDir;
+            } catch {
+                throw linkedWorktreeError(directory);
+            }
+        }
+        const parent = dirname(directory);
+        if (parent === directory) return undefined;
+        directory = parent;
+    }
+}
+
 export function prepareGitCloneWorkspace(options: PrepareGitCloneWorkspaceOptions): string {
     const sourceDir = realPath(options.sourceDir);
     const targetDir = realPath(options.targetDir);
@@ -346,7 +373,7 @@ export function prepareGitCloneWorkspace(options: PrepareGitCloneWorkspaceOption
         runGit(dirname(targetDir), cloneArgs, { stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
         if (info.isLinkedWorktree) {
-            throw linkedWorktreeError(sourceDir);
+            throw new Error(`${linkedWorktreeError(sourceDir).message} Clone preparation failed: ${(err as Error).message}`);
         }
         throw err;
     }

@@ -45,7 +45,7 @@ export interface SubagentConfig extends TimingSettings {
     /**
      * Provider → extension package(s) that authenticate it. Model auth is not
      * tool-shaped: `xai/grok-4.5` needs pi-xai-oauth loaded whatever the tools.
-     * A built-in entry covers `ollama-cloud`; an entry here replaces it.
+     * Entries here override built-in mappings, including Ollama Cloud and LiteLLM.
      */
     providerExtensions?: Record<string, string | string[]> | null;
     /**

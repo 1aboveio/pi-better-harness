@@ -49,6 +49,7 @@ export const SELF_SPEC = "self";
 export const BUILTIN_PROVIDER_EXTENSIONS = {
     "router": "npm:pi-better-model-router",
     "ollama-cloud": "npm:pi-ollama-cloud",
+    "litellm": "npm:pi-provider-litellm",
 };
 
 /** Split "xai/grok-4.5" -> "xai". Returns undefined when there is no provider. */
