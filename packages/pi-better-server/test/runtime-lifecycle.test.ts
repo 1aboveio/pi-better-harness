@@ -51,6 +51,9 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   mkdirSync(corrupt.dir, { recursive: true }); writeFileSync(corrupt.launch, "{");
   await model.reconcile();
   assert.deepEqual(model.livenessReasons().map(reason => reason.id), [taskId]);
+  // Both observers use the same SQLite files. If the worker's initial
+  // checkpoint acquisition is contended, its repair timer retries it.
+  await waitFor("runner executor to finish rebuilding observation", () => executor.observation().status !== "rebuilding");
   assert.deepEqual((await executor.livenessReasons()).map(reason => reason.id), [taskId], "worker executor preserves valid runner retention alongside corrupt records");
   const claim = supervisor.snapshot(taskId)!.claim!;
   assert.equal(processMatchesStart(claim.pid, "Thu Jan  1 00:00:00 1970"), false, "a live PID with a different start identity cannot retain the runtime");
