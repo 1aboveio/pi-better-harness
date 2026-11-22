@@ -57,6 +57,7 @@
     "@earendil-works/pi-coding-agent": "^0.82.0",
     "@earendil-works/pi-tui": "^0.82.0",
     "@types/node": "^25.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "tsx": "^4.22.3",
     "typebox": "^1.1.39",
     "typescript": "^6.0.0",

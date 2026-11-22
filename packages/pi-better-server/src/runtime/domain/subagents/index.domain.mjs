@@ -21,6 +21,7 @@ import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
 import { assertWaitToolDependencies, createToolDescriptor } from "./operation-bridge-types.domain.mjs";
 import { requestResumeAdmission } from "./worker-waits.domain.mjs";
 import { execSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -49,7 +50,7 @@ import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeD
 import { resolveExtensions, extensionArgs } from "./extensions.domain.mjs";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.domain.mjs";
 import { worktreePolicyNotice } from "./worktree-feedback.domain.mjs";
-import { canonicalizePath, compileWritePolicy, takeRecoverySnapshot } from "./shared-sandbox-core.domain.mjs";
+import { canonicalizePath, compileWritePolicy, describeSandboxSupport, takeRecoverySnapshot } from "./shared-sandbox-core.domain.mjs";
 import { TASK_BUILTINS } from "./shared-task-sandbox.domain.mjs";
 import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
 import { announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
@@ -354,7 +355,7 @@ function markCompletionCallbackSuppressed(id, reason, now = Date.now()) {
     if (sessionTornDown && reason === NO_ACTIVE_SESSION_REASON)
         return;
     const meta = readMeta(id);
-    if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined)
+    if (!meta)
         return;
     // An explicitly interrupted run owes its completion to the conversation that
     // launched it (#625, DEV-226 criterion 5). An unrelated session merely being
@@ -362,19 +363,22 @@ function markCompletionCallbackSuppressed(id, reason, now = Date.now()) {
     // attempt but must keep the obligation: the pending marker stays, and A
     // recovers it when it comes back. Records that never lost supervision keep
     // today's durable suppression, so legacy/foreign notifications stay dead.
-    if ((meta.supervisionInterruptedAt !== undefined || meta.operations?.resumeLaunchToken)
-        && isConversationIdentityReason(reason))
-        return;
-    meta.completionCallbackSuppressedAt = now;
-    meta.completionCallbackSuppressedReason = reason;
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => {
+            if (current.completionCallbackSentAt !== undefined || current.completionCallbackSuppressedAt !== undefined)
+                return;
+            if ((current.supervisionInterruptedAt !== undefined || current.operations?.resumeLaunchToken)
+                && isConversationIdentityReason(reason))
+                return;
+            return { completionCallbackSuppressedAt: now, completionCallbackSuppressedReason: reason };
+        } });
 }
 function markCompletionCallbackSent(id, now) {
     const meta = readMeta(id);
-    if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined)
+    if (!meta)
         return;
-    meta.completionCallbackSentAt = now;
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => current.completionCallbackSentAt === undefined && current.completionCallbackSuppressedAt === undefined
+            ? { completionCallbackSentAt: now } : undefined,
+    });
 }
 /** Queue one durable ordinary terminal event on the host-shared batch. */
 function enqueueCompletionCallback(pi, id) {
@@ -1127,10 +1131,11 @@ function stopForTiming(pi, id, reason, now) {
         return outcome.action === "finalized";
     }
     const current = readMeta(id);
-    if (current && current.callback !== false && current.completionCallbackPendingAt === undefined
-        && current.completionCallbackSentAt === undefined && current.completionCallbackSuppressedAt === undefined) {
-        current.completionCallbackPendingAt = now;
-        writeMeta(current);
+    if (current) {
+        writeMeta(current, { patch: latest => latest.callback !== false && latest.completionCallbackPendingAt === undefined
+                && latest.completionCallbackSentAt === undefined && latest.completionCallbackSuppressedAt === undefined
+                ? { completionCallbackPendingAt: now } : undefined,
+        });
     }
     progressCache.delete(id);
     if (current && !callbackSuppressionReason(current)) {
@@ -2033,6 +2038,19 @@ function resolvePiBinary() {
     }
     return cachedPi;
 }
+function prepareLaunchWorkspace(options, isolated) {
+    const built = import.meta.url.endsWith(".domain.mjs");
+    const entry = new URL("./workspace-prepare-worker.mjs", import.meta.url);
+    return new Promise((resolve, reject) => {
+        const worker = new Worker(entry, {
+            workerData: { options, isolated },
+            execArgv: built ? [] : ["--import", import.meta.resolve("tsx")],
+        });
+        worker.once("message", resolve);
+        worker.once("error", reject);
+        worker.once("exit", code => reject(new Error(`Git workspace preparation exited before reporting a result (code ${code}).`)));
+    });
+}
 /**
  * Finalize a run once its child exits. Host-facing wrapper around the
  * first-party finalizer (finalization.ts) so tests can exercise the durable
@@ -2862,8 +2880,8 @@ export default function (pi, managed) {
      */
     internal) {
         const { resolveChildClosure, resolveChildLaunch, configSnapshot } = await import("./child-dependencies.mjs");
-        const { resolveSubagentWorkspace, inspectGitWorkspace } = await import("./git-workspace.domain.mjs");
-        const { workspaceChoice, createIsolatedWorkspace, restoreWorkspace, discardWorkspace, markWorkspaceWriter } = await import("./isolated-workspace.domain.mjs");
+        const { resolveSubagentWorkspace, linkedWorktreeGitDir } = await import("./git-workspace.domain.mjs");
+        const { workspaceChoice, restoreWorkspace, discardWorkspace, markWorkspaceWriter } = await import("./isolated-workspace.domain.mjs");
         const { PREFLIGHT_ENV } = await import("./child-preflight.mjs");
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
@@ -2885,6 +2903,16 @@ export default function (pi, managed) {
         // and a profile that would change confinement refuses instead of silently
         // moving a live conversation into a different sandbox.
         const permissionPlan = resolveSubagentPermissions(pi, p.sandbox, resume && { runId: resume.prior.id, sandbox: resume.recipe.sandbox });
+        if (permissionPlan.sandboxEnabled) {
+            const support = describeSandboxSupport();
+            if (!support.supported) {
+                const remedy = permissionPlan.permissions
+                    ? "Turn off the Subagents sandbox in /sandbox settings to run without confinement."
+                    : resume ? "Launch a new subagent with sandbox:false to run without confinement."
+                        : "Pass sandbox:false to run without confinement.";
+                throw new Error(`Task sandbox unavailable: ${support.reason} ${remedy}`);
+            }
+        }
         const processPolicy = describeSubagentProcessPolicy(permissionPlan, process.platform);
         const processAccess = effectiveWorkerProcessAccess(permissionPlan);
         const taskPermissions = permissionPlan.inactiveProfile
@@ -3020,14 +3048,15 @@ export default function (pi, managed) {
                 mkdirSync(root, { mode: 0o700 });
                 createdWorkspace = true;
             }
-            const isolatedCwd = isolated && !resume && !p.git_clone_workspace ? createIsolatedWorkspace(isolated, true) : undefined;
+            const workspaceOptions = {
+                ctxCwd: ctx.cwd, cwd: p.cwd, sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
+                gitCloneWorkspace: p.git_clone_workspace, runId: id, runDirPath: runDir(id), sandboxEnabled,
+            };
             const workspace = resume
                 ? { cwd: resume.recipe.cwd, requestedSandboxDir: resume.recipe.sandboxDir }
-                : isolatedCwd ? { cwd: isolatedCwd, requestedSandboxDir: sandboxEnabled ? isolatedCwd : undefined }
-                    : resolveSubagentWorkspace({
-                        ctxCwd: ctx.cwd, cwd: p.cwd, sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
-                        gitCloneWorkspace: p.git_clone_workspace, runId: id, runDirPath: runDir(id), sandboxEnabled,
-                    });
+                : isolated || p.git_clone_workspace
+                    ? await prepareLaunchWorkspace(workspaceOptions, p.git_clone_workspace ? undefined : isolated)
+                    : resolveSubagentWorkspace(workspaceOptions);
             // Legacy explicit clones launch at the repository root, even when the source is a subdirectory.
             if (!resume && isolated && p.git_clone_workspace)
                 isolated = { ...isolated, subdir: "" };
@@ -3304,8 +3333,9 @@ export default function (pi, managed) {
             const optionalTrustedTools = taskTools?.trusted.filter(({ name }) => selectedTools.includes(name)
                 && (inheritedTrusted ? inheritedTrusted.has(name) : requestedTools === undefined)).map(({ name }) => name) ?? [];
             const dropped = toolSelection?.dropped ?? [];
+            const sharedGitDir = sandboxEnabled && isolated?.mode !== "clone" ? linkedWorktreeGitDir(cwd) : undefined;
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
-                worktreeGitDir: isolated?.mode === "worktree" ? inspectGitWorkspace(cwd).gitDir : undefined,
+                worktreeGitDir: isolated?.mode === "worktree" ? sharedGitDir : undefined,
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
                 tools: selectedTools,
                 permissions: taskPermissions && { ...taskPermissions, ...commandSettings },
@@ -3324,14 +3354,15 @@ export default function (pi, managed) {
                     ? resume?.prior.operations?.policy.sandbox?.denyWrite
                     : handoffAuthority?.sandbox?.denyWrite,
             }) : undefined;
-            if (taskRuntime?.policy.worktreeGitDir) {
+            if (taskRuntime && sharedGitDir) {
                 const policy = taskRuntime.policy;
-                const notice = worktreePolicyNotice(policy.worktreeGitDir, compileWritePolicy({
+                const notice = worktreePolicyNotice(sharedGitDir, compileWritePolicy({
                     writableRoot: policy.root, home: policy.home, permissions: policy.permissions,
                     denyWrite: policy.denyWrite, runtimeCompatibility: true, runtimeWrite: [policy.scratch],
                 }));
                 if (notice) {
-                    workspaceNote += " " + notice;
+                    workspaceNote = isolated?.mode === "worktree" ? `${workspaceNote} ${notice}`
+                        : `Git workspace: existing linked worktree at ${cwd}. ${notice} Use git_clone_workspace:true for a new worker that needs to commit, or return the changes for the parent to commit.`;
                     args[args.length - 1] = workspaceNote + "\n\n" + p.prompt;
                     writeFileSync(promptPathFor(id), args[args.length - 1]);
                 }

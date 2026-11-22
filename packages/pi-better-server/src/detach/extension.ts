@@ -60,6 +60,7 @@ export function assertLocalSessionTransferSafe(sessionManager: unknown): void {
 interface ManagerOwnershipGuard {
   departed: Set<string>;
   wrapped: boolean;
+  flushDropped?: () => boolean;
 }
 
 // Native replacement and separately loaded extension modules must share both gates and latches.
@@ -107,9 +108,15 @@ function createLocalOwnershipGuard() {
     if (state.wrapped) return;
     state.wrapped = true;
     const rewrite = typeof manager._rewriteFile === "function" ? manager._rewriteFile : undefined;
-    // Dropped entries remain in memory. After a failed move unfences the source, rewrite them
-    // before appending again so every on-disk parentId still points to an on-disk entry.
+    // Entries withheld by the fence remain in memory. Rewriting restores parent links
+    // on rollback, or on the next append if the fence was lifted outside this handler.
     let dropped = false;
+    state.flushDropped = () => {
+      if (!dropped || !rewrite || manager.flushed === false) return false;
+      rewrite.call(manager);
+      dropped = false;
+      return true;
+    };
     for (const method of GATED_METHODS) {
       const original = manager[method];
       if (typeof original !== "function") continue;
@@ -119,8 +126,8 @@ function createLocalOwnershipGuard() {
           return undefined;
         }
         if (dropped) {
+          if (state.flushDropped?.()) return undefined;
           dropped = false;
-          if (rewrite && manager.flushed !== false) return rewrite.call(this);
         }
         return (original as (...a: unknown[]) => unknown).apply(this, args);
       };
@@ -180,6 +187,7 @@ export function markLocalSessionDeparted(pi: ExtensionAPI, sessionId: string, ma
 
 export interface DetachDeps {
   resolveTarget: typeof resolveTarget;
+  waitMs?: number;
 }
 
 export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTarget }): void {
@@ -223,6 +231,7 @@ export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTar
             return DaemonClient.connect(target.socketPath);
           },
           isBusy: () => !ctx.isIdle(),
+          ...(deps.waitMs === undefined ? {} : { waitMs: deps.waitMs }),
           ...(parsed.toCwd ? { toCwd: parsed.toCwd } : {}),
           onProgress: (message) => ctx.ui.notify(message, "info"),
         });
@@ -231,6 +240,14 @@ export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTar
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const untouched = error instanceof PreflightError || (error instanceof MoveError && error.sourceUnfenced);
+        if (error instanceof MoveError && error.sourceUnfenced && manager.getSessionId() === sessionId) {
+          try {
+            if (!localOwnershipGuard(pi).blockedFor(manager)) managerOwnershipGuard(manager).flushDropped?.();
+          } catch (flushError) {
+            ctx.ui.notify(`${message}\nCould not persist entries buffered during the move: ${String(flushError)}`, "error");
+            return;
+          }
+        }
         ctx.ui.notify(untouched ? `${message}\nThis session is unchanged.` : message, "error");
       } finally {
         await target?.close();

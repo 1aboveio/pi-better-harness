@@ -104,6 +104,9 @@ export class HostedSession {
   constructor(session: AgentSession, log: EventLog, onActivity: (kind?: "work" | "metadata") => void, activity?: SessionActivity) {
     this.session = session;
     this.log = log;
+    this.log.onCommitted(entry => {
+      for (const listener of this.listeners) listener(entry);
+    });
     this.onActivity = onActivity;
     this.activity = activity;
     this.ui = new UiBridge((event) => {
@@ -125,7 +128,9 @@ export class HostedSession {
       if (event.type === "message_end") this.activeMessage = undefined;
       if (event.type === "tool_execution_start" || event.type === "tool_execution_update") this.activeTools.set(event.toolCallId, event);
       if (event.type === "tool_execution_end") this.activeTools.delete(event.toolCallId);
-      this.publish(event);
+      // Clients use lifecycle events to decide when a turn is idle. Flush those
+      // boundaries together with any preceding token or tool updates.
+      this.publish(event, event.type !== "message_update" && event.type !== "tool_execution_update");
       if (event.type === "agent_start") this.runIdle = session.waitForIdle().catch(() => undefined);
       if (event.type === "agent_end") for (const release of [...this.releaseOnAgentEnd]) release();
       this.onActivity("work");
@@ -228,6 +233,7 @@ export class HostedSession {
   fence(): void { this.disposed = true; fenceHostedSession(this.session); this.activity?.revokeRuntime(); }
 
   get lastSeq(): number {
+    this.log.flush();
     return this.log.last;
   }
 
@@ -243,11 +249,10 @@ export class HostedSession {
   /** Activation notices share the normal sequence and replay log, including after commitStop. */
   publishRuntimeEvent(event: unknown): void { this.publish(event); }
 
-  private publish(event: unknown): void {
+  private publish(event: unknown, flushImmediately = true): void {
     this.progressAt = Date.now();
     if (this.runtimeReleased) return;
-    const logged = this.log.append(event);
-    for (const listener of this.listeners) listener(logged);
+    this.log.append(event, flushImmediately);
   }
 
   /**
@@ -255,6 +260,7 @@ export class HostedSession {
    * The replay and the live registration happen in one synchronous step, so no event is lost or repeated.
    */
   subscribe(sinceSeq: number | undefined, listener: Listener): { replay: Replay; unsubscribe: () => void } {
+    this.log.flush();
     const replay = sinceSeq === undefined ? { events: [], firstSeq: 0, truncated: false } : this.log.since(sinceSeq);
     return { replay, unsubscribe: this.addListener(listener) };
   }
@@ -305,9 +311,9 @@ export class HostedSession {
     this.ui.cancelAll();
     await aborted;
     this.unsubscribe();
+    this.log.flush();
     this.listeners.clear();
     this.runtimeReleased = true;
-    this.log.flush();
     this.session.dispose();
   }
 

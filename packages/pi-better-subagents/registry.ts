@@ -1092,7 +1092,8 @@ function takeToken(lockPath: string, payload: string, deadline: number, id: stri
  * decides who may recover or release it. A live pid — even one paused well
  * past two seconds — is not stolen. Release renames the lock aside and deletes
  * it only when the moved bytes are still ours, so a newer owner's lock stays.
- * The lock is per run and is not a second registry.
+ * The lock is per run. Metadata transitions that depend on the current record
+ * use a patch so that the read and preconditions are repeated after lock loss.
  */
 function withRunMetaLock(id: string, body: (owns: () => boolean) => void): void {
     const directory = runDir(id);
@@ -1270,7 +1271,7 @@ export function writeMeta(meta: RunMeta, options: {
     ifAbsent?: boolean;
     /** Build a field update from current metadata under the existing run lock. */
     patch?: (current: Readonly<RunMeta>) => Partial<RunMeta> | undefined;
-} = {}): void {
+} = {}): RunMeta | undefined {
     if (options.patch && !readMeta(meta.id)) return;
     mkdirSync(runDir(meta.id), { recursive: true });
     let written = false;
@@ -1303,10 +1304,11 @@ export function writeMeta(meta: RunMeta, options: {
         owns();
         written = true;
     });
-    if (options.patch && !written) return;
+    if (options.patch && !written) return undefined;
     for (const listener of metaChangedListeners) {
         try { listener(meta); } catch { /* best effort */ }
     }
+    return written ? meta : undefined;
 }
 
 export function onMetaChanged(listener: (meta?: RunMeta) => void): () => void {
@@ -1893,11 +1895,9 @@ export function isDismissed(meta: Pick<RunMeta, "dismissedAt">): boolean {
 export function dismissRun(id: string, at: number = Date.now()): RunMeta | undefined {
     const meta = readMeta(id);
     if (!meta) return undefined;
-    if (meta.dismissedAt === undefined) {
-        meta.dismissedAt = at;
-        writeMeta(meta);
-    }
-    return meta;
+    return writeMeta(meta, {
+        patch: current => current.dismissedAt === undefined ? { dismissedAt: at } : undefined,
+    }) ?? readMeta(id);
 }
 
 /**

@@ -11,6 +11,7 @@ import { DaemonClient } from "../client.ts";
 import { moveSession, type MoveResult } from "../move/orchestrate.ts";
 import { defaultServerDir, socketPathFor } from "../paths.ts";
 import { resolveSession } from "../remote/sessions.ts";
+import { shellQuote } from "../startup/runtime.ts";
 import { preflightCodexProvider } from "./preflight.ts";
 import { readRolloutMeta } from "./rollout.ts";
 import { startCodexDaemon, type CodexDaemon } from "./daemon.ts";
@@ -74,8 +75,8 @@ async function localDaemon(serverDir: string, codex: CodexRuntimeOptions | undef
  * plain `codex resume` works.
  */
 export function resumeHint(cwd: string, sessionId: string, managed: boolean, serverDir: string): string {
-  if (!managed) return `cd ${cwd} && codex resume ${sessionId}`;
-  const env = serverDir === defaultServerDir() ? "" : `PI_SERVER_DIR=${serverDir} `;
+  if (!managed) return `cd ${shellQuote(cwd)} && codex resume ${sessionId}`;
+  const env = serverDir === defaultServerDir() ? "" : `PI_SERVER_DIR=${shellQuote(serverDir)} `;
   return `${env}pi-remote attach ${sessionId} --agent codex  (or: ${env}pi-remote steer ${sessionId} --agent codex "<message>")`;
 }
 

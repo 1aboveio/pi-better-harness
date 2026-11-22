@@ -181,8 +181,10 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
 
 describe("codex return hint", () => {
   it("goes through the running daemon, naming a non-default server dir, and uses plain codex resume only when nothing holds the thread", () => {
-    assert.equal(resumeHint("/w", "t1", false, defaultServerDir()), "cd /w && codex resume t1");
+    assert.equal(resumeHint("/w", "t1", false, defaultServerDir()), "cd '/w' && codex resume t1");
     assert.match(resumeHint("/w", "t1", true, defaultServerDir()), /^pi-remote attach t1 /);
-    assert.match(resumeHint("/w", "t1", true, "/x/srv"), /^PI_SERVER_DIR=\/x\/srv pi-remote attach t1 .*PI_SERVER_DIR=\/x\/srv pi-remote steer t1/);
+    assert.match(resumeHint("/w", "t1", true, "/x/srv"), /^PI_SERVER_DIR='\/x\/srv' pi-remote attach t1 .*PI_SERVER_DIR='\/x\/srv' pi-remote steer t1/);
+    assert.match(resumeHint("/w", "t1", true, "/x/server dir"), /^PI_SERVER_DIR='\/x\/server dir' pi-remote attach t1 .*PI_SERVER_DIR='\/x\/server dir' pi-remote steer t1/);
+    assert.equal(resumeHint("/work tree", "t1", false, defaultServerDir()), "cd '/work tree' && codex resume t1");
   });
 });

@@ -21,21 +21,27 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { readGitRemotes, syncGitRemotes } from "./git-remotes.domain.mjs";
 export { readGitRemotes, syncGitRemotes };
-function runGit(cwd, args, opts) {
+const GIT_WORKSPACE_COMMAND_TIMEOUT_MS = 60_000;
+function runGit(cwd, args, env) {
     try {
         return execFileSync("git", args, {
             cwd,
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "pipe"],
-            ...opts,
+            env: { ...(env ?? process.env), GIT_TERMINAL_PROMPT: "0" },
+            timeout: GIT_WORKSPACE_COMMAND_TIMEOUT_MS,
+            killSignal: "SIGKILL",
         }).trim();
     }
     catch (err) {
+        if (err.code === "ETIMEDOUT") {
+            throw new Error(`git ${args[0]} timed out after ${GIT_WORKSPACE_COMMAND_TIMEOUT_MS / 1_000} seconds in ${cwd}`, { cause: err });
+        }
         const message = err.message ?? String(err);
-        throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${message}`);
+        throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${message}`, { cause: err });
     }
 }
 /** Resolve `path` to an absolute, real path. Falls back to resolve() if the path does not exist. */
@@ -226,6 +232,45 @@ function hasLinkedWorktreePointer(dir) {
         return false;
     }
 }
+/** An ignored subdirectory can contain a separate, non-Git workspace. */
+export function isIgnoredGitSubdirectory(root, subdir) {
+    if (!subdir)
+        return false;
+    try {
+        runGit(root, ["-c", "core.fsmonitor=false", "check-ignore", "--quiet", "--", subdir], Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))));
+        return true;
+    }
+    catch (error) {
+        if (error.cause?.status === 1)
+            return false;
+        throw error;
+    }
+}
+/** Locate shared metadata even when a caller supplies a subdirectory of the checkout. */
+export function linkedWorktreeGitDir(cwd) {
+    const workspace = realPath(cwd);
+    let directory = workspace;
+    for (;;) {
+        const gitMarker = join(directory, ".git");
+        if (existsSync(gitMarker)) {
+            if (!hasLinkedWorktreePointer(directory))
+                return undefined;
+            try {
+                const info = inspectGitWorkspace(directory);
+                if (isIgnoredGitSubdirectory(info.repoRoot, relative(info.repoRoot, workspace)))
+                    return undefined;
+                return info.gitDir;
+            }
+            catch {
+                throw linkedWorktreeError(directory);
+            }
+        }
+        const parent = dirname(directory);
+        if (parent === directory)
+            return undefined;
+        directory = parent;
+    }
+}
 export function prepareGitCloneWorkspace(options) {
     const sourceDir = realPath(options.sourceDir);
     const targetDir = realPath(options.targetDir);
@@ -263,11 +308,11 @@ export function prepareGitCloneWorkspace(options) {
     // a normal clone. --dissociate removes the alternates link after setup.
     const cloneArgs = buildGitCloneArgs({ referenceRepo, cloneUrl, targetDir });
     try {
-        runGit(dirname(targetDir), cloneArgs, { stdio: ["ignore", "pipe", "pipe"] });
+        runGit(dirname(targetDir), cloneArgs);
     }
     catch (err) {
         if (info.isLinkedWorktree) {
-            throw linkedWorktreeError(sourceDir);
+            throw new Error(`${linkedWorktreeError(sourceDir).message} Clone preparation failed: ${err.message}`);
         }
         throw err;
     }

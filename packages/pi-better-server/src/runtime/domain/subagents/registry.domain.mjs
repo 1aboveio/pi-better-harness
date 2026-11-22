@@ -788,7 +788,8 @@ function takeToken(lockPath, payload, deadline, id) {
  * decides who may recover or release it. A live pid — even one paused well
  * past two seconds — is not stolen. Release renames the lock aside and deletes
  * it only when the moved bytes are still ours, so a newer owner's lock stays.
- * The lock is per run and is not a second registry.
+ * The lock is per run. Metadata transitions that depend on the current record
+ * use a patch so that the read and preconditions are repeated after lock loss.
  */
 function withRunMetaLock(id, body) {
     const directory = runDir(id);
@@ -1008,13 +1009,14 @@ export function writeMeta(meta, options = {}) {
         written = true;
     });
     if (options.patch && !written)
-        return;
+        return undefined;
     for (const listener of metaChangedListeners) {
         try {
             listener(meta);
         }
         catch { /* best effort */ }
     }
+    return written ? meta : undefined;
 }
 export function onMetaChanged(listener) {
     metaChangedListeners.add(listener);
@@ -1569,11 +1571,9 @@ export function dismissRun(id, at = Date.now()) {
     const meta = readMeta(id);
     if (!meta)
         return undefined;
-    if (meta.dismissedAt === undefined) {
-        meta.dismissedAt = at;
-        writeMeta(meta);
-    }
-    return meta;
+    return writeMeta(meta, {
+        patch: current => current.dismissedAt === undefined ? { dismissedAt: at } : undefined,
+    }) ?? readMeta(id);
 }
 /**
  * Visible navigator runs: current-parent runs that are not dismissed. This is

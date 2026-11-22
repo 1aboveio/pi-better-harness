@@ -1,5 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export interface LoggedEvent {
   seq: number;
@@ -56,13 +56,14 @@ export class EventLog {
   private pending: string[] = [];
   private pendingBytes = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private committed: ((entry: LoggedEvent) => void) | undefined;
 
   constructor(path: string, options: EventLogOptions = {}) {
     this.path = path;
     this.ringSize = options.ringSize ?? DEFAULT_RING;
     this.maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const existing = this.readFile();
+    const existing = this.readFile(true);
     this.fileEvents = existing.length;
     this.lastSeq = existing.at(-1)?.seq ?? 0;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -77,17 +78,21 @@ export class EventLog {
     return this.lastSeq;
   }
 
-  append(event: unknown): LoggedEvent {
-    const logged: LoggedEvent = { seq: ++this.lastSeq, event };
+  onCommitted(listener: (entry: LoggedEvent) => void): void {
+    this.committed = listener;
+  }
+
+  append(event: unknown, flushImmediately = false): LoggedEvent {
+    const logged: LoggedEvent = { seq: this.lastSeq + 1, event };
     const line = `${JSON.stringify(logged)}\n`;
+    this.lastSeq = logged.seq;
     const size = Buffer.byteLength(line);
-    this.pushRing(logged, size);
     this.pending.push(line);
     this.pendingBytes += size;
     this.fileEvents++;
     this.fileBytes += size;
     // Small batches are written after a short delay; a big one (or a quiet gap in the stream) does not wait.
-    if (this.pendingBytes >= 256 * 1024) this.flush();
+    if (flushImmediately || this.pendingBytes >= 256 * 1024) this.flush();
     else if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), this.flushMs);
       this.timer.unref();
@@ -103,10 +108,18 @@ export class EventLog {
       this.timer = undefined;
     }
     if (this.pending.length === 0) return;
-    const text = this.pending.join("");
+    const pending = this.pending;
+    appendFileSync(this.path, pending.join(""), { mode: 0o600 });
     this.pending = [];
     this.pendingBytes = 0;
-    appendFileSync(this.path, text, { mode: 0o600 });
+    // Deliver the recorded values. Pi may mutate a streaming message between
+    // append and flush, and a replay must agree with the original delivery.
+    const committed = pending.map(line => {
+      const entry = JSON.parse(line) as LoggedEvent;
+      this.pushRing(entry, Buffer.byteLength(line));
+      return entry;
+    });
+    for (const entry of committed) this.committed?.(entry);
   }
 
   private pushRing(entry: LoggedEvent, size: number): void {
@@ -122,6 +135,7 @@ export class EventLog {
 
   /** Every retained event with `seq > sinceSeq`, in order. */
   since(sinceSeq: number): Replay {
+    this.flush();
     const ringFirst = this.ring[0]?.seq;
     const source = ringFirst !== undefined && sinceSeq + 1 >= ringFirst ? this.ring : this.readFile();
     const firstSeq = source[0]?.seq ?? 0;
@@ -141,16 +155,30 @@ export class EventLog {
     // Drop the oldest until the file is at half its byte bound (the newest event always stays).
     while (start < lines.length - 1 && bytes > this.maxBytes / 2) bytes -= Buffer.byteLength(lines[start++]!);
     keep = keep.slice(start);
-    writeFileSync(this.path, lines.slice(start).join(""), { mode: 0o600 });
+    const staging = mkdtempSync(join(dirname(this.path), ".compact-events-"));
+    try {
+      const next = join(staging, "events.jsonl");
+      writeFileSync(next, lines.slice(start).join(""), { mode: 0o600 });
+      renameSync(next, this.path);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
     this.fileEvents = keep.length;
     this.fileBytes = bytes;
   }
 
-  private readFile(): LoggedEvent[] {
+  private readFile(repairTail = false): LoggedEvent[] {
     this.flush();
     if (!existsSync(this.path)) return [];
     const entries: LoggedEvent[] = [];
-    for (const line of readFileSync(this.path, "utf8").split("\n")) {
+    let text = readFileSync(this.path, "utf8");
+    if (repairTail && text && !text.endsWith("\n")) {
+      // A crash can leave a partial final line. Remove it before any new
+      // append, so a later committed event cannot land on the broken line.
+      text = text.slice(0, text.lastIndexOf("\n") + 1);
+      truncateSync(this.path, Buffer.byteLength(text));
+    }
+    for (const line of text.split("\n")) {
       if (!line) continue;
       try {
         entries.push(JSON.parse(line) as LoggedEvent);

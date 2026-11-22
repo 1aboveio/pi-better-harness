@@ -1,6 +1,6 @@
 {
   "name": "pi-better-ssh",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Pi extension for safe synchronous remote bash commands over reusable SSH connections.",
   "license": "MIT",
   "type": "module",

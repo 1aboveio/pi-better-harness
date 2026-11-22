@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -139,18 +140,54 @@ async function settlementScheduler(script: string, runDir: string, timeoutMs?: n
 
   // --peek suppresses seen bookkeeping, not syncRun's issue-tree write. Give the live
   // probe private inputs; keep cwd so relative workspace paths retain their meaning.
+  const budget = timeoutMs ?? SCHEDULER_SYNC_TIMEOUT_MS;
+  const startedAt = performance.now();
+  const signal = AbortSignal.timeout(budget);
   let snapshot: string | undefined;
   try {
-    snapshot = mkdtempSync(join(tmpdir(), "pi-goal-scheduler-"));
-    for (const name of ["task-plan.json", "issue-tree.json", "next-actions-seen.json", "reviews", "results"]) {
-      const source = join(runDir, name);
-      if (existsSync(source)) cpSync(source, join(snapshot, name), { recursive: true, dereference: true });
+    snapshot = await mkdtemp(join(tmpdir(), "pi-goal-scheduler-"));
+    for (const name of ["task-plan.json", "issue-tree.json", "next-actions-seen.json"]) {
+      await copySchedulerRecord(join(runDir, name), join(snapshot, name), signal);
     }
-    return await executeScheduler(script, snapshot, timeoutMs ?? SCHEDULER_SYNC_TIMEOUT_MS, true, runDir);
+    // next-actions reads top-level JSON records. Review checkout trees and worker
+    // artifacts can be much larger and aren't inputs to the settlement decision.
+    for (const name of ["reviews", "results"]) {
+      signal.throwIfAborted();
+      const source = join(runDir, name);
+      const names = await readdir(source).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      if (!names.length) continue;
+      const target = join(snapshot, name);
+      await mkdir(target);
+      for (const file of names) {
+        if (file.endsWith(".json")) {
+          await copySchedulerRecord(join(source, file), join(target, file), signal);
+        }
+      }
+    }
+    const remaining = budget - Math.ceil(performance.now() - startedAt);
+    if (signal.aborted || remaining <= 0) return { ok: false, reason: `the live scheduler check timed out after ${budget} ms` };
+    return await executeScheduler(script, snapshot, remaining, true, runDir);
   } catch (error) {
+    if (signal.aborted) return { ok: false, reason: `the live scheduler check timed out after ${budget} ms` };
     return { ok: false, reason: `could not prepare the live scheduler check (${String(error).slice(0, DETAIL_LIMIT)})` };
   } finally {
-    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+    if (snapshot) await rm(snapshot, { recursive: true, force: true });
+  }
+}
+
+async function copySchedulerRecord(source: string, target: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  try {
+    const info = await stat(source);
+    if (!info.isFile()) return;
+    await writeFile(target, await readFile(source, { signal }), { signal });
+    // Review mtimes tell the scheduler when the last round was written.
+    await utimes(target, info.atime, info.mtime);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 

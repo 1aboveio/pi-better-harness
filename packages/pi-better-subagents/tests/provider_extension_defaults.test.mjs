@@ -26,7 +26,7 @@ const MODEL = "ollama-cloud/deepseek-v4.1-flash";
 const BUNDLED_CONFIG = join(dirname(fileURLToPath(import.meta.url)), "..", "config.json");
 
 /** Real config loading and path materialization, isolated to a temp agent dir. */
-function openEnvironment(t, { settings, installed = true } = {}) {
+function openEnvironment(t, { settings, installed = true, providerPackage = "pi-ollama-cloud" } = {}) {
     const root = mkdtempSync(join(tmpdir(), "builtin-provider-"));
     const agentDir = join(root, "agent");
     const settingsPath = join(agentDir, "settings.json");
@@ -35,7 +35,7 @@ function openEnvironment(t, { settings, installed = true } = {}) {
         writeFileSync(settingsPath, JSON.stringify({ piBetterHarness: { subagents: settings } }));
     }
     if (installed) {
-        mkdirSync(join(agentDir, "npm", "node_modules", "pi-ollama-cloud"), { recursive: true });
+        mkdirSync(join(agentDir, "npm", "node_modules", providerPackage), { recursive: true });
     }
     const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -54,6 +54,18 @@ function resolveFromShippedConfig() {
 }
 
 describe("built-in provider extensions", () => {
+    it("keeps the installed LiteLLM provider in the isolated child", (t) => {
+        const providerPackage = "pi-provider-litellm";
+        const { agentDir } = openEnvironment(t, { providerPackage });
+        const resolution = resolveExtensions({
+            tools: "read", model: "litellm/bedrock_mantle/model", config: loadConfig(),
+        });
+        assert.deepEqual(extensionArgs(resolution, resolveExtensionPath), {
+            args: ["--no-extensions", "--extension", join(agentDir, "npm", "node_modules", providerPackage)],
+            missing: [],
+        });
+    });
+
     it("loads the ollama-cloud provider package without a manual mapping", (t) => {
         const { agentDir } = openEnvironment(t);
         const resolution = resolveFromShippedConfig();

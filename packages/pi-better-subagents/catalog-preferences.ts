@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import lockfile from "proper-lockfile";
 import { join, resolve } from "node:path";
 import { THINKING_LEVELS, type ThinkingLevel } from "./thinking.ts";
 
@@ -84,10 +84,6 @@ export function readCatalogPreferences(root: string): { settings: CatalogPrefere
 }
 
 function acquire(path: string): () => void {
-    // Read-only catalog consumers (including the portable CLI) need no lock adapter.
-    const lockfile = createRequire(import.meta.url)("proper-lockfile") as {
-        lockSync(path: string, options: { realpath: boolean }): () => void;
-    };
     for (let attempt = 0; attempt < 100; attempt++) {
         try { return lockfile.lockSync(path, { realpath: false }); }
         catch (error) {

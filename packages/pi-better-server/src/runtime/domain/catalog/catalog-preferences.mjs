@@ -1,7 +1,7 @@
 // Generated from packages/pi-better-subagents/catalog-preferences.ts. Do not edit directly.
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import lockfile from "proper-lockfile";
 import { join, resolve } from "node:path";
 import { THINKING_LEVELS } from "./thinking.mjs";
 const ID = /^(role|agent)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
@@ -92,8 +92,6 @@ export function readCatalogPreferences(root) {
     }
 }
 function acquire(path) {
-    // Read-only catalog consumers (including the portable CLI) need no lock adapter.
-    const lockfile = createRequire(import.meta.url)("proper-lockfile");
     for (let attempt = 0; attempt < 100; attempt++) {
         try {
             return lockfile.lockSync(path, { realpath: false });

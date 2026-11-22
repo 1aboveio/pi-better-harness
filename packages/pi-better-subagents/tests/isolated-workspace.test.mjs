@@ -100,6 +100,12 @@ test("a Worktree to Clone handoff preserves evidence without replaying work", (t
     assert.throws(() => reclaimWorkspace(w), /original checkout retained/i);
     assert.equal(readFileSync(join(cwd, "verification.txt"), "utf8"), "interrupted");
     rmSync(join(git(cwd, "rev-parse", "--absolute-git-dir"), "rebase-merge"), { recursive: true });
+    const lock = join(git(cwd, "rev-parse", "--absolute-git-dir"), "index.lock");
+    writeFileSync(lock, "");
+    assert.throws(() => restoreWorkspace(w, true), /Git index lock.*index\.lock.*original checkout retained/i);
+    assert.ok(existsSync(lock), "a lock with unknown ownership stays in the source checkout");
+    assert.equal(readFileSync(join(cwd, "verification.txt"), "utf8"), "interrupted");
+    rmSync(lock);
     const after = restoreWorkspace(w, true);
     assert.equal(after.mode, "clone");
     assert.equal(taskWorkspaceDir(after.owner), realpathSync(cwd));

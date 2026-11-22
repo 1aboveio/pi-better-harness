@@ -33,7 +33,7 @@ describe("ssh-core package contract", () => {
     const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
     try {
       process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent-home";
-      assert.equal(defaultSshControlPathRoot(), join("/tmp/pi-agent-home", "ssh-control"));
+      assert.equal(defaultSshControlPathRoot(), resolve("/tmp/pi-agent-home", "ssh-control"));
     } finally {
       if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
@@ -52,6 +52,20 @@ describe("ssh-core package contract", () => {
       const resolved = resolveSshCommand({ command: "true", ssh: { host: "long.example" } });
       const mux = createSshMuxController({ ...resolved, runner: new FakeRemoteRunner(), sessionScope: "long-agent-dir" });
       assert.ok(Buffer.byteLength(mux.controlPath) <= 100, mux.controlPath);
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
+  });
+
+  // @covers ssh-core.control-master
+  it("checks the absolute socket length for a relative Pi agent directory", (t) => {
+    const workspace = resolve("/tmp", "workspace-".repeat(9));
+    t.mock.method(process, "cwd", () => workspace);
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = "agent";
+      assert.equal(defaultSshControlPathRoot(), join("/tmp", `pi-ssh-${process.getuid?.() ?? "user"}`));
     } finally {
       if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;

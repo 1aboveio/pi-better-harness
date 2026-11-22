@@ -145,6 +145,33 @@ function runFiles(runDir: string): Record<string, string> {
 
 const FINISH: Due = { action: "finish", unit: null, detail: "every unit is delivered: write the handoff" };
 
+test("real scheduler: live settlement snapshots review and result records without copying review checkouts", async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "succeeded" }]);
+  h.tree();
+  const checkout = join(h.runDir, "reviews", "checkout");
+  mkdirSync(checkout, { recursive: true });
+  writeFileSync(join(checkout, "file.txt"), "checkout content");
+  writeFileSync(join(h.runDir, "reviews", "2-r1.json"), "{}");
+  mkdirSync(join(h.runDir, "results"));
+  writeFileSync(join(h.runDir, "results", "2-worker.json"), "{}");
+  const scheduler = readFileSync(h.script, "utf8");
+  writeFileSync(h.script, scheduler.replace(/^#!.*\n/, `$&import { existsSync as liveExists } from "node:fs";
+import { join as liveJoin } from "node:path";
+if (process.argv.includes("--sync")) {
+  const snapshot = process.argv[process.argv.indexOf("--run") + 1];
+  if (liveExists(liveJoin(snapshot, "reviews", "checkout"))) throw new Error("copied an unrelated review checkout");
+  if (!liveExists(liveJoin(snapshot, "reviews", "2-r1.json"))) throw new Error("missing review record");
+  if (!liveExists(liveJoin(snapshot, "results", "2-worker.json"))) throw new Error("missing worker result");
+}
+`));
+
+  const result = await h.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "complete", h.text(result));
+  assert.equal(existsSync(join(h.runDir, "issue-tree.json")), false);
+});
+
 for (const tool of ["update_goal", "release_workflow"]) {
   test(`real scheduler: ${tool} closes a settled GitHub run after live finish without writing run inputs`, async (t) => {
     const h = setupRealScheduler(t);

@@ -6,6 +6,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
+import lockfile from "proper-lockfile";
 
 export interface PackageSpec {
   source: string;
@@ -33,10 +34,6 @@ const piRequire = createRequire(piEntry);
 const semver = piRequire("semver") as {
   valid(value: string): string | null;
   validRange(value: string): string | null;
-};
-const lockfile = piRequire("proper-lockfile") as {
-  lockSync(path: string, options: { realpath: boolean }): () => void;
-  lock(path: string, options: { realpath: boolean; retries: { retries: number; minTimeout: number; maxTimeout: number } }): Promise<() => Promise<void>>;
 };
 const run = promisify(execFile);
 const resources = ["extensions", "skills", "prompts", "themes"] as const;

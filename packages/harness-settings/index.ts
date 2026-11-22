@@ -1,13 +1,10 @@
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+// A static import lets the compiled Pi loader resolve dependencies of the settings lock.
+import lockfile from "proper-lockfile";
 
-// Match Pi's settings lock without depending on a private SDK import.
-const lockfile = createRequire(import.meta.url)("proper-lockfile") as {
-  lockSync(path: string, options: { realpath: boolean }): () => void;
-};
 const NAMESPACE = "piBetterHarness";
 export interface HarnessSettingsSeams { agentDir?: () => string }
 

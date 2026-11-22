@@ -2,11 +2,10 @@
 // Generated from packages/harness-settings/index.ts. Do not edit directly.
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-// Match Pi's settings lock without depending on a private SDK import.
-const lockfile = createRequire(import.meta.url)("proper-lockfile");
+// A static import lets the compiled Pi loader resolve dependencies of the settings lock.
+import lockfile from "proper-lockfile";
 const NAMESPACE = "piBetterHarness";
 export function harnessSettingsPath(seams = {}) {
     return join((seams.agentDir ?? getAgentDir)(), "settings.json");

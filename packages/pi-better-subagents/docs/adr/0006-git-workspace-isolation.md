@@ -29,7 +29,7 @@ If a Git operation encounters a **confirmed sandbox denial on the worktree's Git
 - Return the current changes to the parent for review and, if appropriate, commit.
 - Continue the task in a Clone under the same sandbox policy. Stop writes to the source worktree, restore the saved state in the clone, and verify it before transferring the conversation's single writer. Continue from the blocked step without replaying earlier commands or their external effects.
 
-A lock file alone is insufficient evidence of a permission denial. Report an ordinary lock conflict, merge conflict, or failing hook as such. Workspace selection never grants additional permissions. On macOS, even a profile that permits writing outside the project can deny the rename or removal Git needs to finish an index update. [Verified permission behavior](https://github.com/1aboveio/pi-better-harness/pull/594)
+A lock file alone is insufficient evidence of a permission denial. When an index lock blocks handoff, report the lock path and retain the original checkout until the lock is resolved. Report an ordinary merge conflict or failing hook as such. Workspace selection never grants additional permissions. On macOS, even a profile that permits writing outside the project can deny the rename or removal Git needs to finish an index update. [Verified permission behavior](https://github.com/1aboveio/pi-better-harness/pull/594)
 
 ## Restoring a Git checkout
 

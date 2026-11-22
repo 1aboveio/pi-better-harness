@@ -72,15 +72,15 @@ export function finalizeRun(
     code: number | null,
     hooks: FinalizeHooks = {},
 ): FinalizeResult {
-    const meta = readMeta(id);
+    const initial = readMeta(id);
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation, but never overwrites a true terminal record.
-    if (!meta || !canExitFinalize(meta.status)) return { applied: false };
+    if (!initial || !canExitFinalize(initial.status)) return { applied: false };
 
     // Lifecycle authority streams the complete NDJSON log; result text stays bounded.
     const r = parseRunForLifecycle(id);
     const outcome = classifyChildExit(code, r);
-    collectRunFailures(id, meta.cwd, true);
+    collectRunFailures(id, initial.cwd, true);
     // A run can now end exit 0 as failed (a final request the model could not
     // serve), so "not incomplete and has an exit code" no longer means success.
     const completed = outcome.status === "completed";
@@ -98,11 +98,6 @@ export function finalizeRun(
             operation: "child-exit", kind: outcome.incomplete ? "incomplete" : "failure",
             category: "exit", summary }]);
     }
-    meta.status = outcome.status;
-    meta.lifecycleClassification = outcome.classification;
-    if (outcome.incomplete) meta.failureReason = "incomplete-stream";
-    meta.exitCode = code;
-    meta.endedAt = Date.now();
     // A clean park finishes this ATTEMPT, not the assignment. It is only accepted
     // with a durable park record whose saved-conversation checkpoint still
     // verifies; a failed, incoherent or unverifiable exit stays an ordinary exit
@@ -115,26 +110,33 @@ export function finalizeRun(
             && completed && !outcome.incomplete && !outcome.diagnostics.modelError,
     });
     const parked = park.parked && park.record !== undefined;
-    if (parked && park.record) {
-        meta.park = park.record;
-        // The rest of the attempt is complete; the assignment is still waiting.
-        meta.status = "completed";
-    }
-    const callback = meta.callback !== false;
-    if (callback
-        && meta.completionCallbackPendingAt === undefined
-        && meta.completionCallbackSentAt === undefined
-        && meta.completionCallbackSuppressedAt === undefined) {
-        if (parked) {
-            // A parked attempt owes no completion callback: the continuation
-            // resumes the same conversation and reports the assignment's result.
-            meta.completionCallbackSuppressedAt = meta.endedAt;
-            meta.completionCallbackSuppressedReason = `parked on wait ${park.record?.waitId} generation ${park.record?.generation}`;
-        } else {
-            meta.completionCallbackPendingAt = meta.endedAt;
+    const endedAt = Date.now();
+    const meta = writeMeta(initial, { patch: current => {
+        if (!canExitFinalize(current.status)) return undefined;
+        const patch: Partial<RunMeta> = {
+            status: outcome.status,
+            lifecycleClassification: outcome.classification,
+            ...(outcome.incomplete ? { failureReason: "incomplete-stream" } : {}),
+            exitCode: code,
+            endedAt,
+        };
+        if (parked && park.record) patch.park = park.record;
+        if (current.callback !== false
+            && current.completionCallbackPendingAt === undefined
+            && current.completionCallbackSentAt === undefined
+            && current.completionCallbackSuppressedAt === undefined) {
+            if (parked) {
+                // The continuation reports the assignment's result.
+                patch.completionCallbackSuppressedAt = endedAt;
+                patch.completionCallbackSuppressedReason = `parked on wait ${park.record?.waitId} generation ${park.record?.generation}`;
+            } else {
+                patch.completionCallbackPendingAt = endedAt;
+            }
         }
-    }
-    writeMeta(meta);
+        return patch;
+    } });
+    if (!meta) return { applied: false };
+    const callback = meta.callback !== false;
     commitAssignmentTerminal(meta);
     if (!parked && park.record) {
         // A park disposition existed but could not be proven on exit. Hold it in
@@ -150,7 +152,7 @@ export function finalizeRun(
     const verdict = parked
         ? `parked · waiting for ${park.record?.waitId ?? "its dependency"}`
         : outcome.verdict;
-    const el = fmtElapsed(meta.endedAt - meta.startedAt);
+    const el = fmtElapsed(endedAt - meta.startedAt);
     const spend = fmtSpend(r.usage);
     const humanStat = `${el}${spend ? ` · ${spend}` : ""}`;
     const stat = el;

@@ -15,7 +15,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { inspectGitWorkspace, syncGitRemotes } from "./git-workspace.ts";
+import { inspectGitWorkspace, isIgnoredGitSubdirectory, syncGitRemotes } from "./git-workspace.ts";
 import { restoreTree, snapshotTree, verifyTree, type SavedEntry } from "./workspace-files.ts";
 import { durableSubagentRoot } from "./session-store.ts";
 import { taskWorkspaceDir } from "./registry.ts";
@@ -93,16 +93,7 @@ export function workspaceChoice(
         throw error;
     }
     const subdir = relative(info.repoRoot, realpathSync(source));
-    // A directory ignored by its enclosing checkout (e.g. a separate project in
-    // build output) is not part of that checkout's selected Git base.
-    if (subdir) {
-        try {
-            git(info.repoRoot, ["check-ignore", "--quiet", "--", subdir]);
-            return;
-        } catch (error) {
-            if ((error as { status?: number }).status !== 1) throw error;
-        }
-    }
+    if (isIgnoredGitSubdirectory(info.repoRoot, subdir)) return;
     let base: string;
     try {
         base = value(source, ["rev-parse", "--verify", "HEAD"]);
@@ -188,7 +179,6 @@ const withoutGit = new Set([".git"]);
 const worktreePointers = new Set(["commondir", "gitdir"]);
 const sharedGitEntries = new Set(["config", "objects", "packed-refs", "refs", "logs", "info", "shallow", "hooks"]);
 const pendingOperation = [
-    "index.lock",
     "rebase-merge",
     "rebase-apply",
     "MERGE_HEAD",
@@ -355,6 +345,10 @@ function checkpoint(w: IsolatedWorkspace, attempt: string) {
     const { root, record, store } = paths(w);
     const info = inspectOwned(w);
     const linked = w.mode === "worktree";
+    const indexLock = join(info.gitDir, "index.lock");
+    if (existsSync(indexLock)) {
+        throw new Error(`Git index lock blocks workspace recovery at ${indexLock}. Original checkout retained at ${root}.`);
+    }
     if (
         pendingOperation.some((name) => existsSync(join(info.gitDir, name))) ||
         existsSync(join(info.commonGitDir, "objects/info/alternates")) ||

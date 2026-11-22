@@ -18,13 +18,15 @@ import {
     writeFileSync,
     writeSync,
 } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { classifyChildExit } from "../lifecycle.ts";
 import { buildSubagentResultText, finalizeRun } from "../finalization.ts";
 import {
     LIFECYCLE_RECORD_PREFIX_BYTES,
     LIFECYCLE_SCAN_CHUNK_BYTES,
 } from "../parse.ts";
-import { logPathFor, onMetaChanged, readMeta, runDir, writeMeta } from "../registry.ts";
+import { dismissRun, logPathFor, onMetaChanged, readMeta, runDir, writeMeta } from "../registry.ts";
 import { inspectOutcome, readOutcome, receiptOutcome, registerAssignmentAttempt } from "../assignment-outcomes.ts";
 import { recordAssignmentReport } from "../assignment-report.ts";
 import { failurePath } from "../failures.ts";
@@ -93,6 +95,47 @@ function seedRunningMeta(id, extras = {}) {
         ...extras,
     });
 }
+
+it("merges dismissal and finalization when either operation sees stale running metadata", (t) => {
+    const originalRead = fs.readFileSync;
+    for (const dismissFirst of [true, false]) {
+        const id = dismissFirst ? "sa_dismiss_exit_race" : "sa_exit_dismiss_race";
+        const metaPath = join(runDir(id), "meta.json");
+        t.after(() => rmSync(runDir(id), { recursive: true, force: true }));
+        seedRunningMeta(id);
+        writeRunLog(id, [{ type: "agent_end", messages: [] }]);
+        let overlapped = false;
+        const read = t.mock.method(fs, "readFileSync", (file, ...args) => {
+            const contents = originalRead(file, ...args);
+            if (file === metaPath && !overlapped) {
+                overlapped = true;
+                if (dismissFirst) {
+                    assert.equal(finalizeRun(id, 0).applied, true);
+                    writeMeta(readMeta(id), { patch: () => ({ completionCallbackSentAt: 42 }) });
+                } else {
+                    assert.equal(dismissRun(id, 41).dismissedAt, 41);
+                }
+            }
+            return contents;
+        });
+        syncBuiltinESMExports();
+        try {
+            if (dismissFirst) dismissRun(id, 41);
+            else assert.equal(finalizeRun(id, 0).applied, true);
+        } finally {
+            read.mock.restore();
+            syncBuiltinESMExports();
+        }
+        assert.equal(overlapped, true);
+        const result = readMeta(id);
+        assert.equal(result.dismissedAt, 41);
+        assert.equal(result.status, "completed");
+        assert.equal(result.exitCode, 0);
+        assert.ok(result.endedAt > result.startedAt);
+        assert.ok(result.completionCallbackPendingAt);
+        if (dismissFirst) assert.equal(result.completionCallbackSentAt, 42);
+    }
+});
 
 it("recovered old-parent child retires its cleanup receipt only after real finalization and callback settlement", async () => {
     const durable = mkdtempSync(join(tmpdir(), "recovered-exit-")), previous = process.env.PI_SUBAGENT_DURABLE_DIR;
