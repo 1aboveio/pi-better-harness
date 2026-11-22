@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { LoggedEvent } from "../src/event-log.ts";
 import { HostedSession } from "../src/hosted-session.ts";
 
 /** A session whose starting prompt ends without a run, with one message already queued behind it. */
@@ -34,7 +35,13 @@ function stub(options: { messages: unknown[]; promptRejects?: boolean; queuedRej
 
 function host(session: unknown) {
   const events: any[] = [];
-  const log = { append: (event: unknown) => ({ seq: 1, event }), flush: () => undefined, last: 0 } as never;
+  let committed: ((entry: LoggedEvent) => void) | undefined;
+  const log = {
+    onCommitted: (listener: (entry: LoggedEvent) => void) => { committed = listener; },
+    append: (event: unknown) => committed?.({ seq: 1, event }),
+    flush: () => undefined,
+    last: 0,
+  } as never;
   const hosted = new HostedSession(session as never, log, () => undefined);
   hosted.addListener((logged) => events.push(logged.event));
   return { hosted, events };

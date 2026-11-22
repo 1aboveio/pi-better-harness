@@ -104,6 +104,9 @@ export class HostedSession {
   constructor(session: AgentSession, log: EventLog, onActivity: (kind?: "work" | "metadata") => void, activity?: SessionActivity) {
     this.session = session;
     this.log = log;
+    this.log.onCommitted(entry => {
+      for (const listener of this.listeners) listener(entry);
+    });
     this.onActivity = onActivity;
     this.activity = activity;
     this.ui = new UiBridge((event) => {
@@ -228,6 +231,7 @@ export class HostedSession {
   fence(): void { this.disposed = true; fenceHostedSession(this.session); this.activity?.revokeRuntime(); }
 
   get lastSeq(): number {
+    this.log.flush();
     return this.log.last;
   }
 
@@ -246,8 +250,7 @@ export class HostedSession {
   private publish(event: unknown): void {
     this.progressAt = Date.now();
     if (this.runtimeReleased) return;
-    const logged = this.log.append(event);
-    for (const listener of this.listeners) listener(logged);
+    this.log.append(event);
   }
 
   /**
@@ -255,6 +258,7 @@ export class HostedSession {
    * The replay and the live registration happen in one synchronous step, so no event is lost or repeated.
    */
   subscribe(sinceSeq: number | undefined, listener: Listener): { replay: Replay; unsubscribe: () => void } {
+    this.log.flush();
     const replay = sinceSeq === undefined ? { events: [], firstSeq: 0, truncated: false } : this.log.since(sinceSeq);
     return { replay, unsubscribe: this.addListener(listener) };
   }
@@ -305,9 +309,9 @@ export class HostedSession {
     this.ui.cancelAll();
     await aborted;
     this.unsubscribe();
+    this.log.flush();
     this.listeners.clear();
     this.runtimeReleased = true;
-    this.log.flush();
     this.session.dispose();
   }
 
