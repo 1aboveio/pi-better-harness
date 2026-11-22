@@ -10,7 +10,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - Preserve Subagent results when dismissal overlaps completion. Prepare isolated Git workspaces without blocking the launch host, report shared Git index restrictions, and load the installed LiteLLM provider in isolated workers. (#302, #314, #381, #591)
 - Limit live Goal settlement to scheduler records and resolve SSH control socket paths before checking their length. (#547, #554)
-- Bundle Subagents 0.37.1, Background Tasks 0.20.1, Goal 0.16.1, and SSH 0.1.7. Background Tasks and Subagents carry Server 0.7.1.
+- Load settings locks in compiled Pi and bundle Subagents 0.37.1, Background Tasks 0.20.1, Goal 0.16.1, Sandbox 0.15.2, and SSH 0.1.7. Background Tasks and Subagents carry Server 0.7.1. (#556)
 
 ## [pi-better-server@0.7.1] - 2026-11-22
 
@@ -19,6 +19,7 @@ All notable changes to this project are documented in this file. The format is b
 - Publish session events after appending them to the log and recover from partial writes at the end of a log. (#543)
 - Persist transcript entries buffered during a failed `/detach` as soon as the source session resumes. Quote paths in Codex return hints and include the selected remote directory in `/detach` follow-up commands. (#539, #547)
 - Carry the updated Subagent launch host and resolve SSH control socket paths before checking their length. (#302, #314, #381, #547, #591)
+- Load settings locks through the extension loader in compiled Pi. (#556)
 
 ## [pi-better-subagents@0.37.1] - 2026-11-22
 
@@ -27,18 +28,27 @@ All notable changes to this project are documented in this file. The format is b
 - Preserve terminal metadata and callback markers when dismissing a run during finalization. (#302)
 - Prepare fresh isolated Git workspaces off the launch thread and disable terminal prompts during clone preparation. Report shared Git index restrictions when launching in a linked worktree, and identify any index lock that blocks Clone recovery. (#314, #591)
 - Include the installed LiteLLM provider in isolated workers configured to use its models. (#381)
+- Load settings and catalog locks in compiled Pi. (#556)
 
 ## [pi-better-background-tasks@0.20.1] - 2026-11-22
 
 ### Fixed
 
 - Resolve SSH control socket paths before checking their length. Bundle the updated Server 0.7.1 runtime. (#547)
+- Load settings locks in compiled Pi. (#556)
 
 ## [pi-better-goal@0.16.1] - 2026-11-22
 
 ### Fixed
 
 - Snapshot only scheduler records during live settlement and include snapshot preparation in the check timeout. (#554)
+- Load settings locks in compiled Pi. (#556)
+
+## [pi-better-sandbox@0.15.2] - 2026-11-22
+
+### Fixed
+
+- Load settings locks in compiled Pi. (#556)
 
 ## [pi-better-ssh@0.1.7] - 2026-11-22
 

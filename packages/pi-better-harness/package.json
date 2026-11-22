@@ -59,7 +59,7 @@
   "dependencies": {
     "pi-better-background-tasks": "0.20.1",
     "pi-better-goal": "0.16.1",
-    "pi-better-sandbox": "0.15.1",
+    "pi-better-sandbox": "0.15.2",
     "pi-better-ssh": "0.1.7",
     "pi-better-subagents": "0.37.1",
     "proper-lockfile": "^4.1.2",

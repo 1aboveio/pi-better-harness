@@ -33,7 +33,7 @@ describe("ssh-core package contract", () => {
     const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
     try {
       process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent-home";
-      assert.equal(defaultSshControlPathRoot(), join("/tmp/pi-agent-home", "ssh-control"));
+      assert.equal(defaultSshControlPathRoot(), resolve("/tmp/pi-agent-home", "ssh-control"));
     } finally {
       if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
@@ -60,7 +60,8 @@ describe("ssh-core package contract", () => {
 
   // @covers ssh-core.control-master
   it("checks the absolute socket length for a relative Pi agent directory", (t) => {
-    t.mock.method(process, "cwd", () => resolve("/tmp", "workspace-".repeat(9)));
+    const workspace = resolve("/tmp", "workspace-".repeat(9));
+    t.mock.method(process, "cwd", () => workspace);
     const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
     try {
       process.env.PI_CODING_AGENT_DIR = "agent";

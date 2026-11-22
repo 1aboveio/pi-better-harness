@@ -3,13 +3,10 @@ import {
   closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
   renameSync, unlinkSync, writeSync,
 } from "node:fs";
-import { createRequire } from "node:module";
+import lockfile from "proper-lockfile";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const lockfile = createRequire(import.meta.url)("proper-lockfile") as {
-  lockSync(path: string, options: { realpath: boolean }): () => void;
-};
 
 export const WORK_LEDGER_SCHEMA = 1 as const;
 export const WORK_LEDGER_STATUSES = ["active", "completed", "cancelled"] as const;
