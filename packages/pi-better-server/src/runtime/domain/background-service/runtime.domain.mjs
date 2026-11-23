@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/runtime.ts. Do not edit directly.
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.domain.mjs";
 import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fingerprint.domain.mjs";
 import { readFileSync, statSync } from "node:fs";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.domain.mjs";
@@ -281,7 +282,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
             status: "running",
             startedAt: now,
             lastProgressAt: now,
-            deadlineAt: params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined,
+            deadlineAt: taskDeadline(now, params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined),
             logPath,
             callback: params.callback,
             callbackOrigin,
@@ -565,7 +566,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
             status: "running",
             startedAt: now,
             lastProgressAt: now,
-            deadlineAt: timeoutSeconds ? now + timeoutSeconds * 1000 : undefined,
+            deadlineAt: taskDeadline(now, timeoutSeconds ? now + timeoutSeconds * 1000 : undefined),
             intervalMs: Math.max(1, params.interval_seconds ?? 30) * 1000,
             logPath: logPathFor(id),
             callback: params.callback,

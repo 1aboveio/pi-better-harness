@@ -257,7 +257,8 @@ describe("harness timing: launch", () => {
             assert.equal(meta.timing.ceilingAt, meta.startedAt + 90 * 60_000);
             await reap(inherited);
             const disabled = await spawnRun(h, { max_minutes: 0 });
-            assert.equal(readMeta(disabled.id).timing.ceilingAt, undefined);
+            const maximum = readMeta(disabled.id);
+            assert.equal(maximum.timing.ceilingAt, maximum.startedAt + 24 * 60 * 60_000);
             await reap(disabled);
         } finally {
             await h.shutdown();
@@ -316,7 +317,7 @@ describe("harness timing: launch", () => {
             const one = metas.find((m) => m.name === "one");
             const two = metas.find((m) => m.name === "two");
             assert.equal(one.timing.deadlineAt - one.startedAt, 12 * 60_000);
-            assert.equal(one.timing.ceilingAt, undefined, "max_minutes 0 disables the ceiling");
+            assert.equal(one.timing.ceilingAt, one.startedAt + 24 * 60 * 60_000);
             assert.equal(two.timing.deadlineAt - two.startedAt, 3 * 60_000);
             assert.equal(two.timing.graceMs, 60_000);
             for (const meta of metas) {
@@ -621,6 +622,25 @@ describe("harness timing: a steer queued behind a long tool call", () => {
 });
 
 describe("harness timing: ceiling", () => {
+    it("fails an active legacy run at 24 hours even without a configured ceiling", async () => {
+        await withFakeClock(async () => {
+            const h = await makeHarness();
+            try {
+                const run = await spawnRun(h, { max_minutes: 0 });
+                const path = join(runDir(run.id), "meta.json");
+                const old = JSON.parse(readFileSync(path, "utf8"));
+                old.startedAt = Date.now() - 24 * 60 * 60_000;
+                delete old.timing;
+                writeFileSync(path, JSON.stringify(old));
+                await tick();
+                const expired = readMeta(run.id);
+                assert.equal(expired.status, "failed");
+                assert.equal(expired.lifecycleClassification, "timed_out");
+                assert.equal(expired.timing.stopReason, "ceiling");
+                await reap(run);
+            } finally { await h.shutdown(); }
+        });
+    });
     it("stops at the hard ceiling without grace and reports reason ceiling", async () => {
         await withFakeClock(async () => {
             const h = await makeHarness();

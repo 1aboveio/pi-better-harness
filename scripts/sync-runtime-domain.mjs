@@ -70,7 +70,8 @@ for (const name of ["catalog-store", "catalog-schema", "catalog-preferences", "c
 }
 const background = join(target, "background");
 mkdirSync(join(background, "supervisor"), { recursive: true });
-for (const name of ["conditions.ts", "registry.ts", "types.ts", "process.ts", "process-identity.ts", "supervisor/store.ts", "supervisor/types.ts", "supervisor/supervisor.ts", "supervisor/identity.ts", "supervisor/invocation.ts"]) {
+mkdirSync(join(background, "shared-operation-coordinator/src"), { recursive: true });
+for (const name of ["shared-operation-coordinator/src/task-lifetime.ts", "conditions.ts", "registry.ts", "types.ts", "process.ts", "process-identity.ts", "supervisor/store.ts", "supervisor/types.ts", "supervisor/supervisor.ts", "supervisor/identity.ts", "supervisor/invocation.ts"]) {
   const source = readFileSync(join(root, "packages/pi-better-background-tasks/src", name), "utf8");
   writeFileSync(join(background, name.replace(/\.ts$/, ".mjs")), ts.transpileModule(source.replaceAll(/(from\s+["'][^"']+)\.(ts|js)(["'])/g, "$1.mjs$3"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -88,7 +89,7 @@ const supervisor = ts.createSourceFile("supervisor.ts", readFileSync(join(root, 
 const snapshotPrinter = ts.createPrinter();
 const observed = ts.createSourceFile("observed-waits.ts", readFileSync(join(root, "packages/pi-better-background-tasks/src/observed-waits.ts"), "utf8"), ts.ScriptTarget.Latest, true);
 writeFileSync(join(background, "terminal-publication.mjs"), "// Generated canonical terminal publication. Do not edit directly.\n" + ts.transpileModule(
-  'import { existsSync, statSync } from "node:fs";\n' + observed.statements.filter(s => ts.isFunctionDeclaration(s) && ["terminalOutcome", "evidenceFor", "supervisorTerminalPublication"].includes(s.name?.text)).map(s => snapshotPrinter.printNode(ts.EmitHint.Unspecified, s, observed)).join("\n"),
+  'import { existsSync, statSync } from "node:fs";\nimport { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.mjs";\n' + observed.statements.filter(s => ts.isFunctionDeclaration(s) && ["terminalOutcome", "evidenceFor", "supervisorTerminalPublication"].includes(s.name?.text)).map(s => snapshotPrinter.printNode(ts.EmitHint.Unspecified, s, observed)).join("\n"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 const summary = supervisor.statements.find(s => ts.isFunctionDeclaration(s) && s.name?.text === "launchSummary");
 const klass = supervisor.statements.find(s => ts.isClassDeclaration(s) && s.members.some(m => m.name?.getText(supervisor) === "snapshot"));

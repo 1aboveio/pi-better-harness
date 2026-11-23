@@ -105,7 +105,7 @@ describe("runtime", () => {
 
     expect(explicit.deadlineAt).toBeDefined();
     expect(Math.round(((explicit.deadlineAt ?? 0) - explicit.startedAt) / 1000)).toBe(42);
-    expect(disabled.deadlineAt).toBeUndefined();
+    expect(disabled.deadlineAt).toBe(disabled.startedAt + 24 * 60 * 60_000);
   });
 
   // @characterizes background-task.local-watch

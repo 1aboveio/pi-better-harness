@@ -21,15 +21,15 @@ This ADR defines the contract between a subagent, its supervisor and its parent.
 
 ## Limits during the lifecycle
 
-The harness records the effective timing policy when it admits an attempt. Changing a default applies to future launches. Automatic continuation carries forward the remaining time or the recorded **No limit** choice. The same controls apply in every workspace mode. [Run timing and precedence](0004-harness-owned-run-timing.md)
+The harness records the effective timing policy when it admits an attempt. Changing a default applies to future launches. Automatic continuation carries forward the remaining time up to the original 24-hour deadline. The same controls apply in every workspace mode. [Run timing and precedence](0004-harness-owned-run-timing.md)
 
 | Control | What happens at the limit |
 | --- | --- |
 | Admission capacity | The concurrency cap (default 6) limits new admissions. If a batch exceeds available slots, its policy either refuses the batch or admits the jobs that fit and reports the rest as skipped. A ready continuation can wait for a slot. Lowering the cap lets existing runs finish. |
-| Run timeout | At the hard ceiling (default 60 minutes), the supervisor stops the run, including during a tool call or a soft-deadline grace period. The stop reason is `ceiling`. **No limit** disables this control. |
+| Run timeout | At the hard ceiling (default 60 minutes), the supervisor stops the run, including during a tool call or a soft-deadline grace period. The stop reason is `ceiling`. The 24-hour maximum applies to all runs. |
 | Soft deadline | When explicitly set, the deadline asks the worker to save its work and report. Delivery can wait behind an open tool call. If the run is still active when grace expires (default 5 minutes), the supervisor stops it with reason `deadline`. |
 | Tool-wait and no-progress alerts | An open tool call (default 5 minutes) or lack of progress (default 10 minutes) can notify the owner while the run continues. Time inside an open call is excluded from the no-progress window. Model turn count does not trigger a stop. |
-| Operation limits | Sandbox permissions govern the individual operation. A configured command time limit can stop that command even when the run has **No limit**. The worker or parent interprets the operation result and decides whether the assignment can proceed. |
+| Operation limits | Sandbox permissions govern the individual operation. A configured command time limit can stop that command even when the run has **24 hours**. The worker or parent interprets the operation result and decides whether the assignment can proceed. |
 | Result page size | A bounded result read returns a page. The parent can use its continuation cursor to retrieve more of the recorded result. |
 
 When a limit stops a run, the parent can retrieve the stop reason, the available work and which checks remain unverified through the ordinary delivery path. A timeout supplies no evidence that the interrupted check passed or failed.
@@ -53,5 +53,5 @@ Record the result before sending a completion callback. The callback identifies 
 3. Park a worker on an external operation and restart the runtime. Its owner can recover the recorded work, observe the original operation and continue without submitting it twice.
 4. Interrupt a handoff or cleanup before the saved result is verified. The source remains recoverable. After a successful retry, the parent can retrieve the result and cleanup can reclaim the owned scratch.
 5. Complete a read-only review, a non-Git file task and isolated Git tasks in Clone and Worktree. Retrieve each requested deliverable through `subagent_result`. Repeat with callbacks disabled and with a failed notification handoff followed by restart. Verify that each result stays available and that retrying an enabled callback refers to the same completion and recipient.
-6. Use a controlled clock and a long verification command. The tool-wait alert leaves the run active. At the hard ceiling the result reports `ceiling`, preserves the saved output and identifies verification as incomplete. With **No limit**, the same command can pass that point. Separately, deliver a configured soft deadline, advance past grace and verify the `deadline` reason through the same result path.
+6. Use a controlled clock and a long verification command. The tool-wait alert leaves the run active. At the hard ceiling the result reports `ceiling`, preserves the saved output and identifies verification as incomplete. With **24 hours**, the same command can pass that point. Separately, deliver a configured soft deadline, advance past grace and verify the `deadline` reason through the same result path.
 7. Fill the available slots while a continuation is ready. Verify that the continuation keeps its owner and saved state, that admitted runs continue, and that the continuation can resume when a slot becomes available.

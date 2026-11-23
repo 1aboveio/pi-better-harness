@@ -92,18 +92,18 @@ const LABELS = [
     "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
 ];
 
-test("run timeout accepts minutes or No limit, supports the existing zero value, and restores saved defaults", () => {
+test("run timeout accepts minutes or 24 hours, supports the existing zero value, and restores saved defaults", () => {
     const h = harness();
     assert.equal(h.settings().maxMinutes, 60);
     selectLabel(h.page, "Run timeout");
     assert.match(selectedText(h.page), /60 min/);
-    assert.match(h.page.render(40).join("\n"), /Space for No limit/);
+    assert.match(h.page.render(40).join("\n"), /Space for 24 hours/);
     h.page.handleInput(" ");
-    assert.match(selectedText(h.page), /No limit/);
+    assert.match(selectedText(h.page), /24 hours/);
     h.page.handleInput("\r");
     typeAndSubmit(h.page, "-1");
     assert.equal(h.settings().maxMinutes, 0);
-    assert.match(h.page.render(100).join("\n"), /Enter No limit or a duration/);
+    assert.match(h.page.render(100).join("\n"), /Enter 24 hours or a duration/);
     typeAndSubmit(h.page, "10081");
     assert.equal(h.settings().maxMinutes, 0);
     typeAndSubmit(h.page, "90");
@@ -113,11 +113,11 @@ test("run timeout accepts minutes or No limit, supports the existing zero value,
     h.page.handleInput("\r");
     typeAndSubmit(h.page, " nO LiMit ");
     assert.equal(h.settings().maxMinutes, 0);
-    assert.match(selectedText(h.page), /No limit/);
+    assert.match(selectedText(h.page), /24 hours/);
     h.page.handleInput("\r");
     typeAndSubmit(h.page, "0");
     assert.equal(h.settings().maxMinutes, 0);
-    assert.match(selectedText(h.page), /No limit/);
+    assert.match(selectedText(h.page), /24 hours/);
     selectLabel(h.page, "Reset to defaults");
     h.page.handleInput("\r");
     assert.equal(h.settings().maxMinutes, 90, "reset restores the saved timeout default");
@@ -347,7 +347,7 @@ test("the footer follows remapped keys for selection, input, and cancellation", 
         const h = harness();
         selectLabel(h.page, "Run timeout");
         const screen = () => h.page.render(120).join("\n");
-        assert.match(screen(), /Space for No limit · x to edit minutes/);
+        assert.match(screen(), /Space for 24 hours · x to edit minutes/);
         assert.match(screen(), /q to go back/);
         h.page.handleInput("x");
         assert.match(screen(), /Ctrl\+g to apply · q to cancel/);
@@ -374,7 +374,7 @@ test("a short terminal keeps the active input and its validation visible", () =>
     const screen = stripAnsi(lines.join("\n"));
     assert.match(screen, /> Run timeout/);
     assert.match(screen, /-1/);
-    assert.match(screen, /Enter No limit/);
+    assert.match(screen, /Enter 24 hours/);
     assert.equal(h.settings().maxMinutes, 60);
 });
 

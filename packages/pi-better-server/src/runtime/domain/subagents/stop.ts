@@ -27,6 +27,7 @@
  * never scanned for.
  */
 
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { classifyChildExit } from "./lifecycle.ts";
 import { parseRunForLifecycle } from "./parse.ts";
@@ -101,9 +102,10 @@ function oweTerminalCompletion(meta: RunMeta, now: number): void {
     meta.completionCallbackPendingAt = now;
 }
 
-function recordKilled(meta: RunMeta, now: number): StopOutcome {
-    meta.status = "killed";
-    meta.lifecycleClassification = "killed";
+function recordStopped(meta: RunMeta, now: number): StopOutcome {
+    const expired = meta.timing?.stopReason === "ceiling" && now >= (meta.timing.lifetimeAt ?? taskDeadline(meta.startedAt));
+    meta.status = expired ? "failed" : "killed";
+    meta.lifecycleClassification = expired ? "timed_out" : "killed";
     meta.endedAt = now;
     oweTerminalCompletion(meta, now);
     writeMeta(meta);
@@ -162,7 +164,7 @@ function cleanupOrphanedRun(meta: RunMeta, probe: ProcessProbe, now: number): St
     const pgid = relatedProcessGroupId(meta);
     if (pgid !== undefined && probe.groupAlive(pgid)) {
         terminateRelatedWork(meta);
-        return recordKilled(meta, now);
+        return recordStopped(meta, now);
     }
     return finalizeOrphanedWithoutProcess(meta, now);
 }
@@ -206,7 +208,7 @@ export function stopRun(id: string, deps: StopDeps = {}): StopOutcome {
         // Supervised path: same process-group kill + killed write as before.
         // Prefer recorded pgid so running and orphaned share one target rule.
         terminateRelatedWork(meta);
-        return recordKilled(meta, now);
+        return recordStopped(meta, now);
     }
 
     if (status === "orphaned") {

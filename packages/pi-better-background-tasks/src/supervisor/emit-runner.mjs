@@ -35,6 +35,7 @@ const outputDir = process.argv[2] ? resolve(process.argv[2]) : join(here, "gener
 
 /** Runtime entry first; everything else is reachable from it. */
 const CLOSURE = [
+  { source: join(here, "..", "shared-operation-coordinator", "src", "task-lifetime.ts"), out: "task-lifetime.mjs" },
   { source: join(here, "runner.ts"), out: "runner.mjs" },
   { source: join(here, "store.ts"), out: "store.mjs" },
   { source: join(here, "types.ts"), out: "types.mjs" },

@@ -1,5 +1,6 @@
 // Generated canonical terminal publication. Do not edit directly.
 import { existsSync, statSync } from "node:fs";
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.mjs";
 function terminalOutcome(status) {
     switch (status) {
         case "succeeded": return "succeeded";
@@ -46,13 +47,15 @@ function evidenceFor(inspection) {
 /** Shared terminal publication contract for the host and fixed server cancel adapter. */
 export function supervisorTerminalPublication(operation, inspection, refs = evidenceFor(inspection)) {
     const status = inspection.status;
-    const outcome = terminalOutcome(status);
+    const endedAt = inspection.result?.endedAt ?? inspection.lost?.recordedAt;
+    const expired = endedAt !== undefined && endedAt >= taskDeadline(Math.min(operation.createdAt, inspection.launch.createdAt));
+    const outcome = expired ? "failed" : terminalOutcome(status);
     return {
         operationId: operation.operationId,
         eventId: `${operation.taskId}:${inspection.result?.endedAt ?? inspection.lost?.recordedAt ?? inspection.observedAt}:${status}`,
         outcome, owner: operation.owner,
         evidence: refs.map(ref => ({ kind: ref.kind, ref: ref.ref, ...(ref.summary ? { summary: ref.summary } : {}), detailLost: ref.detailLost })),
         ...(outcome === "lost" ? { detailLost: true } : {}),
-        reason: inspection.result ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}` : "supervisor lost: no terminal evidence",
+        reason: expired ? "24-hour task lifetime exceeded" : inspection.result ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}` : "supervisor lost: no terminal evidence",
     };
 }

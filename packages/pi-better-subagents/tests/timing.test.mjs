@@ -37,11 +37,11 @@ import { findProviderRejectedKeywords } from "../../../scripts/provider-schema-c
 const MIN = 60_000;
 
 describe("timing policy resolution", () => {
-    it("preserves a disabled ceiling and remaining time across automatic resume", () => {
+    it("preserves the absolute ceiling and remaining time across automatic resume", () => {
         const disabled = resolveRunTiming({ params: { max_minutes: 0 }, startedAt: 0 });
         const params = continuationTimingParams(disabled, MIN);
-        assert.equal(params.max_minutes, 0);
-        assert.equal(resolveRunTiming({ params, settings: { maxMinutes: 60 }, startedAt: MIN }).ceilingAt, undefined);
+        assert.equal(params.max_minutes, 24 * 60 - 1);
+        assert.equal(resolveRunTiming({ params, settings: { maxMinutes: 60 }, startedAt: MIN }).ceilingAt, 24 * 60 * MIN);
         const enabled = resolveRunTiming({ startedAt: 0 });
         const resumed = resolveRunTiming({ params: continuationTimingParams(enabled, MIN), startedAt: MIN });
         assert.equal(resumed.ceilingAt, enabled.ceilingAt);
@@ -72,7 +72,8 @@ describe("timing policy resolution", () => {
         const t = resolveRunTiming({ params: { deadline_minutes: null, max_minutes: 0, tool_wait_minutes: 0, stuck_minutes: 0 }, env: { [TIMING_ENV.grace]: "" }, startedAt: 0 });
         assert.equal(t.deadlineAt, undefined);
         assert.equal(t.graceMs, 5 * MIN);
-        assert.equal(t.ceilingAt, undefined);
+        assert.equal(t.ceilingAt, 24 * 60 * MIN);
+        assert.equal(resolveRunTiming({ params: { max_minutes: 2880 }, startedAt: MIN }).ceilingAt, (1440 + 1) * MIN);
         assert.equal(t.toolWaitMs, undefined);
         assert.equal(t.stuckMs, undefined);
         assert.throws(() => resolveRunTiming({ params: { grace_minutes: -1 }, startedAt: 0 }), /grace_minutes must be/);

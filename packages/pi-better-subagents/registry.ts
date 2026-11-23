@@ -14,6 +14,7 @@ import { retainResult } from "./retained-result.ts";
  * run directory does not delete them.
  */
 
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import type { RunTiming } from "./timing.ts";
 import { assignmentRetainsEvidence } from "./assignment-outcomes.ts";
 import type { SkillExposureSource } from "./skills.ts";
@@ -1324,10 +1325,17 @@ export function notifyRunRemoved(id: string, meta = metaCache.get(id)): void {
     }
 }
 
+function restoreTaskDeadline(meta: RunMeta): void {
+    if (meta.status !== "running" && meta.status !== "orphaned") return;
+    meta.timing ??= { graceMs: 0 };
+    meta.timing.ceilingAt = taskDeadline(meta.startedAt, meta.timing.ceilingAt);
+}
+
 export function readMeta(id: string): RunMeta | undefined {
     try {
         registryIo.metadataFileReads += 1;
         const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
+        restoreTaskDeadline(meta);
         metaCache.set(id, meta);
         return meta;
     } catch (error) {
@@ -1664,6 +1672,7 @@ export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { ki
         metaCache.delete(id);
         return { kind: "unreadable", detail: `invalid metadata: ${invalid}` };
     }
+    restoreTaskDeadline(meta);
     metaCache.set(id, meta);
     return { kind: "ok", meta };
 }

@@ -32,7 +32,7 @@ The API is `runtime-client/src/runtime/client.mjs`, exporting `ensureRuntime`.
 - Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status. A live child handles its own tool errors; the parent is woken only for actionable incidents, and children can classify handled failures with `failure_disposition`.
 - Live background-work navigator for active runs.
 - Git writers start in separate Clones by default. **Git workspace** in `/subagents settings` also offers Worktree. Results carry the working directory or a recoverable copy, including incomplete work. [Workspace recovery](docs/usage.md#git-workspaces)
-- Harness-owned run timing: every run gets independent factual alerts for a tool call left open (5 min) and for no progress (10 min), plus a 60-minute hard timeout. Choose a duration or **No limit** under **Run timeout** in `/subagents settings`. Soft deadlines remain opt-in. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`, globally in `config.json` / `PI_SUBAGENT_*_MINUTES`, or in `/subagents settings`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-tool-wait-stuck).
+- Harness-owned run timing: every run gets independent factual alerts for a tool call left open (5 min) and for no progress (10 min), plus a 60-minute hard timeout. Choose a duration or **24 hours** under **Run timeout** in `/subagents settings`. Soft deadlines remain opt-in. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`, globally in `config.json` / `PI_SUBAGENT_*_MINUTES`, or in `/subagents settings`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-tool-wait-stuck).
 
 Every single or batch launch automatically joins one shared supervision watcher in the
 foreground Pi process. The last active run's exit or stop tears it down; a later
@@ -97,7 +97,7 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
 for delegation mode, the concurrent-subagent cap (default 6), and Git workspace
-(Clone or Worktree). Run timeout supports a duration or **No limit**. The
+(Clone or Worktree). Run timeout supports a duration or **24 hours**. The
 tool-wait alert (default 5 minutes) and no-progress alert (default 10 minutes)
 have separate intervals. Enter `0` to turn an alert off. Skill exposure cycles between Discover automatically and No skill
 catalog. The Selected skills row opens the same searchable checkbox picker used

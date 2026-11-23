@@ -62,6 +62,12 @@ const ASSIGNMENT_ATTEMPTS_DDL = `CREATE TABLE IF NOT EXISTS assignment_attempts 
     assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
 )`;
 const ASSIGNMENT_ATTEMPT_COLUMN = `assignment_attempt_id TEXT REFERENCES assignment_attempts (attempt_id)`;
+const EXPIRY_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS operations_expiry ON operations(created_at) WHERE phase = 'running' AND terminal_revision = 0",
+    "CREATE INDEX IF NOT EXISTS waits_expiry ON waits(created_at) WHERE phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0",
+    "CREATE INDEX IF NOT EXISTS claims_expiry ON resume_claims(claimed_at) WHERE state IN ('claimed', 'published')",
+];
+
 const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX IF NOT EXISTS operations_assignment_cleanup
     ON operations (operation_id, assignment_attempt_id)
     WHERE assignment_attempt_id IS NOT NULL`;
@@ -313,7 +319,7 @@ export function ensureSchema(ctx: StoreContext): void {
             );
         }
         ctx.transaction(() => {
-            for (const statement of DDL) ctx.db.exec(statement);
+            for (const statement of [...DDL, ...EXPIRY_INDEXES]) ctx.db.exec(statement);
             run(ctx, "INSERT INTO schema_meta (key, value) VALUES (?, ?)", SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
         });
         return;
@@ -369,6 +375,7 @@ export function ensureSchema(ctx: StoreContext): void {
 }
 
 function ensureAssignmentCleanupSchema(ctx: StoreContext): void {
+    for (const statement of EXPIRY_INDEXES) ctx.db.exec(statement);
     const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
     if (hasColumn() && getRow(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'operations_assignment_cleanup'")) return;
     ctx.transaction(() => {
