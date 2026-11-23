@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.52.0] - 2026-11-23
+
+### Added
+
+- Enable optional Harness instructions in `/harness-settings` and edit the prompt while the switch is on. The switch defaults to Off. The CLI can also enable, sync, or remove the Harness block in the global `APPEND_SYSTEM.md`. Pi loads the instructions at startup and preserves them across compaction.
+
 ## [pi-better-harness@0.51.3] - 2026-11-22
 
 ### Fixed

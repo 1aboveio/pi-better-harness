@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.51.3",
+  "version": "0.52.0",
   "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, goals, and Outcome & Todo.",
   "license": "MIT",
   "type": "module",
@@ -49,7 +49,9 @@
     "CHANGELOG.md",
     "bin/*.mjs",
     "lib/*.mjs",
-    "extensions/**/*.ts"
+    "lib/instructions.d.mts",
+    "extensions/**/*.ts",
+    "extensions/harness-instructions/AGENTS.md"
   ],
   "scripts": {
     "prepack": "node ../../scripts/generate-harness-changelog.mjs && node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/stage-harness-dependencies.mjs",
