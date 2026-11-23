@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configureHarnessResources, preflightHarnessInstall } from "./install-settings.mjs";
+import { manageInstructions } from "./instructions.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { version } = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
@@ -20,8 +21,10 @@ export const componentPackages = [
 ];
 
 const usage = `Usage: pi-better-harness <install|uninstall> [--local]
+       pi-better-harness instructions <enable|sync|disable>
 
 Commands:
+  instructions  Manage the Harness block in the global APPEND_SYSTEM.md
   install      Configure all Pi Better Harness component packages
   uninstall    Remove all Pi Better Harness component packages
 
@@ -55,6 +58,16 @@ export function run(argv, options = {}) {
   const local = argv.includes("--local") || argv.includes("-l");
   const positional = argv.filter((arg) => !["--local", "-l"].includes(arg));
   const command = positional[0];
+  if (command === "instructions" && !local && positional.length === 2 && ["enable", "sync", "disable"].includes(positional[1])) {
+    try {
+      const changed = manageInstructions(positional[1], options.agentDir);
+      stdout.write(changed ? "Updated the Harness block in APPEND_SYSTEM.md.\n" : "No change to APPEND_SYSTEM.md.\n");
+      return 0;
+    } catch (error) {
+      stderr.write(`Could not update Harness instructions: ${error.message}\n`);
+      return 1;
+    }
+  }
   if (!command || positional.length !== 1 || !["install", "uninstall"].includes(command)) {
     stderr.write(`${usage}\n`);
     return 2;
@@ -110,6 +123,14 @@ export function run(argv, options = {}) {
           stderr.write("Removed the unfiltered Harness registration; the component packages remain installed.\n");
         }
       }
+      return 1;
+    }
+  }
+  if (!local) {
+    try {
+      manageInstructions(command === "install" ? "sync" : "disable", options.agentDir);
+    } catch (error) {
+      stderr.write(`Package operation completed, but the Harness instructions could not be updated: ${error.message}\n`);
       return 1;
     }
   }

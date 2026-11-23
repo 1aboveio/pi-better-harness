@@ -85,7 +85,7 @@ function readSettings(path, { allowMissing = false } = {}) {
   return parseSettings(text, path);
 }
 
-function writeDestination(path) {
+export function writeDestination(path) {
   let stat;
   try {
     stat = lstatSync(path);
@@ -104,7 +104,7 @@ function writeDestination(path) {
   }
 }
 
-function acquire(path) {
+export function acquire(path) {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       return lockfile.lockSync(path, { realpath: false });

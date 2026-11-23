@@ -9,8 +9,14 @@ permissions or settings ownership.
 
 ## Decision
 
-Provider cache hit rate depends on the leading prompt bytes never changing.
-Within one conversation:
+Every new Harness feature must preserve prompt cache reuse. The design target
+is a cache hit rate **above 95%**. For any feature that changes what the model
+receives, review the first request and a later request in the same conversation.
+Check where the feature adds its content and whether an ordinary turn would
+rewrite previously sent content. A design that causes such a rewrite must
+change before merge.
+
+The following rules apply within one conversation.
 
 1. **Keep the prefix stable between requests.** Append new conversational
    guidance after content already sent. A deliberate settings change follows
@@ -21,12 +27,27 @@ Within one conversation:
 3. **No volatile state in the prompt.** Occupancy counters, live counts, elapsed
    time and progress rows belong in tools (`subagent_settings`,
    `bg_task_status`), not in prompt text.
-4. **Publish package guidance as a named section.** Packages return
+4. **Publish tool and execution policy guidance as a named section.** Packages return
    `sections` from `before_agent_start`. Returning `systemPrompt` sets
    `forceSystemPrompt` and replaces the whole prefix, bypassing other packages'
    sections. [Shared execution policy](0016-unified-execution-concurrency.md)
-5. **A mid-session settings change applies at the next agent start** and then
+5. **A mid-session tool or execution policy change applies at the next agent start** and then
    stays fixed. That change costs one cold write, not one per request.
+
+### Supplemental instructions use Pi's startup system prompt
+
+The Harness instructions switch defaults to Off. Enabling it in
+`/harness-settings` or via the CLI copies the selected Markdown into its own
+delimited block in the global `APPEND_SYSTEM.md`. Pi loads this as part of its
+initial system prompt. Updates and removal preserve all content outside the
+block. Editing the prompt in the settings hub updates the saved text and the
+on-disk block. The package uses Pi's native discovery and project precedence.
+
+Ordinary turns and compaction reuse the loaded text. The feature has no
+per-turn or post-compaction injection hook. Updating the on-disk block takes
+effect when Pi next loads resources, including an explicit `/reload` or opening
+a saved conversation in a new process. Treat a resource reload as a deliberate
+change to the prompt. Compaction alone must preserve the supplement verbatim.
 
 ## Context and trade-off
 
@@ -80,6 +101,8 @@ publishes `harness_execution_policy`, so no package can erase another.
 - `packages/pi-better-subagents/tests/child_ownership.test.mjs` asserts the
   worker handoff is published as the `worker_handoff` section, that the handler
   returns nothing, and that the incoming prompt text is unchanged.
-- Manual check against a gateway that reports cache reads: send five consecutive
-  turns of one conversation and require the cache-read counter to grow with the
-  input instead of staying constant while input grows.
+- `packages/pi-better-harness/test/harness-instructions.test.mjs` captures
+  successive provider requests. Syncing an edited source must preserve the
+  running conversation's message prefix. After compaction, the original text
+  must still appear once in the system prompt. An explicit resource reload
+  picks up the synced version.

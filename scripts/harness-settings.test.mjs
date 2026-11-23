@@ -329,3 +329,65 @@ test("an invalid callback default reports once, leaves package settings usable, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function selectRow(page, label) {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    if (page.render(80).some(line => line.trimStart().startsWith(`> ${label} `))) {
+      page.handleInput("\r");
+      return;
+    }
+    page.handleInput("\x1b[B");
+  }
+  assert.fail(`Could not select ${label}`);
+}
+
+test("Harness instructions start Off, allow editing while On, and keep the draft across toggles", async () => {
+  const path = join(isolatedAgentDir, "APPEND_SYSTEM.md");
+  const original = "<!-- another plugin -->\nExisting instructions";
+  writeFileSync(path, original);
+  const pi = eventApi();
+  let command;
+  pi.on = () => {};
+  pi.registerCommand = (_name, options) => { command = options.handler; };
+  harnessSettings(pi);
+
+  const customPrompt = "Use project conventions.\nCheck the tests.";
+  const edits = [undefined, customPrompt];
+  const pages = [
+    page => {
+      assert.match(page.render(80).join("\n"), /Harness instructions\s+Off/);
+      assert.doesNotMatch(page.render(80).join("\n"), /Instructions prompt/);
+      selectRow(page, "Harness instructions");
+    },
+    page => selectRow(page, "Instructions prompt"),
+    page => {
+      assert.ok(!readFileSync(path, "utf8").includes(customPrompt));
+      selectRow(page, "Instructions prompt");
+    },
+    page => {
+      assert.ok(readFileSync(path, "utf8").includes(customPrompt));
+      selectRow(page, "Harness instructions");
+    },
+    page => {
+      assert.equal(readFileSync(path, "utf8"), original);
+      selectRow(page, "Harness instructions");
+    },
+    page => {
+      assert.ok(readFileSync(path, "utf8").includes(customPrompt));
+      assert.match(page.render(80).join("\n"), /Harness instructions\s+On/);
+      page.handleInput("\x1b");
+    },
+  ];
+  const errors = [];
+  await command("", { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: {
+    notify: message => errors.push(message),
+    editor: async (_title, value) => {
+      assert.match(value, /Harness defaults/);
+      return edits.shift();
+    },
+    custom: build => new Promise(resolve => pages.shift()(build({}, theme, {}, resolve))),
+  } });
+  assert.deepEqual(errors, []);
+  assert.equal(pages.length, 0);
+  assert.equal(edits.length, 0);
+});
