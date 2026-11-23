@@ -337,7 +337,7 @@ jobs:
 
       - name: Verify Recap settings and foreground request isolation in Pi
         if: matrix.pi-version == '1.3.0'
-        run: PI_RECAP_TEST_CLI="$PWD/node_modules/.bin/pi" node --import tsx --test scripts/session-recap.tui.e2e.test.mjs
+        run: PI_RECAP_TEST_CLI="$PWD/node_modules/.bin/pi" node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/session-recap.tui.e2e.test.mjs
 
       - name: Test background lifecycle, navigator, and SSH compatibility
         env:
@@ -464,6 +464,8 @@ jobs:
             extensions/minimal-output/index.ts \
             extensions/tool-call-guard/index.ts \
             extensions/tool-call-guard/waits.ts \
+            extensions/recap/index.ts \
+            extensions/recap/summary.ts \
             extensions/settings/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
