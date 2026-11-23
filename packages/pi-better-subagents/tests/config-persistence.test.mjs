@@ -111,7 +111,7 @@ test("tool-wait and no-progress times save, reload, validate, and leave unrelate
     }
 });
 
-test("timeout minutes save, reload, disable, and validate", () => {
+test("timeout minutes persist, validate, and default to the 24-hour limit", () => {
     const root = mkdtempSync(join(tmpdir(), "subagents-timeout-config-"));
     const user = join(root, "settings.json");
     setConfigPathForTests(user);
@@ -123,8 +123,8 @@ test("timeout minutes save, reload, disable, and validate", () => {
 
         writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: 0 });
         setConfigForTests(undefined);
-        assert.equal(loadConfig().maxMinutes, 0, "0 disables the timeout");
-        assert.equal(resolveRunTiming({ settings: loadConfig(), startedAt: 0 }).ceilingAt, undefined);
+        assert.equal(loadConfig().maxMinutes, 0, "0 clears the custom timeout");
+        assert.equal(resolveRunTiming({ settings: loadConfig(), startedAt: 0 }).ceilingAt, 24 * 60 * 60_000);
 
         assert.throws(() => writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: -1 }),
             /maxMinutes must be/);
