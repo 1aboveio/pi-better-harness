@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/tools.ts. Do not edit directly.
+import { TASK_TIMEOUT_HELP } from "./managed-authority.domain.mjs";
 import { Type } from "typebox";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth, wrapTextWithAnsi as piWrapTextWithAnsi, } from "@earendil-works/pi-tui";
 import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
@@ -68,7 +69,7 @@ const CommandFields = {
     env: Type.Optional(StringMap("Extra environment variables.")),
     max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
     callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
-    timeout_seconds: Type.Optional(Type.Number({ description: "Optional whole-task timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to use the 24-hour maximum. Spawned processes also have a 24-hour maximum. When the Background tasks sandbox profile sets a command time limit, that cap applies to each actual command (and each watch check) independently: a smaller timeout_seconds still wins, and 0 does not disable the policy cap." })),
+    timeout_seconds: Type.Optional(Type.Number({ description: TASK_TIMEOUT_HELP })),
     ssh: Type.Optional(SshSchema),
     remote: Type.Optional(RemoteSchema),
     ...IntentFields,

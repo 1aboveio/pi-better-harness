@@ -19,6 +19,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - Run subagent registry cleanup on a worker thread so the runtime can answer snapshot requests during cleanup.
+- Accept Background Tasks 0.20.1 clients during the upgrade. The updated timeout help retains the published tool schema fingerprint.
 - On startup and during operation, fail overdue tasks, cancel expired waits, and invalidate stale resume claims. Preserve previously recorded terminal outcomes.
 
 ## [pi-better-background-tasks@0.20.2] - 2026-11-23

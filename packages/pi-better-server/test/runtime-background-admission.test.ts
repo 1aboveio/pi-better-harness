@@ -13,7 +13,7 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     const directory = join(root, 'background-tool-admission');
     mkdirSync(directory, { mode: 0o700 });
     const load = (name: string) => import(`../src/runtime/domain/background-service/${name}.domain.mjs`);
-    const [{ registerTools }, { backgroundDigest }, { readAdmissionStartToken }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
+    const [{ registerTools }, { backgroundDigest, backgroundParametersDigest }, { readAdmissionStartToken }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
     const supervision = new RuntimeResultSupervision(root, 'instance');
     const ports: Map<string, any> = (globalThis as any)[Symbol.for('pi-better-server:result-supervision-ports-v1')] ??= new Map();
     ports.set(root, { status() { supervision.reconcile(); return { hostId: supervision.hostId, epoch: supervision.epoch, reason: supervision.reason }; } });
@@ -57,6 +57,20 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
         draining = true;
         await assert.rejects(invoke('bg_task_spawn', { shell: false, argv: [process.execPath, '-e', 'process.exit(0)'] }, 'new'), /runtime-draining/);
         await assert.rejects(invoke('bg_task_spawn', { shell: false, argv: [process.execPath, '-e', 'process.exit(0)'] }, 'schema', r => r.parametersDigest = 'wrong'), /capability-mismatch/);
+        const published = {
+            bg_task_spawn: '749d1a800ac365c2b920433e293545df74e81598323c4fcb31cc8c9681e168f8',
+            bg_task_watch: '67315792d1bafee36fcc97754694d05c1ee7fad9ac1a4652c53d2c2bf127644b',
+            bg_task_spawn_batch: '3e563b70cc3820411152d17844b6c248dcc2c8b6cd1dbe2663d8c2217bd833e7',
+            bg_task: '55d174475db6a833691f0e0d55de87970a760c167ceb5cc5b8be9ff9a5338e77',
+        };
+        for (const [tool, digest] of Object.entries(published)) {
+            assert.equal(backgroundParametersDigest(definitions.get(tool).parameters), digest, tool);
+        }
+        const ssh = { ssh: { host: 'fixture' }, command: 'true' };
+        await assert.rejects(invoke('bg_task_spawn', ssh, 'prior-client', r => r.parametersDigest = published.bg_task_spawn), /runtime-draining/);
+        const changed = structuredClone(definitions.get('bg_task_spawn').parameters);
+        changed.properties.timeout_seconds.minimum = 1;
+        await assert.rejects(invoke('bg_task_spawn', ssh, 'changed-rule', r => r.parametersDigest = backgroundParametersDigest(changed)), /capability-mismatch/);
         await assert.rejects(invoke('bg_task_spawn', { shell: 'invalid' }, 'invalid'), /Invalid Background tool parameters/);
         draining = false;
         const result = await invoke('bg_task_spawn', { shell: false, argv: [process.execPath, '-e', 'process.exit(0)'], callback: false }, 'accepted');
