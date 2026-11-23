@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.53.0] - 2026-11-23
+
+### Added
+
+- Enable session recaps in Harness settings and customize the recap prompt. (#885)
+
+### Fixed
+
+- Bundle Background Tasks 0.20.2 and Subagents 0.37.2 with Server 0.7.2. Background tasks and subagents now have a 24-hour maximum lifetime.
+
+## [pi-better-server@0.7.2] - 2026-11-23
+
+### Fixed
+
+- Run subagent registry cleanup on a worker thread so the runtime can answer snapshot requests during cleanup.
+- On startup and during operation, fail overdue tasks, cancel expired waits, and invalidate stale resume claims. Preserve previously recorded terminal outcomes.
+
+## [pi-better-background-tasks@0.20.2] - 2026-11-23
+
+### Fixed
+
+- Enforce a 24-hour maximum from task creation, including for detached processes and watches. Shorter limits still apply. A runner that starts after the deadline records a timeout before executing the command.
+
+## [pi-better-subagents@0.37.2] - 2026-11-23
+
+### Fixed
+
+- Preserve the 24-hour lifetime across automatic resumes and runtime recovery. Runs reaching this limit fail even while waiting on a tool. The default run timeout remains 60 minutes.
+
 ## [pi-better-harness@0.52.0] - 2026-11-23
 
 ### Added
