@@ -255,6 +255,8 @@ test("age eviction removes dependent recovery evidence and losses persist in sum
   assert.deepEqual(exported.issues, ["retention-loss"]);
   assert.equal(exported.analysis.observedOperations, 0);
   c.observe(denial("new"));
+  f.collector().observe(success("unrelated"));
+  assert.deepEqual(f.errors, []);
   assert.equal(readDiagnostics(f.seams).losses.age, 2);
 });
 
@@ -291,9 +293,9 @@ test("count retention is atomic, capped at 2000 entries, and reports discarded o
     assert.equal(data.losses.count, 1);
     assert.equal(data.losses.bytes, 0);
     assert.deepEqual(data.issues, ["retention-loss"]);
-    assert.equal(f.errors.length, 1);
     c.observe(denial("last-two"));
     assert.equal(readDiagnostics(f.seams).losses.count, 2);
+    assert.deepEqual(f.errors, []);
   } finally { closeSync(previous); }
 });
 
@@ -317,6 +319,7 @@ test("byte retention includes signed framing and stays bounded without silently 
   assert.deepEqual(data.issues, ["retention-loss"]);
   assert.match(formatDiagnosticsSummary(data), /retention-loss/);
   assert.ok(JSON.parse(readFileSync(exportDiagnostics(f.seams), "utf8")).losses.bytes > 0);
+  assert.deepEqual(f.errors, []);
 });
 
 test("malformed and tampered records are excluded, reported, and remain visible after subsequent collection", t => {
@@ -338,6 +341,10 @@ test("malformed and tampered records are excluded, reported, and remain visible 
   data = readDiagnostics(f.seams);
   assert.equal(data.records.length, 2);
   assert.equal(data.losses.malformed, 1);
+  assert.equal(f.errors.length, 1);
+  const repaired = statSync(f.journal).ino;
+  f.collector().observe(success("unrelated"));
+  assert.equal(statSync(f.journal).ino, repaired);
   assert.equal(f.errors.length, 1);
   const raw = readFileSync(exportDiagnostics(f.seams), "utf8");
   assert.equal(raw.includes("PRIVATE MALFORMED CANARY"), false);
@@ -637,8 +644,12 @@ test("parent import validates fixed reports, rekeys identities, downgrades basis
     assert.equal(isDiagnosticReport(bad), false);
     c.observeReport(bad, "run-a");
   }
+  f.tick(NOW - 31 * DAY);
+  f.collector().observe(denial("expired"));
+  f.tick(NOW);
   for (let i = 0; i < 3; i++) for (const r of reports) parent().observeReport(r, "run-a");
   let data = readDiagnostics(f.seams);
+  assert.equal(data.losses.age, 1);
   assert.equal(data.records.length, 2);
   assert.equal(analyzeDiagnostics(data).recovered, 1);
   assert.ok(data.records.every(r => r.basis === "agent-reported" && r.context === "worker"));
@@ -659,7 +670,7 @@ test("parent import validates fixed reports, rekeys identities, downgrades basis
   data = readDiagnostics(f.seams);
   assert.equal(data.records.length, 4);
   assert.notEqual(data.records[0].operationFingerprint, data.records[2].operationFingerprint);
-  assert.deepEqual(data.issues, []);
+  assert.deepEqual(data.issues, ["retention-loss"]);
   assert.deepEqual(f.errors, []);
   assert.doesNotMatch(readFileSync(exportDiagnostics(f.seams), "utf8"), /private\//);
 });
