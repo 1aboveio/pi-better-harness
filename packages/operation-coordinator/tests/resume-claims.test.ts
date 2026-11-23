@@ -62,6 +62,25 @@ function claim(harness: ReturnType<typeof createHarness>) {
 }
 
 describe("resume claims", () => {
+    it("expires the original wait and fences publication after restart at the 24-hour boundary", () => {
+        const harness = createHarness();
+        let now = 1000;
+        harness.reopen({ now: () => now });
+        const wait = readyWorkerWait(harness);
+        now += 24 * 60 * 60_000 - 1;
+        const { claim: active } = claim(harness);
+        assert.equal(harness.store.expireWaits(), 0);
+        now++;
+        harness.reopen({ now: () => now });
+        expectStoreError(() => harness.store.publishResumeAttempt({
+            waitId: wait.waitId, generation: wait.generation, claimId: active.claimId,
+            claimToken: active.claimToken, attemptId: "late-worker", launchToken: "late-launch",
+        }), "wait-phase", /24-hour/);
+        assert.equal(harness.store.expireWaits(), 1);
+        assert.equal(harness.store.listResumeClaims({ waitId: wait.waitId })[0]?.state, "invalidated");
+        assert.equal(harness.store.getWait(wait)?.phase, "cancelled");
+        assert.equal(harness.store.expireWaits(), 0);
+    });
     it("admits one claim per generation and persists it across reopen", () => {
         const harness = createHarness();
         readyWorkerWait(harness);

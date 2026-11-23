@@ -306,7 +306,7 @@ export interface SupervisorStartOptions {
   operationId?: string;
   /** Per-command cap; a watch applies it to every check. */
   commandTimeoutSeconds?: number;
-  /** Whole-task deadline; `0` means none. A watch defaults to 15 minutes. */
+  /** Whole-task deadline; `0` uses the 24-hour maximum. A watch defaults to 15 minutes. */
   timeoutSeconds?: number;
   /** Watch cadence. Watch only; fractional values are allowed for tight checks. */
   intervalSeconds?: number;

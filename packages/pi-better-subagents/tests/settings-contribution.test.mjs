@@ -179,10 +179,10 @@ test("subagents contributes the standalone settings opener with shared session a
     assert.equal(loadConfig().maxMinutes, 0);
     keys = [];
     await contribution.open(ctx);
-    assert.match(pages.at(-1), /Run timeout\s+No limit/, "saving preserves an explicitly disabled timeout");
+    assert.match(pages.at(-1), /Run timeout\s+24 hours/, "saving preserves an 24-hour maximum");
     await handlers.get("session_tree")({}, ctx);
     await contribution.open(ctx);
-    assert.match(pages.at(-1), /Run timeout\s+No limit/, "the disabled timeout survives branch restoration");
+    assert.match(pages.at(-1), /Run timeout\s+24 hours/, "the maximum survives branch restoration");
 
     keys = atRow("Reset to defaults", "\r");
     await contribution.open(ctx);

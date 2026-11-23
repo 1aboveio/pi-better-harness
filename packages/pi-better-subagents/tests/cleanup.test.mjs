@@ -28,6 +28,7 @@ const {
     baseDir,
     logPathFor,
     orphanedTaskRuntimeProvenance,
+    recordLaunchAttempt,
     recordTaskRuntimeProvenance,
     runDir,
     sessionsDir,
@@ -70,6 +71,17 @@ function writeSessionFile(name, mtimeMs) {
 }
 
 describe("daily cleanup", () => {
+    it("keeps an old metadata-less directory while its launcher still owns it", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const id = "sa_preparing_1";
+        mkdirSync(runDir(id), { recursive: true });
+        recordLaunchAttempt(id);
+        const old = new Date(DAY - 10 * DAY_MS);
+        utimesSync(runDir(id), old, old);
+        runDailyCleanupOnce({ now: DAY, terminalRunRetentionMs: RETENTION });
+        assert.ok(existsSync(runDir(id)));
+    });
+
     it("runs at most once per local day and removes only old terminal tmp artifacts", () => {
         rmSync(baseDir(), { recursive: true, force: true });
 

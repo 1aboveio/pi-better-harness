@@ -938,6 +938,25 @@ describe("lost evidence is a fence, not a guess", () => {
     expect(existsSync(counterPath)).toBe(false);
   }, 40_000);
 
+  it.each(["process", "watch"] as const)("expires an old %s launch before its first command", async kind => {
+    const directory = supervisorDirectory("expired");
+    const fakeRunner = join(directory, "no-claim.mjs");
+    writeFileSync(fakeRunner, "process.exit(0)");
+    const supervisor = createLocalSupervisor({ directory, runnerPath: fakeRunner });
+    const marker = join(directory, "unexpected-execution");
+    const started = await supervisor.start({
+      kind, token: "expired-launch-00001", argv: [process.execPath, "-e", `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+      ...(kind === "watch" ? { successWhen: { type: "exit_code" as const, equals: 0 } } : {}),
+    });
+    const path = supervisorPaths(directory, started.taskId).launch;
+    const launch = JSON.parse(readFileSync(path, "utf8"));
+    launch.createdAt = Date.now() - 24 * 60 * 60_000;
+    writeFileSync(path, JSON.stringify(launch));
+    expect(await runRunnerOnce(directory, started.taskId)).toBe(0);
+    expect(supervisor.snapshot(started.taskId)?.status).toBe("timed_out");
+    expect(existsSync(marker)).toBe(false);
+  });
+
   // @covers observed-waits.lost-fences-late-claim
   // @level integration
   it("refuses a runner that claims a launch already recorded lost", async () => {

@@ -308,8 +308,8 @@ progress redraws such as `rsync --progress` are collapsed to their latest
 visible state, leaving subsequent error lines readable.
 
 Command watchers default to a 15 minute timeout when `timeout_seconds` is
-omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
-Spawned processes do not get a default timeout.
+omitted. All tasks have a 24-hour limit measured from creation. Pass `timeout_seconds: 0`
+to use that maximum. Shorter task and command timeouts still apply.
 
 `bg_task_watch` and `bg_task` `action: "watch"` wait up to 15 seconds for the
 first check and return its exit code with the newest stderr and stdout lines

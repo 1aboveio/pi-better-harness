@@ -1,3 +1,4 @@
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.js";
 export { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.js";
 /**
@@ -865,14 +866,16 @@ function mapEvidence(
 /** Shared terminal publication contract for the host and fixed server cancel adapter. */
 export function supervisorTerminalPublication(operation: OperationRecord, inspection: SupervisorInspection, refs = evidenceFor(inspection)) {
   const status = inspection.status;
-  const outcome = terminalOutcome(status);
+  const endedAt = inspection.result?.endedAt ?? inspection.lost?.recordedAt;
+  const expired = endedAt !== undefined && endedAt >= taskDeadline(Math.min(operation.createdAt, inspection.launch.createdAt));
+  const outcome = expired ? "failed" : terminalOutcome(status);
   return {
     operationId: operation.operationId,
     eventId: `${operation.taskId}:${inspection.result?.endedAt ?? inspection.lost?.recordedAt ?? inspection.observedAt}:${status}`,
     outcome, owner: operation.owner,
     evidence: refs.map(ref => ({ kind: ref.kind, ref: ref.ref, ...(ref.summary ? { summary: ref.summary } : {}), detailLost: ref.detailLost })),
     ...(outcome === "lost" ? { detailLost: true } : {}),
-    reason: inspection.result ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}` : "supervisor lost: no terminal evidence",
+    reason: expired ? "24-hour task lifetime exceeded" : inspection.result ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}` : "supervisor lost: no terminal evidence",
   };
 }
 
@@ -3544,11 +3547,12 @@ export class ObservedWaitHost {
     if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
     const store = this.requireStore();
     const status = inspection.status;
-    const outcome = terminalOutcome(status);
     const refs = evidenceFor(inspection);
+    const publication = supervisorTerminalPublication(operation, inspection, refs);
+    const outcome = publication.outcome;
     let recorded;
     try {
-      recorded = store.recordTerminalOutcome(supervisorTerminalPublication(operation, inspection, refs));
+      recorded = store.recordTerminalOutcome(publication);
     } catch (error) {
       // A timer and a tool call can observe the same terminal record. The store
       // keeps the first revision; a replay is never a second execution.

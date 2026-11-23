@@ -363,7 +363,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (record.tool === '__background_dismiss')
                     return service.dismissDurableTask(origin, record.params.id);
                 const tool = session.extensionRunner.getToolDefinition(record.tool);
-                if (!tool || record.parametersDigest !== authority.backgroundDigest(tool.parameters))
+                if (!tool || (record.parametersDigest !== authority.backgroundParametersDigest(tool.parameters)
+                    && record.parametersDigest !== authority.backgroundDigest(tool.parameters)))
                     throw new Error('capability-mismatch: Background tool schema');
                 if (!Check(tool.parameters, record.params))
                     throw new Error('Invalid Background tool parameters');

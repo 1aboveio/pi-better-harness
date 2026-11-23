@@ -41,6 +41,7 @@
  * cancels, or restarts the run.
  */
 
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import { createHash } from "node:crypto";
 
 export type TimingStopReason = "deadline" | "ceiling";
@@ -72,6 +73,8 @@ export interface RunTiming {
     graceMs: number;
     /** Hard ceiling (epoch ms): stopped without grace. Absent = none. */
     ceilingAt?: number;
+    /** Original 24-hour deadline carried across automatic resumes. */
+    lifetimeAt?: number;
     /** No-progress window. Absent = stuck detection off. */
     stuckMs?: number;
     /** Tool-call wait window. Absent = tool-wait alerts off. */
@@ -186,6 +189,11 @@ function pick(param: unknown, env: unknown, setting: unknown, fallback: number, 
     return minutes(param, names[0]) ?? minutes(env, names[1]) ?? minutes(setting, names[2]) ?? fallback;
 }
 
+export function configuredMaxMinutes(params: TimingParams, settings: TimingSettings, env: Record<string, string | undefined>): number {
+    return pick(params.max_minutes, env[TIMING_ENV.max], settings.maxMinutes, DEFAULT_TIMING_MINUTES.max,
+        ["max_minutes", TIMING_ENV.max, "maxMinutes"]);
+}
+
 /** The durable timing record for a run starting at `startedAt`. */
 export function resolveRunTiming(input: {
     params?: TimingParams;
@@ -200,8 +208,7 @@ export function resolveRunTiming(input: {
         ["deadline_minutes", TIMING_ENV.deadline, "deadlineMinutes"]);
     const grace = pick(p.grace_minutes, env[TIMING_ENV.grace], s.graceMinutes, DEFAULT_TIMING_MINUTES.grace,
         ["grace_minutes", TIMING_ENV.grace, "graceMinutes"]);
-    const max = pick(p.max_minutes, env[TIMING_ENV.max], s.maxMinutes, DEFAULT_TIMING_MINUTES.max,
-        ["max_minutes", TIMING_ENV.max, "maxMinutes"]);
+    const max = configuredMaxMinutes(p, s, env);
     const toolWait = pick(p.tool_wait_minutes, env[TIMING_ENV.toolWait], s.toolWaitMinutes, DEFAULT_TIMING_MINUTES.toolWait,
         ["tool_wait_minutes", TIMING_ENV.toolWait, "toolWaitMinutes"]);
     const stuck = pick(p.stuck_minutes, env[TIMING_ENV.stuck], s.stuckMinutes, DEFAULT_TIMING_MINUTES.stuck,
@@ -209,7 +216,7 @@ export function resolveRunTiming(input: {
     return {
         ...(deadline > 0 ? { deadlineAt: input.startedAt + Math.round(deadline * MINUTE) } : {}),
         graceMs: Math.round(grace * MINUTE),
-        ...(max > 0 ? { ceilingAt: input.startedAt + Math.round(max * MINUTE) } : {}),
+        ceilingAt: taskDeadline(input.startedAt, max > 0 ? input.startedAt + Math.round(max * MINUTE) : undefined),
         ...(toolWait > 0 ? { toolWaitMs: Math.round(toolWait * MINUTE) } : {}),
         ...(stuck > 0 ? { stuckMs: Math.round(stuck * MINUTE) } : {}),
     };
@@ -220,7 +227,7 @@ export function resolveRunTiming(input: {
 const TIMING_DESCRIPTIONS = {
     deadline_minutes: "Optional soft deadline in minutes (default: none; 0 = none; null or omitted = inherit: in a batch job the shared value, otherwise the default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. Grace starts when the message reaches the child (after its current tool call); if it has not finished by then, the harness stops it with reason deadline.",
     grace_minutes: "Minutes after the wrap-up message reaches the child before the run is stopped (default 5; null or omitted = inherit).",
-    max_minutes: "Optional hard ceiling in minutes (default: 60; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
+    max_minutes: "Optional hard ceiling in minutes (default: 60; 0 uses the 24-hour maximum; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
     tool_wait_minutes: "Tool-call wait alert in minutes (default 5; 0 = off; null or omitted = inherit). While a tool call stays open this long you get one factual wake for that call, including a normal long test. Parallel calls alert independently. The alert does not stop or cancel the run.",
     stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null or omitted = inherit). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
 } as const;

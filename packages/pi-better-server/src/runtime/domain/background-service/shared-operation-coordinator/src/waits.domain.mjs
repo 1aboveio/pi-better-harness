@@ -15,6 +15,7 @@
  * the cancellation epoch it observed. Cancellation invalidates the active resume
  * claim, and a claim whose epoch no longer matches can never publish an attempt.
  */
+import { taskDeadline } from "./task-lifetime.domain.mjs";
 import { randomUUID } from "node:crypto";
 import { StoreError } from "./errors.domain.mjs";
 import { acknowledgeGenerationOutbox, enqueueReadyGeneration, releaseGenerationPins, voidGenerationOutbox, } from "./outbox.domain.mjs";
@@ -370,20 +371,24 @@ export function cancelWait(ctx, input) {
             throw new StoreError("wait-phase", `Wait ${waitId} generation ${generation} is already ${wait.phase}; cancellation is recorded once and cannot be repeated or replaced.`);
         }
         assertExpectedEpoch(wait, expectedCancelEpoch);
-        const at = ctx.now();
-        run(ctx, "UPDATE waits SET phase = 'cancelled', phase_reason = ?, cancel_epoch = cancel_epoch + 1, updated_at = ? WHERE wait_id = ? AND generation = ?", reason, at, waitId, generation);
-        const activeClaimRows = getRows(ctx, "SELECT claim_id FROM resume_claims WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')", waitId, generation);
-        const invalidatedClaimIds = activeClaimRows.map((row) => columnText(row, "claim_id"));
-        run(ctx, `UPDATE resume_claims SET state = 'invalidated', invalidated_at = ?, reason = ?
-             WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')`, at, reason, waitId, generation);
-        const voidedOutboxIds = voidGenerationOutbox(ctx, waitId, generation, reason, at);
-        releaseGenerationPins(ctx, waitId, generation, "wait-cancelled", at);
-        return {
-            wait: requireWait(ctx, waitId, generation),
-            invalidatedClaimIds,
-            voidedOutboxIds,
-        };
+        return cancelGeneration(ctx, waitId, generation, reason);
     });
+}
+/** Caller holds the write transaction and has selected a nonterminal generation. */
+export function cancelGeneration(ctx, waitId, generation, reason) {
+    const at = ctx.now();
+    run(ctx, "UPDATE waits SET phase = 'cancelled', phase_reason = ?, cancel_epoch = cancel_epoch + 1, updated_at = ? WHERE wait_id = ? AND generation = ?", reason, at, waitId, generation);
+    const activeClaimRows = getRows(ctx, "SELECT claim_id FROM resume_claims WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')", waitId, generation);
+    const invalidatedClaimIds = activeClaimRows.map((row) => columnText(row, "claim_id"));
+    run(ctx, `UPDATE resume_claims SET state = 'invalidated', invalidated_at = ?, reason = ?
+         WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')`, at, reason, waitId, generation);
+    const voidedOutboxIds = voidGenerationOutbox(ctx, waitId, generation, reason, at);
+    releaseGenerationPins(ctx, waitId, generation, "wait-cancelled", at);
+    return {
+        wait: requireWait(ctx, waitId, generation),
+        invalidatedClaimIds,
+        voidedOutboxIds,
+    };
 }
 // ---- resume claims ------------------------------------------------------
 export function claimResume(ctx, input) {
@@ -395,6 +400,8 @@ export function claimResume(ctx, input) {
     return ctx.transaction(() => {
         assertCurrentGeneration(ctx, waitId, generation);
         const wait = requireWait(ctx, waitId, generation);
+        if (ctx.now() >= taskDeadline(wait.createdAt))
+            throw new StoreError("wait-phase", "The 24-hour wait lifetime has expired.");
         const active = getRows(ctx, "SELECT claim_id FROM resume_claims WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')", waitId, generation)[0];
         if (active) {
             throw new StoreError("concurrent-claim", `Wait ${waitId} generation ${generation} already has an active resume claim (${columnText(active, "claim_id")}). One conversation admits one writer; release or invalidate that claim instead of claiming again.`);
@@ -439,6 +446,8 @@ export function publishResumeAttempt(ctx, input) {
     return ctx.transaction(() => {
         assertCurrentGeneration(ctx, waitId, generation);
         const wait = requireWait(ctx, waitId, generation);
+        if (ctx.now() >= taskDeadline(wait.createdAt))
+            throw new StoreError("wait-phase", "The 24-hour wait lifetime has expired.");
         const claim = requireClaim(ctx, claimId);
         if (claim.waitId !== waitId || claim.generation !== generation) {
             throw new StoreError("claim-state", `Resume claim ${claimId} belongs to ${claim.waitId} generation ${claim.generation}, not ${waitId} generation ${generation}.`);

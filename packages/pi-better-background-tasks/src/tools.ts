@@ -1,3 +1,4 @@
+import { TASK_TIMEOUT_HELP } from "./managed-authority.js";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -96,7 +97,7 @@ const CommandFields = {
   env: Type.Optional(StringMap("Extra environment variables.")),
   max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
-  timeout_seconds: Type.Optional(Type.Number({ description: "Optional whole-task timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout. When the Background tasks sandbox profile sets a command time limit, that cap applies to each actual command (and each watch check) independently: a smaller timeout_seconds still wins, and 0 does not disable the policy cap." })),
+  timeout_seconds: Type.Optional(Type.Number({ description: TASK_TIMEOUT_HELP })),
   ssh: Type.Optional(SshSchema),
   remote: Type.Optional(RemoteSchema),
   ...IntentFields,
@@ -383,7 +384,7 @@ export function registerTools(pi: ExtensionAPI, runtime?: ToolRuntime, refreshNa
   register({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to disable.`,
+    description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to use the 24-hour maximum.`,
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: WatchParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {

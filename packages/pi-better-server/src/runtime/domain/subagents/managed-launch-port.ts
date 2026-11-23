@@ -1,3 +1,4 @@
+import type { SubagentConfig } from "./config.ts";
 import type { CatalogHost } from "./catalog-runtime.ts";
 import type { CatalogSnapshot } from "./catalog-store.ts";
 import type { RunMeta } from "./registry.ts";
@@ -6,6 +7,7 @@ import type { RunMeta } from "./registry.ts";
 export interface ManagedLaunchPort {
     observeHealth?(reconcile: (ids: readonly string[]) => void): () => void;
     activeProviders?(): Record<string, string>;
+    scheduleRegistryCleanup(config: Pick<SubagentConfig, "cleanupTerminalRunRetentionMs" | "cleanupSessionRetentionMs" | "maxRegistryBytes">, onRemoved: (id: string) => void): void;
     backgroundTools(): readonly string[];
     readonly owner: { pid: number; start?: string };
     readonly identity: { root: string; instance: string; epoch: number };

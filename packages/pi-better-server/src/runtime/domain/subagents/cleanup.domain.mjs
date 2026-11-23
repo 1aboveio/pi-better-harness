@@ -1,7 +1,7 @@
 // Generated fixed launch domain from packages/pi-better-subagents/cleanup.ts. Do not edit directly.
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { ABANDONED_LAUNCH_GRACE_MS, abandonedLaunchRecord, baseDir, listMetas, observeArchivePublication, ownedByThisParent, orphanedTaskRuntimeProvenance, processStartToken, purgeAbandonedLaunch, readMeta, removeMetaArtifacts, removeRunDirectory, removeTaskRuntimeProvenance, runDir, listPendingParkedRuns, } from "./registry.domain.mjs";
+import { ABANDONED_LAUNCH_GRACE_MS, abandonedLaunchRecord, baseDir, launchAttemptInProgress, listMetas, observeArchivePublication, ownedByThisParent, orphanedTaskRuntimeProvenance, processStartToken, purgeAbandonedLaunch, readMeta, removeMetaArtifacts, removeRunDirectory, removeTaskRuntimeProvenance, runDir, listPendingParkedRuns, } from "./registry.domain.mjs";
 import { ConversationBusyError, ConversationLockUnavailableError, conversationLeaseDir, readConversationLease, readRetention, retainedRunIds, retainedSessionIds, withConversationMutation, } from "./continuation.domain.mjs";
 import { processExists } from "./spawn.domain.mjs";
 import { archiveCompletedAttempt, archivePublicationPending, listArchivedAttempts } from "./session-store.domain.mjs";
@@ -108,6 +108,9 @@ function safeStatMtime(path) {
 /** A metadata-less run directory, with its provenance record (#325). */
 function removeRun(id, errors) {
     try {
+        // A concurrent launch publishes its claim before metadata and drops it after publication.
+        if (launchAttemptInProgress(id) || readMeta(id))
+            return false;
         removeRunDirectory(id);
         return true;
     }
@@ -777,7 +780,7 @@ export function enforceRegistrySizeCapOnce(options = {}) {
     // the shortfall it reports stay honest.
     const keptBytes = plan.keptBytes + retainedBytes;
     try {
-        writeCleanupState({ ...state, lastSizeSweepAt: now });
+        writeCleanupState({ ...state, lastSizeSweepAt: options.now ?? Date.now() });
     }
     catch (err) {
         errors.push(`${cleanupStatePath()}: ${err instanceof Error ? err.message : String(err)}`);

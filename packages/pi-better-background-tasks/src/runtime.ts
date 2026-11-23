@@ -1,3 +1,4 @@
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fingerprint.js";
 import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -366,7 +367,7 @@ function spawnTask(
     status: "running",
     startedAt: now,
     lastProgressAt: now,
-    deadlineAt: params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined,
+    deadlineAt: taskDeadline(now, params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined),
     logPath,
     callback: params.callback,
     callbackOrigin,
@@ -658,7 +659,7 @@ function startWatchTask(
     status: "running",
     startedAt: now,
     lastProgressAt: now,
-    deadlineAt: timeoutSeconds ? now + timeoutSeconds * 1000 : undefined,
+    deadlineAt: taskDeadline(now, timeoutSeconds ? now + timeoutSeconds * 1000 : undefined),
     intervalMs: Math.max(1, params.interval_seconds ?? 30) * 1000,
     logPath: logPathFor(id),
     callback: params.callback,

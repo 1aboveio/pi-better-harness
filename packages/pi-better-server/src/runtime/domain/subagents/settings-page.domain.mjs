@@ -3,7 +3,7 @@ import * as Tui from "@earendil-works/pi-tui";
 import { isConcurrencyCap } from "./config.domain.mjs";
 import { DELEGATION_MODES } from "./delegation.domain.mjs";
 import { createSkillPicker } from "./skill-picker.domain.mjs";
-import { isTimingMinutes, MAX_TIMING_MINUTES, validatedTimingMinutes } from "./timing.domain.mjs";
+import { isTimingMinutes, validatedTimingMinutes } from "./timing.domain.mjs";
 const rows = [
     { kind: "mode", label: "Delegation mode" },
     { kind: "cap", label: "Concurrent subagents" },
@@ -22,14 +22,14 @@ const SKILL_MODES = [
     { mode: "none", label: "No skill catalog" },
     { mode: "explicit", label: "Selected skills" },
 ];
-const NO_LIMIT = "No limit";
+const MAX_TIMEOUT = "24 hours";
 function parseRunTimeout(input) {
     const text = input.trim();
-    if (text.toLowerCase() === NO_LIMIT.toLowerCase())
+    if (["no limit", MAX_TIMEOUT].includes(text.toLowerCase()))
         return 0;
     const minutes = Number(text);
-    if (!text || !isTimingMinutes(minutes)) {
-        throw new Error(`Enter No limit or a duration up to ${MAX_TIMING_MINUTES} minutes.`);
+    if (!text || !isTimingMinutes(minutes) || minutes > 1440) {
+        throw new Error("Enter 24 hours or a duration up to 1440 minutes.");
     }
     return minutes;
 }
@@ -51,7 +51,7 @@ function settingValue(kind, s) {
         case "mode": return s.mode;
         case "cap": return String(s.maxConcurrent);
         case "workspace": return s.gitWorkspace === "worktree" ? "Worktree" : "Clone";
-        case "timeout": return s.maxMinutes === 0 ? NO_LIMIT : `${s.maxMinutes} min`;
+        case "timeout": return s.maxMinutes === 0 || s.maxMinutes >= 1440 ? MAX_TIMEOUT : `${s.maxMinutes} min`;
         case "toolWait": return s.toolWaitMinutes === 0 ? "Off" : `${s.toolWaitMinutes} min`;
         case "stuck": return s.stuckMinutes === 0 ? "Off" : `${s.stuckMinutes} min`;
         case "skills": return skillLabel(s.skillsMode);
@@ -71,7 +71,7 @@ function description(kind, s) {
         case "workspace": return s.gitWorkspace === "worktree"
             ? "Create a linked worktree that shares the repository’s Git metadata."
             : "Create a separate local clone for each isolated Git workspace.";
-        case "timeout": return "Stop a subagent when its run reaches this limit. Choose No limit to disable the timeout.";
+        case "timeout": return "Stop a subagent when its run reaches this limit. The maximum is 24 hours.";
         case "toolWait": return "Notify the parent when a tool call stays open this long. Enter 0 to turn this alert off.";
         case "stuck": return "Notify the parent after this long without progress. Time spent waiting for a tool is excluded. Enter 0 to turn this alert off.";
         case "skills": return "Choose how new subagents discover skills.\n" + skillSource(s);
@@ -94,7 +94,7 @@ function shortcuts(kind, editing) {
     const change = confirm ? `${confirm}/Space` : "Space";
     const verb = kind === "agents" || kind === "choose" ? "open" : kind === "reset" ? "restore" : "change";
     const actions = editing ? [confirm && `${confirm} to apply`]
-        : kind === "timeout" ? ["Space for No limit", confirm && `${confirm} to edit minutes`]
+        : kind === "timeout" ? ["Space for 24 hours", confirm && `${confirm} to edit minutes`]
             : [`${change} to ${verb}`];
     if (!editing)
         actions.push("Ctrl+S to save defaults");
@@ -187,10 +187,10 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             else if (selected.kind === "timeout") {
                 if (key === " ") {
                     handlers.changeTiming("maxMinutes", 0);
-                    report("Run timeout set to No limit.");
+                    report("Run timeout set to 24 hours.");
                 }
                 else {
-                    startEditing(selected, settings.maxMinutes === 0 ? NO_LIMIT : String(settings.maxMinutes));
+                    startEditing(selected, settings.maxMinutes === 0 || settings.maxMinutes >= 1440 ? MAX_TIMEOUT : String(settings.maxMinutes));
                 }
             }
             else if (selected.kind === "skills") {

@@ -22,7 +22,7 @@ not child permissions or catalog definitions. `/subagents settings` (or simply
 Git workspace appear together. Run timeout and the two alert intervals come next,
 followed by skills, the Agents catalog, and Reset to defaults. As in
 `/harness-settings`, the cursor marks the active row and its help appears
-below the list. On Run timeout, Space selects **No limit** and Enter edits
+below the list. On Run timeout, Space selects **24 hours** and Enter edits
 the duration. Each alert has a separate interval in minutes. Enter `0`
 to turn that alert off. Skill exposure cycles between
 Discover automatically and No skill catalog. The Selected skills row opens the
@@ -312,7 +312,7 @@ a parent that only notices late tends to kill a child that was still making
 progress. Every run gets a tool-wait alert, stall detection, and a 60-minute hard
 timeout by default. Soft deadlines remain opt-in because total runtime does not
 distinguish a slow agent from a stalled one.
-Choose **Run timeout** in `/subagents settings`. Enter a duration in minutes, type **No limit**, or press Space to select **No limit**. Ctrl+S saves the choice for future sessions. Changes apply to
+Choose **Run timeout** in `/subagents settings`. Enter a duration in minutes, type **24 hours**, or press Space to select **24 hours**. Ctrl+S saves the choice for future sessions. Changes apply to
 new attempts, not runs already in progress.
 
 | Control | Default | What happens |
@@ -323,18 +323,15 @@ new attempts, not runs already in progress.
 | Tool-wait window (`tool_wait_minutes`) | 5 | One tool call that stays open this long sends one factual parent wake for that call, including when it is a normal long test. Parallel calls alert independently. The alert never stops, cancels, or restarts the run, and a later call can alert on its own. |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. Time inside a running tool call is excluded, so tool waiting and no-progress are reported separately. |
 
-`0` turns a control off. `null` or an omitted value means "inherit": on
+`max_minutes: 0` uses the 24-hour maximum. For other controls, `0` turns the control off. `null` or an omitted value means "inherit": on
 `subagent_spawn` that is the configured default; on a `subagent_spawn_batch` job
 it is the `shared` value, then the configured default. Values are minutes and
 may be fractional. A job's own number (including `0`) wins over `shared`.
 
 **Known limits of the deadline hold.**
 
-- `max_minutes: 0` turns the ceiling off, and the ceiling is the only control
-  that bounds the whole run including a tool call that never ends. A separate
-  sandbox command time limit can bound individual commands. With the run ceiling off, a steer stuck behind a
-  hung tool call is never delivered, the deadline stop stays held, and the run
-  is never stopped by that deadline. Opt into a ceiling to bound the whole run.
+- Active runs fail when they reach 24 hours, including while waiting for a tool.
+  Progress and daemon restarts preserve the original deadline.
 - The parent reads at most the last 32 MiB of a child log after `/reload`. It
   also records the calls it last saw open in the run's metadata on each
   supervision tick, so a reload normally keeps the hold and the not-stuck

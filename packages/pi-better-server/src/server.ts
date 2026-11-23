@@ -20,6 +20,7 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
+import { startTaskExpiry } from "./runtime/task-expiry.ts";
 import { RuntimeCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
@@ -594,6 +595,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let timer: ReturnType<typeof setInterval> | undefined;
     let finishClosed!: () => void;
     const closed = new Promise<void>(resolve => { finishClosed = resolve; });
+    const stopTaskExpiry = startTaskExpiry(controlStore, log);
     const daemon: Daemon = {
       serverDir,
       socketPath,
@@ -625,6 +627,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   // Unknown observation fails closed for an irreversible activation.
                   upgradeBlockers = await work().upgradeObligations();
                   if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
+                  if (launches?.cleaningRegistry) throw new Error("Waiting for subagent registry cleanup");
                   if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
@@ -701,6 +704,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             writeFileSync(temporary, JSON.stringify({ token: instanceId, pid: process.pid }), { mode: 0o600 });
             renameSync(temporary, join(serverDir, "idle-stop-intent.json"));
           }
+          stopTaskExpiry();
           if (timer) clearInterval(timer);
           await pendingMaintenance?.catch(error => log(`maintenance interrupted during shutdown: ${String(error)}`));
           if (upgradeCommitted) {

@@ -7,6 +7,7 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { expireWaits, overdueOperations } from "./expiry.mjs";
 import { setUpgradeFence } from "./upgrade.mjs";
 import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks } from './background-parent-callbacks.mjs';
 import { BackgroundRequests } from "./background-requests.mjs";
@@ -50,6 +51,8 @@ export function openStore(options) {
         }
     };
     const store = {
+        overdueOperations() { alive(); return overdueOperations(ctx); },
+        expireWaits() { alive(); return expireWaits(ctx); },
         subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },

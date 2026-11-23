@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/registry.ts. Do not edit directly.
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.domain.mjs";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -113,6 +114,8 @@ export function inspectMeta(id) {
                 metaCache.delete(id);
                 return { id, found: true, readable: false, error: `invalid metadata: ${invalid}` };
             }
+            if (meta.status === "running")
+                meta.deadlineAt = taskDeadline(meta.startedAt, meta.deadlineAt);
             metaCache.set(id, meta);
             return { id, meta, found: true, readable: true };
         }

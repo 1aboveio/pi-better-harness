@@ -77,7 +77,7 @@ describe("suspected-stall attention", () => {
 
   it("delivers once per silent spell through the existing grace scheduler and journal receipts", async () => {
     at(300_000);
-    const unchanged = structuredClone(task);
+    const unchanged = { ...structuredClone(task), deadlineAt: startedAt + 24 * 60 * 60_000 };
     expect(observeAndSchedule()).toBe(true);
     const first = actionableFailures(state());
     expect(first).toEqual([expect.objectContaining({ category: "stall", status: "unresolved", count: 1 })]);

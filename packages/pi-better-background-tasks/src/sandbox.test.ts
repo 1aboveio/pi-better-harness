@@ -849,7 +849,7 @@ backendDescribe("background application settings on a real launch", () => {
     }, project);
     try {
       const terminal = await waitForStatus(meta.id, "timed_out", 5_000);
-      expect(terminal?.deadlineAt).toBeUndefined();
+      expect(terminal?.deadlineAt).toBe(terminal!.startedAt + 24 * 60 * 60_000);
       expect(persistedCap(terminal)).toBe(0.25);
       expect(terminal?.result).toMatchObject({ reason: expect.stringContaining("command time limit of 0.25s") });
     } finally {
@@ -883,7 +883,7 @@ backendDescribe("background application settings on a real launch", () => {
     }
   });
 
-  it("caps each watch check while timeout_seconds:0 keeps the watch lifetime unbounded", async () => {
+  it("caps each watch check while timeout_seconds:0 uses the 24-hour watch lifetime", async () => {
     const project = launchProject("settings-watch-cap");
     const { pi, events } = createPi();
     createSandboxPublisher(events).announce({
@@ -902,7 +902,7 @@ backendDescribe("background application settings on a real launch", () => {
     }, project);
     try {
       const terminal = await waitForStatus(meta.id, "timed_out", 5_000);
-      expect(terminal?.deadlineAt).toBeUndefined();
+      expect(terminal?.deadlineAt).toBe(terminal!.startedAt + 24 * 60 * 60_000);
       expect(persistedCap(terminal)).toBe(0.25);
       expect(terminal?.result).toMatchObject({ reason: expect.stringContaining("command time limit of 0.25s") });
     } finally {

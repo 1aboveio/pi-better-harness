@@ -1,3 +1,4 @@
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.ts";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -137,6 +138,7 @@ export function inspectMeta(id: string): MetaInspection {
         metaCache.delete(id);
         return { id, found: true, readable: false, error: `invalid metadata: ${invalid}` };
       }
+      if (meta.status === "running") meta.deadlineAt = taskDeadline(meta.startedAt, meta.deadlineAt);
       metaCache.set(id, meta);
       return { id, meta, found: true, readable: true };
     } catch (error) {

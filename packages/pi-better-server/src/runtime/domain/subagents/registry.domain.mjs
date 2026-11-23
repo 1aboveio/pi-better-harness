@@ -1,6 +1,20 @@
 // Generated fixed launch domain from packages/pi-better-subagents/registry.ts. Do not edit directly.
 import { reclaimWorkspace } from "./isolated-workspace.domain.mjs";
 import { retainResult } from "./retained-result.domain.mjs";
+/**
+ * Run registry — durable metadata for each spawned subagent.
+ *
+ * The authoritative record for every run is a `meta.json` sidecar on disk, so
+ * `list` / `output` / `result` keep working across foreground turns, `/reload`,
+ * and even a full pi restart. In-memory state holds only the live exit handlers
+ * for runs this process spawned.
+ *
+ * Catalog launches may attach an optional immutable `catalog` snapshot to that
+ * same record. Display-label reservations live under `{baseDir()}/labels`
+ * (see catalog-identity.ts). They are not a second registry, and removing a
+ * run directory does not delete them.
+ */
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.domain.mjs";
 import { assignmentRetainsEvidence } from "./assignment-outcomes.domain.mjs";
 import { processStartToken } from "./process-identity.mjs";
 export { processStartToken } from "./process-identity.mjs";
@@ -1022,10 +1036,27 @@ export function onMetaChanged(listener) {
     metaChangedListeners.add(listener);
     return () => metaChangedListeners.delete(listener);
 }
+/** Drop volatile state in the process observing a committed cleanup. */
+export function notifyRunRemoved(id, meta = metaCache.get(id)) {
+    metaCache.delete(id);
+    for (const listener of metaChangedListeners) {
+        try {
+            listener(meta);
+        }
+        catch { /* best effort */ }
+    }
+}
+function restoreTaskDeadline(meta) {
+    if (meta.status !== "running" && meta.status !== "orphaned")
+        return;
+    meta.timing ??= { graceMs: 0 };
+    meta.timing.ceilingAt = taskDeadline(meta.startedAt, meta.timing.ceilingAt);
+}
 export function readMeta(id) {
     try {
         registryIo.metadataFileReads += 1;
         const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8"));
+        restoreTaskDeadline(meta);
         metaCache.set(id, meta);
         return meta;
     }
@@ -1069,16 +1100,10 @@ export function removeMetaArtifacts(meta, options = {}) {
         if (scratch) {
             rmSync(scratch, { recursive: true, force: true });
         }
-        metaCache.delete(meta.id);
         removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
-        for (const listener of metaChangedListeners) {
-            try {
-                listener(meta);
-            }
-            catch { /* best effort */ }
-        }
+        notifyRunRemoved(meta.id, meta);
         return true;
     }
     catch (error) {
@@ -1329,6 +1354,7 @@ export function inspectRunMeta(id) {
         metaCache.delete(id);
         return { kind: "unreadable", detail: `invalid metadata: ${invalid}` };
     }
+    restoreTaskDeadline(meta);
     metaCache.set(id, meta);
     return { kind: "ok", meta };
 }

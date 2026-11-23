@@ -84,7 +84,7 @@ describe("bg_task_spawn_batch", () => {
     const overridden = await waitFor(result.launched[1]!.id, (m) => m.status === "succeeded");
     expect(inherited).toMatchObject({ batchId: result.batchId, batchName: "local builds", callback: false, callbackOrigin: origin, cwd, operationId: "shared-operation", env: { BATCH_COLOR: "shared", SHARED_ONLY: "present" } });
     expect(overridden).toMatchObject({ batchId: result.batchId, batchName: "local builds", callback: true, callbackOrigin: origin, cwd, env: { BATCH_COLOR: "job" } });
-    expect(overridden.deadlineAt).toBeUndefined();
+    expect(overridden.deadlineAt).toBe(overridden.startedAt + 24 * 60 * 60_000);
     expect(overridden.operationId).toBeUndefined();
     expect(overridden.expectedExitCodes).toBeUndefined();
     expect(readFileSync(inherited.logPath, "utf8")).toContain(`shared present ${realpathSync(cwd)}`);

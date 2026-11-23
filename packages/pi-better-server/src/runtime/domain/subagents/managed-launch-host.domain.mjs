@@ -10,7 +10,7 @@ import extension from "./index.domain.mjs";
 import { bindRuntimeOutcomeStore } from "./assignment-outcomes.domain.mjs";
 import { catalogSnapshotFromWire } from "./catalog-store.domain.mjs";
 import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
-import { baseDir, nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.domain.mjs";
+import { baseDir, nextRunId, processStartToken, listMetas, notifyRunRemoved, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.domain.mjs";
 import { recoverLaunchMetadata } from "./managed-launch-recovery.domain.mjs";
 import { assertSubagentHandoff } from "./managed-launch-ownership.domain.mjs";
 import { createOwnerCapacityGates } from "./capacity.mjs";
@@ -42,6 +42,7 @@ export class ManagedSubagentHost {
     closeJournal;
     epoch;
     pending = 0;
+    registryCleanup;
     requestSequence = 0;
     requestRecords = new Map();
     foldRecord;
@@ -196,7 +197,8 @@ export class ManagedSubagentHost {
     }
     capacityFor = createOwnerCapacityGates(({ pid, start }) => listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
         + this.journal.unresolvedAttempts().filter((attempt) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
-    get busy() { return this.pending > 0 || Boolean(this.failureResponse); }
+    get cleaningRegistry() { return this.registryCleanup !== undefined; }
+    get busy() { return this.pending > 0 || Boolean(this.failureResponse) || this.cleaningRegistry; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
             lifecycle: { ...this.lifecycleMetrics, activeDeadlines: this.healthDue.size },
@@ -339,10 +341,33 @@ export class ManagedSubagentHost {
         process.kill(record.pid, 0);
         return record;
     }
+    scheduleRegistryCleanup = (config, onRemoved) => {
+        if (this.registryCleanup)
+            return;
+        this.registryCleanup = new Promise((resolve, reject) => {
+            const worker = new Worker(new URL("./registry-cleanup-worker.mjs", import.meta.url), {
+                workerData: { root: this.root, config },
+                execArgv: import.meta.url.endsWith(".domain.mjs") ? [] : ["--import", import.meta.resolve("tsx")],
+            });
+            worker.on("message", (id) => {
+                notifyRunRemoved(id);
+                onRemoved(id);
+            });
+            worker.once("error", reject);
+            worker.once("exit", code => {
+                if (code === 0)
+                    resolve();
+                else
+                    reject(new Error(`Registry cleanup worker exited with code ${code}`));
+            });
+        }).catch(error => console.error("[pi-better-subagents] Registry cleanup failed:", error))
+            .finally(() => { this.registryCleanup = undefined; });
+    };
     initialize() {
         return this.initializing ??= (async () => {
             const host = this;
             const port = {
+                scheduleRegistryCleanup: this.scheduleRegistryCleanup,
                 observeHealth: reconcile => host.observeHealth(reconcile),
                 activeProviders: () => host.current.activeProviders ?? {},
                 backgroundTools: () => host.current.background?.available === true ? host.current.background.tools : [],
@@ -598,6 +623,7 @@ export class ManagedSubagentHost {
         this.healthClose?.();
         Atomics.store(this.foldRevocation, 0, 1);
         await this.tail.catch(() => undefined);
+        await this.registryCleanup;
         await this.failureWorker?.terminate();
         this.failureWorker = undefined;
         if (failureFoldRevocations.get(this.root) === this.foldRevocation)

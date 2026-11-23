@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/index.ts. Do not edit directly.
+import { taskDeadline } from "./shared-operation-coordinator/src/task-lifetime.domain.mjs";
 import { shouldRestoreWorkObservation } from "./shared-work-client.mjs";
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.domain.mjs";
 import { captureLaunchContext } from "./launch-context.domain.mjs";
@@ -44,7 +45,7 @@ import { ORDINARY_TOOL_PROVIDERS, activeChildProviders, ordinaryChildConfig, add
 import { createSubagentSettingsPage } from "./settings-page.domain.mjs";
 import { deliverSubagentPrompt, effectiveSubagentSettings, subagentSettingsTool } from "./effective-settings.domain.mjs";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.domain.mjs";
-import { continuationTimingParams, decideTiming, describeTiming, DEFAULT_TIMING_MINUTES, emptyProgress, foldProgress, formatTimingLimits, isTimingMinutes, isProgressRelevantLine, resolveRunTiming, steerText, stuckAlertText, TIMING_ENV, timingParameterSchemas, toolWaitAlertText, validatedTimingMinutes, } from "./timing.domain.mjs";
+import { continuationTimingParams, configuredMaxMinutes, decideTiming, describeTiming, DEFAULT_TIMING_MINUTES, emptyProgress, foldProgress, formatTimingLimits, isTimingMinutes, isProgressRelevantLine, resolveRunTiming, steerText, stuckAlertText, TIMING_ENV, timingParameterSchemas, toolWaitAlertText, validatedTimingMinutes, } from "./timing.domain.mjs";
 import { readAppendedLines } from "./log-cursor.domain.mjs";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode } from "./delegation.domain.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.domain.mjs";
@@ -1156,7 +1157,12 @@ function stopForTiming(pi, id, reason, now) {
  */
 function enforceTiming(pi, meta, now) {
     const timing = meta.timing;
-    if (!timing || timing.stopReason)
+    if (!timing)
+        return false;
+    if ((meta.status === "running" || meta.status === "orphaned") && now >= (timing.lifetimeAt ?? taskDeadline(meta.startedAt))) {
+        return stopForTiming(pi, meta.id, "ceiling", now);
+    }
+    if (timing.stopReason)
         return false;
     // The ceiling also bounds an orphaned run (child gone, its process group still alive).
     if (meta.status === "orphaned") {
@@ -1656,10 +1662,7 @@ function navigatorCloseRun(id) {
     if (outcome.action === "dismissed" || outcome.action === "stopped-and-dismissed")
         pendingNavigatorDismissals.add(id);
     // A closed row is off the hot path: release its caches and retained events.
-    spendCache.delete(id);
-    healthLogCache.delete(id);
-    resetChildEventLogCursor(id);
-    resetParseRunCursor(id);
+    forgetRunCaches(id);
     syncHealthTicker();
     // Close stops (or log-finalizes) the run, which is a terminal transition:
     // queue its one completion callback so no terminal state is silent (#624).
@@ -2037,6 +2040,12 @@ function resolvePiBinary() {
         cachedPi = "pi";
     }
     return cachedPi;
+}
+function forgetRunCaches(id) {
+    spendCache.delete(id);
+    healthLogCache.delete(id);
+    resetChildEventLogCursor(id);
+    resetParseRunCursor(id);
 }
 function prepareLaunchWorkspace(options, isolated) {
     const built = import.meta.url.endsWith(".domain.mjs");
@@ -2488,13 +2497,13 @@ export default function (pi, managed) {
             const defaults = resolveRunTiming({ settings: cfg, env: process.env, startedAt: 0 });
             const minutes = (ms) => ms === undefined ? 0 : ms / 60_000;
             return {
-                maxMinutes: minutes(effective.ceilingAt),
+                maxMinutes: configuredMaxMinutes(sessionTimeout, timingSettingsFor(cfg), process.env),
                 toolWaitMinutes: minutes(effective.toolWaitMs),
                 stuckMinutes: minutes(effective.stuckMs),
                 timeoutSource: timeoutSource(),
                 toolWaitSource: sourceFor("toolWaitMinutes"),
                 stuckSource: sourceFor("stuckMinutes"),
-                defaultMaxMinutes: minutes(defaults.ceilingAt),
+                defaultMaxMinutes: configuredMaxMinutes({}, cfg, process.env),
                 defaultToolWaitMinutes: minutes(defaults.toolWaitMs),
                 defaultStuckMinutes: minutes(defaults.stuckMs),
             };
@@ -2949,20 +2958,17 @@ export default function (pi, managed) {
             model = parsed.model;
             thinking = parsed.thinking;
         }
-        // Best-effort daily hygiene for durable tmp state. The marker makes
-        // this effectively free after the first subagent launch each day.
-        // Resume has already validated this history. Retiring it here would let
-        // native --session create an empty replacement before the child runs.
-        if (!resume)
-            runDailyCleanupOnce({ config: cfg });
-        // Age retires history; this bounds the peak one busy day can reach.
-        // Rate-limited inside cleanup.ts, and never on the UI hot path.
-        const capped = resume ? { removed: [] } : enforceRegistrySizeCapOnce({ config: cfg });
-        for (const id of capped.removed) {
-            spendCache.delete(id);
-            healthLogCache.delete(id);
-            resetChildEventLogCursor(id);
-            resetParseRunCursor(id);
+        // Continuations revalidate and lease their saved history. Only fresh launches request maintenance.
+        if (!resume) {
+            if (managed) {
+                const { cleanupTerminalRunRetentionMs, cleanupSessionRetentionMs, maxRegistryBytes } = cfg;
+                managed.scheduleRegistryCleanup({ cleanupTerminalRunRetentionMs, cleanupSessionRetentionMs, maxRegistryBytes }, forgetRunCaches);
+            }
+            else {
+                runDailyCleanupOnce({ config: cfg });
+                for (const removed of enforceRegistrySizeCapOnce({ config: cfg }).removed)
+                    forgetRunCaches(removed);
+            }
         }
         const callbackOrigin = internal?.parkOwner
             ? { cwd: internal.parkOwner.workspace, sessionId: internal.parkOwner.sessionId }
@@ -3505,6 +3511,11 @@ export default function (pi, managed) {
                 trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
             });
             const startedAt = Date.now();
+            const timing = resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt });
+            if (internal?.resumeWait && resume) {
+                timing.lifetimeAt = resume.prior.timing?.lifetimeAt ?? taskDeadline(resume.prior.startedAt);
+                timing.ceilingAt = Math.min(timing.lifetimeAt, resume.prior.timing?.ceilingAt ?? Infinity, timing.ceilingAt);
+            }
             const meta = {
                 assignment,
                 outcomeSupport: { version: 1, available: Boolean(assignment), ...(!assignment ? { reason: "Legacy host has no verified parent session/transcript; durable assignment delivery is unavailable." } : {}) },
@@ -3554,9 +3565,12 @@ export default function (pi, managed) {
                         tools: bridgePlan.tools,
                     },
                 } : {}),
-                timing: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt }),
+                timing,
             };
             const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
+            if (internal?.resumeWait && Date.now() >= timing.ceilingAt) {
+                throw new PreSpawnResumeError("The parked task reached its execution time limit before dispatch.");
+            }
             if (isolated)
                 markWorkspaceWriter(isolated, id);
             const managedEnv = managed?.beforeSpawn({ id, sessionId, lease: lease.token, leasePath: lease.path,
@@ -3723,7 +3737,7 @@ export default function (pi, managed) {
         if (!prior)
             throw new PreSpawnResumeError(`Cannot resume ${input.park.runId}: its run record is gone.`);
         const now = Date.now();
-        if (prior.timing?.deadlineAt !== undefined && now >= prior.timing.deadlineAt) {
+        if (now >= taskDeadline(prior.startedAt, prior.timing?.ceilingAt) || (prior.timing?.deadlineAt !== undefined && now >= prior.timing.deadlineAt)) {
             throw new PreSpawnResumeError(`Cannot resume ${input.park.runId}: its assignment deadline passed while it was parked. The wait is held for the owner.`);
         }
         let plan;
@@ -3925,7 +3939,7 @@ export default function (pi, managed) {
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. When the task already names its SKILL.md by path, pass skills with those absolute paths (or [] for none) so the child does not advertise the whole skills catalog. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
-            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Hard timeouts default to 60 minutes; max_minutes overrides that default (0 disables). Soft deadlines remain opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
+            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Hard timeouts default to 60 minutes; max_minutes overrides that default up to 24 hours (0 selects the maximum). Soft deadlines remain opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Git writers receive separate checkouts by default. /subagents settings selects Clone or Worktree. isolation:false selects the live checkout. A sandboxed Worktree can return its files or explicitly continue in a verified Clone with recover_in_clone:true.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
             "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
@@ -4461,7 +4475,7 @@ export default function (pi, managed) {
                 : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
             const timing = timingState();
             ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. ` +
-                `Run timeout: ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "No limit"}. Tool-wait alert: ${timing.toolWaitMinutes} min. ` +
+                `Run timeout: ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "24 hours"}. Tool-wait alert: ${timing.toolWaitMinutes} min. ` +
                 `No-progress alert: ${timing.stuckMinutes} min. Skills: ${skillChoice}. ` +
                 `Use /subagents mode <mode>, cap <number>, tool-wait <minutes>, stuck <minutes>, or settings; /subagents save persists them.`, "info");
         }
@@ -4553,7 +4567,7 @@ export default function (pi, managed) {
                         : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
                     const timing = timingState();
                     if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}, ` +
-                        `run timeout ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "No limit"}, tool-wait alert ${timing.toolWaitMinutes} min, ` +
+                        `run timeout ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "24 hours"}, tool-wait alert ${timing.toolWaitMinutes} min, ` +
                         `no-progress alert ${timing.stuckMinutes} min, and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;

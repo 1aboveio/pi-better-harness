@@ -28,6 +28,7 @@
  *   cleanup deadline discloses it as unproven).
  */
 
+import { taskDeadline } from "../shared-operation-coordinator/src/task-lifetime.ts";
 import { spawn } from "node:child_process";
 import { closeSync, openSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -692,20 +693,20 @@ async function waitForNextCheck(ctx: RunnerContext, delayMs: number): Promise<bo
 
 async function runWatch(ctx: RunnerContext): Promise<void> {
   const intervalMs = ctx.launch.intervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
-  const deadlineAt = ctx.launch.taskTimeoutMs === undefined ? undefined : ctx.startedAt + ctx.launch.taskTimeoutMs;
+  const deadlineAt = taskDeadline(ctx.launch.createdAt, ctx.launch.taskTimeoutMs === undefined ? undefined : ctx.startedAt + ctx.launch.taskTimeoutMs);
   while (!ctx.finalized) {
     if (observeStop(ctx)) {
       finalize(ctx, cancelledTerminal("stopped by request", "none"));
       return;
     }
-    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    if (Date.now() >= deadlineAt) {
       finalize(ctx, { status: "timed_out", reason: "timeout", exitCode: null, signal: null, timedOut: true, groupCleanup: "none" });
       return;
     }
-    const remaining = deadlineAt === undefined ? undefined : Math.max(1, deadlineAt - Date.now());
+    const remaining = Math.max(1, deadlineAt - Date.now());
     const capMs = ctx.launch.commandTimeoutMs;
-    const pollTimeoutMs = capMs === undefined ? remaining : remaining === undefined ? capMs : Math.min(remaining, capMs);
-    const capBound = capMs !== undefined && (remaining === undefined || capMs < remaining);
+    const pollTimeoutMs = capMs === undefined ? remaining : Math.min(remaining, capMs);
+    const capBound = capMs !== undefined && capMs < remaining;
     const checkStartedAt = Date.now();
     const outcome = await runChild(ctx, {
       argv: ctx.launch.command.argv,
@@ -838,9 +839,13 @@ async function runWatch(ctx: RunnerContext): Promise<void> {
 
 async function runProcess(ctx: RunnerContext): Promise<void> {
   const { argv, cwd } = ctx.launch.command;
-  const deadlineAt = ctx.launch.taskTimeoutMs === undefined ? undefined : ctx.startedAt + ctx.launch.taskTimeoutMs;
+  const deadlineAt = taskDeadline(ctx.launch.createdAt, ctx.launch.taskTimeoutMs === undefined ? undefined : ctx.startedAt + ctx.launch.taskTimeoutMs);
+  if (Date.now() >= deadlineAt) {
+    finalize(ctx, { status: "timed_out", reason: "timeout", exitCode: null, signal: null, timedOut: true, groupCleanup: "none" });
+    return;
+  }
   const capAt = ctx.launch.commandTimeoutMs === undefined ? undefined : ctx.startedAt + ctx.launch.commandTimeoutMs;
-  const capBound = capAt !== undefined && (deadlineAt === undefined || capAt <= deadlineAt);
+  const capBound = capAt !== undefined && capAt <= deadlineAt;
   const killAt = capBound ? capAt : deadlineAt;
 
   const outcome = await runChild(ctx, {
