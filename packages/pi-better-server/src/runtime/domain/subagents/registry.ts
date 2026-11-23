@@ -1316,6 +1316,14 @@ export function onMetaChanged(listener: (meta?: RunMeta) => void): () => void {
     return () => metaChangedListeners.delete(listener);
 }
 
+/** Drop volatile state in the process observing a committed cleanup. */
+export function notifyRunRemoved(id: string, meta = metaCache.get(id)): void {
+    metaCache.delete(id);
+    for (const listener of metaChangedListeners) {
+        try { listener(meta); } catch { /* best effort */ }
+    }
+}
+
 export function readMeta(id: string): RunMeta | undefined {
     try {
         registryIo.metadataFileReads += 1;
@@ -1376,13 +1384,10 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
         if (scratch) {
             rmSync(scratch, { recursive: true, force: true });
         }
-        metaCache.delete(meta.id);
         removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
-        for (const listener of metaChangedListeners) {
-            try { listener(meta); } catch { /* best effort */ }
-        }
+        notifyRunRemoved(meta.id, meta);
         return true;
     } catch (error) {
         options.errors?.push(meta.cwd + ": " + String(error));

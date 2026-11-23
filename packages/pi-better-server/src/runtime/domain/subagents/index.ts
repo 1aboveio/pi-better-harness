@@ -1711,10 +1711,7 @@ function navigatorCloseRun(id: string) {
     });
     if (outcome.action === "dismissed" || outcome.action === "stopped-and-dismissed") pendingNavigatorDismissals.add(id);
     // A closed row is off the hot path: release its caches and retained events.
-    spendCache.delete(id);
-    healthLogCache.delete(id);
-    resetChildEventLogCursor(id);
-    resetParseRunCursor(id);
+    forgetRunCaches(id);
     syncHealthTicker();
     // Close stops (or log-finalizes) the run, which is a terminal transition:
     // queue its one completion callback so no terminal state is silent (#624).
@@ -2069,6 +2066,13 @@ function resolvePiBinary(): string {
         cachedPi = "pi";
     }
     return cachedPi;
+}
+
+function forgetRunCaches(id: string): void {
+    spendCache.delete(id);
+    healthLogCache.delete(id);
+    resetChildEventLogCursor(id);
+    resetParseRunCursor(id);
 }
 
 function prepareLaunchWorkspace(options: SubagentWorkspaceOptions, isolated?: IsolatedWorkspace): Promise<SubagentWorkspace> {
@@ -3021,19 +3025,15 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             model = parsed.model;
             thinking = parsed.thinking;
         }
-        // Best-effort daily hygiene for durable tmp state. The marker makes
-        // this effectively free after the first subagent launch each day.
-        // Resume has already validated this history. Retiring it here would let
-        // native --session create an empty replacement before the child runs.
-        if (!resume) runDailyCleanupOnce({ config: cfg });
-        // Age retires history; this bounds the peak one busy day can reach.
-        // Rate-limited inside cleanup.ts, and never on the UI hot path.
-        const capped = resume ? { removed: [] } : enforceRegistrySizeCapOnce({ config: cfg });
-        for (const id of capped.removed) {
-            spendCache.delete(id);
-            healthLogCache.delete(id);
-            resetChildEventLogCursor(id);
-            resetParseRunCursor(id);
+        // Continuations revalidate and lease their saved history. Only fresh launches request maintenance.
+        if (!resume) {
+            if (managed) {
+                const { cleanupTerminalRunRetentionMs, cleanupSessionRetentionMs, maxRegistryBytes } = cfg;
+                managed.scheduleRegistryCleanup({ cleanupTerminalRunRetentionMs, cleanupSessionRetentionMs, maxRegistryBytes }, forgetRunCaches);
+            } else {
+                runDailyCleanupOnce({ config: cfg });
+                for (const removed of enforceRegistrySizeCapOnce({ config: cfg }).removed) forgetRunCaches(removed);
+            }
         }
         const callbackOrigin = internal?.parkOwner
             ? { cwd: internal.parkOwner.workspace, sessionId: internal.parkOwner.sessionId }

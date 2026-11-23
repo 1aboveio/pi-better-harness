@@ -11,6 +11,7 @@ import { join, relative, sep } from "node:path";
 import {    ABANDONED_LAUNCH_GRACE_MS,
     abandonedLaunchRecord,
     baseDir,
+    launchAttemptInProgress,
     listMetas,
     observeArchivePublication,
     ownedByThisParent,
@@ -236,6 +237,8 @@ function safeStatMtime(path: string): number | undefined {
 /** A metadata-less run directory, with its provenance record (#325). */
 function removeRun(id: string, errors: string[]): boolean {
     try {
+        // A concurrent launch publishes its claim before metadata and drops it after publication.
+        if (launchAttemptInProgress(id) || readMeta(id)) return false;
         removeRunDirectory(id);
         return true;
     } catch (err) {
@@ -977,7 +980,7 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
     const keptBytes = plan.keptBytes + retainedBytes;
 
     try {
-        writeCleanupState({ ...state, lastSizeSweepAt: now });
+        writeCleanupState({ ...state, lastSizeSweepAt: options.now ?? Date.now() });
     } catch (err) {
         errors.push(`${cleanupStatePath()}: ${err instanceof Error ? err.message : String(err)}`);
     }

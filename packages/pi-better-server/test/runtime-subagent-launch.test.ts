@@ -2,13 +2,46 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
+import { closeSync, constants, openSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 import { readBoundedTail } from "../../pi-better-subagents/shared-log-utils.ts";
+
+// Hold an actual cleanup read until the socket and launch receipt have both responded.
+async function launchDuringRegistryCleanup(root: string, transport: string, agent: string, launch: () => Promise<any>) {
+  const dir = join(root, "pi-better-subagents");
+  mkdirSync(dir, { recursive: true });
+  const marker = join(dir, "cleanup-state.json");
+  assert.equal(spawnSync("mkfifo", [marker]).status, 0);
+  const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
+  let writer: number | undefined;
+  let finished = false;
+  const readWhileBlocked = async () => {
+    const deadline = Date.now() + 15000;
+    while (!finished && Date.now() < deadline) {
+      try { writer = openSync(marker, constants.O_WRONLY | constants.O_NONBLOCK); break; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENXIO") throw error; }
+      await delay(10);
+    }
+    if (finished) return;
+    assert.notEqual(writer, undefined, "Registry cleanup never opened its marker");
+    const snapshot = await observer.get({ background: true, cwd: root });
+    assert.ok(Array.isArray(snapshot.rows));
+  };
+  try {
+    await observer.ready;
+    const [receipt] = await Promise.all([launch(), readWhileBlocked()]);
+    return receipt;
+  } finally {
+    finished = true;
+    rmSync(marker, { force: true });
+    if (writer !== undefined) closeSync(writer);
+    observer.close();
+  }
+}
 
 for (const journalOnly of [false, true]) test(`registered SDK launch survives parent exit and ${journalOnly ? "journal-only crash recovery" : "ordinary restart"}`, { timeout: 60000 }, async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
@@ -54,7 +87,7 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
       assert.equal(message.error, undefined, `${message.stack ?? message.error}\n${errors}`); return message.result;
     };
     const params = { prompt: "Execute fixture", role: "fixture", model: "openai/gpt-4.1", callback: false, tools: "read", skills: [] };
-    const first = await launch(params);
+    const first = journalOnly ? await launch(params) : await launchDuringRegistryCleanup(root, transport, agent, () => launch(params));
     assert.equal(first.details.launched, true);
     attempts.push(first.details.runId);
     const frozen = JSON.stringify(metaFor(first.details.runId).recipe);

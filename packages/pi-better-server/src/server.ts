@@ -625,6 +625,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   // Unknown observation fails closed for an irreversible activation.
                   upgradeBlockers = await work().upgradeObligations();
                   if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
+                  if (launches?.cleaningRegistry) throw new Error("Waiting for subagent registry cleanup");
                   if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
