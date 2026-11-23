@@ -261,9 +261,52 @@ prompt; in Instructions, it restores the prompt while preserving model/effort.
 A user Markdown override is archived when its prompt is reset. Saved defaults
 survive sessions and upgrades.
 
+### Session recap
+
 In `/harness-settings`, **Session recap** enables a short summary above the editor after a conversation settles. It defaults to Off. **Recap prompt** opens the current instructions for editing. Save a blank prompt to restore the default or press Escape to keep your previous instructions. Both settings are saved as user defaults. Editing the prompt takes effect on the next summary.
 
 Each recap uses a separate request to the model that answered. It sends a bounded selection of recent user and assistant text. Pi hosts with the public configured model streaming API can generate summaries; existing summaries restore locally on older hosts. Recap and the optional Next line stay on their session branch. The summary request has its own session identity and usage. The main model receives its usual prompt, tools and conversation.
+
+### Harness instructions
+
+Open `/harness-settings` and toggle **Harness instructions** from **Off** to
+**On**. Choose **Instructions prompt → Edit** to edit the current Markdown.
+Saving updates the Harness block and stores the text in the global Pi settings
+under `piBetterHarness.instructionsPrompt`. Turning the switch off removes the
+block. Turning it back on restores the saved text. Changes apply on the next
+startup or explicit `/reload`.
+
+The CLI manages the same switch. To enable it from the command line:
+
+```sh
+npx pi-better-harness instructions enable
+```
+
+By default, Harness copies its bundled `AGENTS.md` into a marked block in
+`<agent-dir>/APPEND_SYSTEM.md`. It preserves text outside the markers,
+including blocks owned by other extensions. To use your own Markdown, set
+`piBetterHarness.instructionsFile` in the global Pi `settings.json` to an
+absolute path or a path relative to the agent directory (normally
+`~/.pi/agent`), then run `instructions sync`. A prompt saved in the editor takes precedence
+over this file. Remove `instructionsPrompt` and sync to use the file again.
+
+| Command | Effect |
+| --- | --- |
+| `npx pi-better-harness instructions enable` | Create or refresh the block. |
+| `npx pi-better-harness instructions sync` | Refresh an existing block after editing the source or changing its path. |
+| `npx pi-better-harness instructions disable` | Remove the block and preserve the surrounding file. |
+
+A global Harness CLI install refreshes an enabled block. A global CLI uninstall
+removes it. If you remove the package directly with Pi, disable the block first.
+Setting `instructionsFile` to `false` removes the block on the next sync.
+The CLI stops on missing or duplicate delimiters in an existing block.
+Keep other extensions' content outside the Harness markers.
+
+Pi loads the file as a system prompt addendum. Ordinary turns and compaction
+retain the loaded text. A new Pi process or an explicit `/reload` reads the
+current file. Pi gives a trusted project's `.pi/APPEND_SYSTEM.md` precedence
+over the global file. Explicit `--append-system-prompt` sources also take
+precedence over automatic discovery.
 
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in

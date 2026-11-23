@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { componentPackages, run } from "../lib/cli.mjs";
+import { componentPackages, run as runCli } from "../lib/cli.mjs";
+
+const agentDir = mkdtempSync(join(tmpdir(), "harness-cli-"));
+after(() => rmSync(agentDir, { recursive: true, force: true }));
+const run = (args, options) => runCli(args, { agentDir, ...options });
 
 function output() {
   let value = "";
@@ -175,4 +182,18 @@ test("a failed recovery tells the user how to remove the Harness registration", 
   assert.equal(status, 1);
   assert.match(stderr.read(), /Could not remove the unfiltered Harness registration \(exit 4\)/);
   assert.match(stderr.read(), /Run `pi remove npm:pi-better-harness` before starting Pi/);
+});
+
+test("only explicit opt-in creates a block, and global uninstall removes it", () => {
+  const options = { spawn: () => ({ status: 0 }), configure: () => {}, preflight: noHarness, stdout: output().stream };
+  const target = join(agentDir, "APPEND_SYSTEM.md");
+  writeFileSync(target, "User instructions");
+  assert.equal(run(["install"], options), 0);
+  assert.equal(readFileSync(target, "utf8"), "User instructions");
+  assert.equal(run(["instructions", "enable"], options), 0);
+  assert.match(readFileSync(target, "utf8"), /# Harness defaults/);
+  assert.equal(run(["uninstall", "--local"], options), 0);
+  assert.match(readFileSync(target, "utf8"), /# Harness defaults/);
+  assert.equal(run(["uninstall"], options), 0);
+  assert.equal(readFileSync(target, "utf8"), "User instructions");
 });

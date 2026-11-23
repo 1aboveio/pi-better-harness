@@ -58,7 +58,7 @@ function presentLink(link: SettingsLink): SettingItem {
   };
 }
 
-export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = [], navigatorView?: SettingsControl): Promise<string | undefined> {
+export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = [], navigatorView?: SettingsControl, actions: SettingItem[] = []): Promise<string | undefined> {
   return ctx.ui.custom((tui, theme: Theme, _kb, done: (id?: string) => void) => {
     const currentCallback = callbacks?.get();
     let callbackMode = currentCallback?.mode ?? "hold";
@@ -75,6 +75,7 @@ export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: 
       ...(callbackSetting ? [callbackSetting] : []),
       ...entries.map(({ item }) => item),
       ...links.map(presentLink),
+      ...actions,
     ].sort((a, b) => (position.get(a.id) ?? position.size) - (position.get(b.id) ?? position.size));
     const feedback = new Text("", 2, 0);
     let changing = false;
