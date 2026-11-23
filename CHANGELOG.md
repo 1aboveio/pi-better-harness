@@ -32,6 +32,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Reuse the hash buffer when checkpointing a worker checkout to reduce garbage collection during registry cleanup.
 - Preserve the 24-hour lifetime across automatic resumes and runtime recovery. Runs reaching this limit fail even while waiting on a tool. The default run timeout remains 60 minutes.
 
 ## [pi-better-harness@0.52.0] - 2026-11-23

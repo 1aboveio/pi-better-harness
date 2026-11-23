@@ -4,11 +4,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, } from "node:fs";
 import { dirname, join } from "node:path";
-function fileHash(path) {
+function fileHash(path, buffer) {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
         const hash = createHash("sha256");
-        const buffer = Buffer.allocUnsafe(128 * 1024);
         let bytes;
         while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0)
             hash.update(buffer.subarray(0, bytes));
@@ -23,7 +22,7 @@ function blobPath(store, hash) {
         throw new Error("Invalid saved file identity");
     return join(store, hash.slice(0, 2), hash.slice(2));
 }
-function saveFile(path, store, hash) {
+function saveFile(path, store, hash, buffer) {
     const dest = blobPath(store, hash);
     if (existsSync(dest))
         return;
@@ -32,7 +31,7 @@ function saveFile(path, store, hash) {
     try {
         copyFileSync(path, temp, constants.COPYFILE_FICLONE);
         chmodSync(temp, 0o600);
-        if (fileHash(temp) !== hash)
+        if (fileHash(temp, buffer) !== hash)
             throw new Error("File changed while saving " + path);
         renameSync(temp, dest);
     }
@@ -45,6 +44,7 @@ export function snapshotTree(root, store, omit = new Set()) {
     if (!lstatSync(root).isDirectory())
         throw new Error("Expected a directory at " + root);
     const entries = [];
+    const buffer = Buffer.allocUnsafe(128 * 1024);
     function walk(parent) {
         for (const child of readdirSync(join(root, parent)).sort()) {
             const name = join(parent, child);
@@ -59,9 +59,9 @@ export function snapshotTree(root, store, omit = new Set()) {
                 entries.push({ name, mode, type: "symlink", target: readlinkSync(path) });
             }
             else if (stat.isFile()) {
-                const blob = fileHash(path);
+                const blob = fileHash(path, buffer);
                 if (store)
-                    saveFile(path, store, blob);
+                    saveFile(path, store, blob, buffer);
                 entries.push({ name, mode, type: "file", blob });
             }
             else

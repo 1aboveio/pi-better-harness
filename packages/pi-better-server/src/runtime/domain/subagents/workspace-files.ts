@@ -24,11 +24,10 @@ export type SavedEntry =
     | { name: string; mode: number; type: "file"; blob: string }
     | { name: string; mode: number; type: "symlink"; target: string };
 
-function fileHash(path: string): string {
+function fileHash(path: string, buffer: Buffer): string {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
         const hash = createHash("sha256");
-        const buffer = Buffer.allocUnsafe(128 * 1024);
         let bytes: number;
         while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, bytes));
         return hash.digest("hex");
@@ -42,7 +41,7 @@ function blobPath(store: string, hash: string): string {
     return join(store, hash.slice(0, 2), hash.slice(2));
 }
 
-function saveFile(path: string, store: string, hash: string): void {
+function saveFile(path: string, store: string, hash: string, buffer: Buffer): void {
     const dest = blobPath(store, hash);
     if (existsSync(dest)) return;
     mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
@@ -50,7 +49,7 @@ function saveFile(path: string, store: string, hash: string): void {
     try {
         copyFileSync(path, temp, constants.COPYFILE_FICLONE);
         chmodSync(temp, 0o600);
-        if (fileHash(temp) !== hash) throw new Error("File changed while saving " + path);
+        if (fileHash(temp, buffer) !== hash) throw new Error("File changed while saving " + path);
         renameSync(temp, dest);
     } finally {
         rmSync(temp, { force: true });
@@ -61,6 +60,7 @@ function saveFile(path: string, store: string, hash: string): void {
 export function snapshotTree(root: string, store?: string, omit: ReadonlySet<string> = new Set()): SavedEntry[] {
     if (!lstatSync(root).isDirectory()) throw new Error("Expected a directory at " + root);
     const entries: SavedEntry[] = [];
+    const buffer = Buffer.allocUnsafe(128 * 1024);
     function walk(parent: string): void {
         for (const child of readdirSync(join(root, parent)).sort()) {
             const name = join(parent, child);
@@ -74,8 +74,8 @@ export function snapshotTree(root: string, store?: string, omit: ReadonlySet<str
             } else if (stat.isSymbolicLink()) {
                 entries.push({ name, mode, type: "symlink", target: readlinkSync(path) });
             } else if (stat.isFile()) {
-                const blob = fileHash(path);
-                if (store) saveFile(path, store, blob);
+                const blob = fileHash(path, buffer);
+                if (store) saveFile(path, store, blob, buffer);
                 entries.push({ name, mode, type: "file", blob });
             } else throw new Error("Cannot save special file " + path + ". The original is retained.");
         }
