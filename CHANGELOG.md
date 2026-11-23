@@ -12,6 +12,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Expand a home-relative `PI_CODING_AGENT_DIR` when the CLI writes instructions or global settings.
 - Bundle Background Tasks 0.20.2 and Subagents 0.37.2 with Server 0.7.2. Background tasks and subagents now have a 24-hour maximum lifetime.
 
 ## [pi-better-server@0.7.2] - 2026-11-23

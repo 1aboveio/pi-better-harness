@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquire, writeDestination } from "./install-settings.mjs";
+import { acquire, defaultAgentDir, writeDestination } from "./install-settings.mjs";
 
 const begin = "<!-- pi-better-harness:instructions:begin -->";
 const end = "<!-- pi-better-harness:instructions:end -->";
@@ -68,7 +67,7 @@ export function currentInstructions(agentDir) {
 
 // The marker pair is the opt-in. Only enable may create it. Sync always
 // rereads the shared file under the lock, including changes by other tools.
-export function manageInstructions(action, agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), edit) {
+export function manageInstructions(action, agentDir = defaultAgentDir(), edit) {
   const path = join(agentDir, "APPEND_SYSTEM.md");
   if (action === "enable") mkdirSync(agentDir, { recursive: true });
   else if (!lstatSync(path, { throwIfNoEntry: false })) {

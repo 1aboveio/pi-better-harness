@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -196,4 +198,16 @@ test("only explicit opt-in creates a block, and global uninstall removes it", ()
   assert.match(readFileSync(target, "utf8"), /# Harness defaults/);
   assert.equal(run(["uninstall"], options), 0);
   assert.equal(readFileSync(target, "utf8"), "User instructions");
+});
+
+test("instructions enable expands a literal home-relative Pi agent directory", t => {
+  const cwd = mkdtempSync(join(tmpdir(), "instructions-cwd-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL("../bin/pi-better-harness.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [cli, "instructions", "enable"], {
+    cwd, env: { ...process.env, HOME: cwd, USERPROFILE: cwd, PI_CODING_AGENT_DIR: "~/custom-agent" }, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(readFileSync(join(cwd, "custom-agent", "APPEND_SYSTEM.md"), "utf8"), /pi-better-harness/i);
+  assert.equal(existsSync(join(cwd, "~")), false);
 });
