@@ -273,7 +273,7 @@ function sameOperation(a, b) {
 function load(dir, key) {
     const path = join(dir, "events.jsonl");
     if (!stat(path))
-        return { records: [], losses: emptyLosses() };
+        return { records: [], losses: emptyLosses(), needsRepair: false };
     chmodSync(path, 0o600);
     const raw = readSafe(path, MAX_BYTES);
     const lines = raw.split("\n");
@@ -304,7 +304,8 @@ function load(dir, key) {
     catch {
         losses.malformed++;
     }
-    if (header && (header.count !== lines.length || header.digest !== digest(key, "journal", lines.join("\n"))))
+    const headerMatches = header && header.count === lines.length && header.digest === digest(key, "journal", lines.join("\n"));
+    if (header && !headerMatches)
         losses.tampered++;
     const records = [];
     const seen = new Set();
@@ -340,7 +341,7 @@ function load(dir, key) {
         seen.add(record.fingerprint);
         records.push(record);
     }
-    return { records, losses };
+    return { records, losses, needsRepair: !headerMatches || records.length !== lines.length };
 }
 function encode(journal, key) {
     const lines = journal.records.map(record => JSON.stringify({ ...record, mac: digest(key, "event", JSON.stringify(record)) }));
@@ -460,31 +461,22 @@ export class SandboxDiagnostics {
                 return;
             if (input.outcome === "succeeded" && !stat(join(dir, "events.jsonl")))
                 return;
-            locked(dir, () => {
+            const repaired = locked(dir, () => {
                 const key = installationKey(dir, input.outcome === "denied");
                 const journal = load(dir, key);
-                const before = JSON.stringify(journal.losses);
                 const pruned = retain(journal, key, now);
                 const fingerprint = imported ? digest(key, "relay-event-identity", identity([imported.runIdentity, imported.value.idFingerprint])) :
                     digest(key, "event-identity", randomBytes(32).toString("hex"));
                 // Signed record identities survive parent reloads and full log rescans.
-                if (imported && journal.records.some(r => r.fingerprint === fingerprint)) {
-                    if (pruned || journal.losses.malformed || journal.losses.tampered)
-                        atomic(join(dir, "events.jsonl"), encode(journal, key));
-                    if (issues(journal.losses).length)
-                        this.report(new Error("Diagnostics collection has gaps."));
-                    return;
-                }
+                const duplicate = imported && journal.records.some(r => r.fingerprint === fingerprint);
                 const operationFingerprint = digest(key, "operation", operation);
                 const recovered = new Set(journal.records.flatMap(r => r.recoveryOf ? [r.recoveryOf] : []));
                 const prior = [...journal.records].reverse().find(r => r.outcome === "denied" && r.context === this.options.context &&
                     r.tool === tool && r.operationFingerprint === operationFingerprint && r.timestamp <= now);
-                if (input.outcome === "succeeded" && (!prior || recovered.has(prior.fingerprint))) {
-                    if (pruned || issues(journal.losses).some(i => i !== "retention-loss"))
+                if (duplicate || (input.outcome === "succeeded" && (!prior || recovered.has(prior.fingerprint)))) {
+                    if (pruned || journal.needsRepair)
                         atomic(join(dir, "events.jsonl"), encode(journal, key));
-                    if (issues(journal.losses).length)
-                        this.report(new Error("Diagnostics collection has gaps."));
-                    return;
+                    return journal.needsRepair;
                 }
                 const backend = imported?.value.backend ?? this.options.backend();
                 const version = imported?.value.version ?? this.options.version;
@@ -505,9 +497,10 @@ export class SandboxDiagnostics {
                 journal.records.push(record);
                 retain(journal, key, now);
                 atomic(join(dir, "events.jsonl"), encode(journal, key));
-                if (before !== JSON.stringify(journal.losses) || journal.losses.malformed || journal.losses.tampered)
-                    this.report(new Error("Diagnostics collection has gaps."));
+                return journal.needsRepair;
             });
+            if (repaired)
+                this.report(new Error("Diagnostics collection has gaps."));
         }
         catch (error) {
             this.report(this.options.relay || imported ? new Error("Diagnostics collection has gaps.") : error);
