@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 
 const HARNESS_PACKAGE = "pi-better-harness";
@@ -17,10 +18,18 @@ export const harnessExtensionFilters = [
   "extensions/minimal-output/index.ts",
 ];
 
+// Match Pi's getAgentDir without requiring the Pi SDK in the standalone installer.
+export function defaultAgentDir() {
+  const dir = process.env.PI_CODING_AGENT_DIR;
+  if (!dir) return join(homedir(), ".pi", "agent");
+  if (dir === "~") return homedir();
+  if (dir.startsWith("~/") || (process.platform === "win32" && dir.startsWith("~\\"))) return join(homedir(), dir.slice(2));
+  return dir.startsWith("file://") ? fileURLToPath(dir) : dir;
+}
+
 function settingsPath(local, options) {
   if (options.path) return options.path;
-  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-  return local ? resolve(".pi/settings.json") : join(agentDir, "settings.json");
+  return local ? resolve(".pi/settings.json") : join(defaultAgentDir(), "settings.json");
 }
 
 function packageSource(entry) {
