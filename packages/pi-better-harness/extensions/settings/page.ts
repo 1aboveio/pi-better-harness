@@ -23,7 +23,7 @@ const taskOrder = [
   "link:subagents", "link:agents", "link:sandbox",
   "setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID,
   "setting:navigator-view", "setting:navigator-sticky", "setting:outcome-todo-display",
-  "setting:tool-output", "setting:tool-animation",
+  "setting:tool-output", "setting:tool-animation", "setting:session-recap", "link:recap-prompt",
 ];
 const position = new Map(taskOrder.map((id, index) => [id, index]));
 

@@ -8,6 +8,7 @@
 | Who owns a Background task, what counts as progress, and when a stall, wait or completion produces an event | [Harness 0028 · Background tasks](0028-background-task-policy.md) |
 | When a frontend connects, how the shared server recovers work, and how a notification reaches its session after a disconnect | [Harness 0029 · Server and notifications](0029-notification-delivery.md) |
 | When the foreground continues, waits, pauses or completes, and how Todo and acceptance evidence affect that decision | [Harness 0030 · Goal and Todo](0030-goal-and-todo-lifecycle.md) |
+| How Recap summarizes a settled run and preserves foreground context and cache identity | [Harness 0031 · Session recaps](0031-isolated-session-recaps.md) |
 | What survives a subagent attempt, which limits apply, what the parent receives, and when a workspace can be reclaimed | [Subagents 0007 · Subagent lifecycle](../../packages/pi-better-subagents/docs/adr/0007-subagent-lifecycle.md) |
 
 When a worker parks on a Background task, the Background policy determines when the wait is ready. The worker resumes when eligible and interprets the evidence. The coordinator records the terminal assignment outcome. The server routes its notification to the parent, which checks the deliverable against its Goal.
