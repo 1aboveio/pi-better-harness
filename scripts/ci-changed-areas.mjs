@@ -81,6 +81,9 @@ const AREA_PATTERNS = {
     "packages/pi-better-model-router/**",
   ],
   extensions: [
+    "packages/pi-better-harness/extensions/recap/**",
+    "packages/pi-better-harness/extensions/settings/**",
+    "scripts/session-recap.tui.e2e.test.mjs",
     "packages/pi-better-background-tasks/**",
     "packages/navigator/**",
     "packages/ssh-core/**",

@@ -261,6 +261,10 @@ prompt; in Instructions, it restores the prompt while preserving model/effort.
 A user Markdown override is archived when its prompt is reset. Saved defaults
 survive sessions and upgrades.
 
+In `/harness-settings`, **Session recap** enables a short summary above the editor after a conversation settles. It defaults to Off. **Recap prompt** opens the current instructions for editing. Save a blank prompt to restore the default or press Escape to keep your previous instructions. Both settings are saved as user defaults. Editing the prompt takes effect on the next summary.
+
+Each recap uses a separate request to the model that answered. It sends a bounded selection of recent user and assistant text. Pi hosts with the public configured model streaming API can generate summaries; existing summaries restore locally on older hosts. Recap and the optional Next line stay on their session branch. The summary request has its own session identity and usage. The main model receives its usual prompt, tools and conversation.
+
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in
 this version, and makes no auxiliary model requests. The integration blocker is
