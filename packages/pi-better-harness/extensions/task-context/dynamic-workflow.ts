@@ -7,11 +7,11 @@ const text = Type.String({ minLength: 1, pattern: "\\S" });
 const id = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" });
 const definitionSchema = Type.Object({
   objective: text,
-  criteria: Type.Array(text, { minItems: 1, uniqueItems: true, description: "Observable acceptance criteria for the user's objective." }),
+  criteria: Type.Array(text, { minItems: 1, description: "Observable acceptance criteria for the user's objective." }),
   goalId: Type.Optional(text),
   steps: Type.Array(Type.Object({
     id, title: text, output: text,
-    dependsOn: Type.Optional(Type.Array(id, { uniqueItems: true })),
+    dependsOn: Type.Optional(Type.Array(id)),
     stage: Type.Optional(text),
     catalog: Type.Optional(Type.String({ description: "Canonical inspected role.* or agent.* id. Omit for foreground work." })),
     review: Type.Optional(Type.Object({ artifact: id, revision: id }, { description: "Review the artifact step's output. On findings, open the revision step, then review the new version. Delivery depends on this review." })),
@@ -54,6 +54,7 @@ export function readDynamic(entries: readonly BranchEntry[], goalId?: string): D
 }
 
 export function defineWorkflow(input: Definition, choices: CatalogChoice[]): WorkflowRun {
+  if (new Set(input.criteria).size !== input.criteria.length) throw new Error("Objective criteria must be distinct.");
   const error = validatePlanInput(input.steps.map(s => ({ id: s.id, step: s.title, dependsOn: s.dependsOn, status: "pending" })));
   if (error) throw new Error(error);
   const fixes = new Set<string>();
