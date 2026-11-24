@@ -140,7 +140,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     }
     resultPorts.set(resultRoot, resultPort);
     if (controlStore.store.pendingTaskCancellations().length) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
-    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!, () => workModel?.sharedReadHealth());
     const initializeLaunch = () => {
       if (!launchInitialization) {
         const pending = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog, config.runtimeIdleMs);
@@ -367,7 +367,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             catalogSubscription = subscription;
             return reply({ data: subscription.snapshot });
           }
-          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog"].includes(type)) {
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog", "runtime_supervisor_review"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
             return reply({ data: catalogCommand(command) });
           }

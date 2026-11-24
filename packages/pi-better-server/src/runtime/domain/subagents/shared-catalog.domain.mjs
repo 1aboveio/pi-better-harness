@@ -39,6 +39,18 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
             const wire = await client.request("runtime_get_catalog", { overlay });
             return catalogSnapshotFromWire(wire);
         },
+        async decision(action, scope, token, answer) {
+            await register();
+            return client.request("runtime_supervisor_review", { action, scope, token, answer });
+        },
+        async sharedReadDiagnosis() {
+            await register();
+            return client.request("runtime_supervisor_review", { action: "read-health" });
+        },
+        async review(scenario, action, token) {
+            await register();
+            return client.request("runtime_supervisor_review", { scenario, action, token });
+        },
         async edit(edit) { await register(); return client.request("runtime_edit_catalog", edit); },
         async scopedAgents(scope) { await register(); return client.request("runtime_get_catalog_scope", { scope }); },
         async subscribe(changed) {

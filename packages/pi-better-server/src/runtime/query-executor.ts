@@ -223,6 +223,10 @@ export class WorkQueryExecutor {
     return JSON.parse(result.json);
   }
 
+  sharedReadHealth() {
+    return { state: this.observation().status, generation: this.workerGeneration };
+  }
+
   observation() {
     return this.failure ? { ...this.lastObservation, status: "degraded" as const, reason: this.failure.message } : this.lastObservation;
   }
