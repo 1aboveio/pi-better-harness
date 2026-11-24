@@ -368,8 +368,8 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
   };
-  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>): void => {
-    pi.appendEntry(WORKFLOW_ENTRY_TYPE, workflowEntry(owner));
+  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>, resumePlan = false): void => {
+    pi.appendEntry(WORKFLOW_ENTRY_TYPE, { ...workflowEntry(owner), ...(resumePlan && { resumePlan }) });
     pi.events.emit("pi-better-workflow:changed", owner);
   };
 
@@ -1008,14 +1008,14 @@ export default function (pi: ExtensionAPI): void {
     if (validateObjective(objective)) return;
     const owner = getWorkflow(ctx);
     if (owner && !workflowAvailable(owner)) return;
-    const retainedCommand = objective.startsWith("/") ? reopenedGoal?.command : undefined;
+    const retainedCommand = reopenedGoal?.command;
+    if (retainedCommand && !commandAvailable(pi, retainedCommand)) return;
     const command = retainedCommand ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
     const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
+    const restoredOwner = retainedCommand ? goalWorkflowOwner(goal) : null;
+    if (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path)) return;
     setGoal(goal, ctx, "runtime", true);
-    if (retainedCommand) {
-      const retainedOwner = goalWorkflowOwner(goal);
-      if (retainedOwner && (owner?.name !== retainedOwner.name || owner?.path !== retainedOwner.path)) recordWorkflow(retainedOwner);
-    }
+    if (restoredOwner && !owner) recordWorkflow(restoredOwner, true);
     resetContinuationState(goal);
   });
 

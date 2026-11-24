@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { CompactTaskHeader } from "./compact-task-header.js";
+import { workflowDiagram, type IssueStages } from "./workflow-diagram.js";
 import {
   plainPlanTheme, planText, renderPlanPresentation, statusStyle,
   type DisplayStatus, type PlanPresentation,
@@ -21,8 +22,10 @@ interface RushUnit {
   note?: string | undefined;
   headSha?: string | undefined;
   reviewedHead?: string | undefined;
+  recordedFixStatus?: "pending" | "completed" | undefined;
+  openFindings?: number;
   delivery?: string | undefined;
-  canaryStatus?: DisplayStatus | undefined;
+  canaryStatus?: DisplayStatus | null | undefined;
 }
 
 export interface RushPlan {
@@ -99,11 +102,12 @@ export function projectRushPlan(data: unknown, runId: string, expectedRunDir?: s
     return {
       id: unit.id, title: unit.title, stage: unit.stage, status: unit.status,
       dependsOn: Array.isArray(unit.dependsOn) ? unit.dependsOn.filter((id): id is string => typeof id === "string") : [],
-      worker: typeof unit.worker === "string" || typeof unit.worker === "number" ? unit.worker : undefined,
+      worker: (typeof unit.worker === "string" && unit.worker !== "") || typeof unit.worker === "number" ? unit.worker : undefined,
       workerKind: typeof unit.workerKind === "string" ? unit.workerKind : undefined,
       note: typeof unit.note === "string" ? unit.note : undefined,
       headSha: typeof unit.headSha === "string" && unit.headSha ? unit.headSha : undefined,
       reviewedHead: typeof unit.reviewedHead === "string" && unit.reviewedHead ? unit.reviewedHead : undefined,
+      ...reviewFixEvidence(unit),
       delivery: typeof unit.delivery === "string" && unit.delivery ? unit.delivery : undefined,
       canaryStatus: readCanaryStatus(unit.warehouseCanary),
     };
@@ -135,7 +139,9 @@ export function workflowBinding(entries: Iterable<{ type: string; customType?: s
   for (const entry of entries) {
     if (entry.type === "custom" && entry.customType === "pi-better-workflow") {
       const data = entry.data;
-      if (isRecord(data) && data.version === 1 && data.kind === "set") binding = null;
+      if (isRecord(data) && data.version === 1 && data.kind === "set") {
+        if (data.resumePlan !== true || !isRecord(data.owner) || binding?.owner !== data.owner.name) binding = null;
+      }
     }
     if (entry.type !== "custom" || entry.customType !== WORKFLOW_PLAN_ENTRY) continue;
     const data = entry.data;
@@ -161,16 +167,17 @@ function workflowStatus(status: string): DisplayStatus {
   }
 }
 
-function readCanaryStatus(value: unknown): DisplayStatus | undefined {
+// null marks applicable work with no unit-level execution result.
+function readCanaryStatus(value: unknown): DisplayStatus | null | undefined {
   if (value == null || value === false) return undefined;
-  if (!isRecord(value)) return "pending";
+  if (!isRecord(value)) return null;
   if (value.required === false || value.applicable === false || value.status === "not-applicable") return undefined;
 
   const resultStatus = isRecord(value.result) ? value.result.status : value.result;
   const status = value.status ?? resultStatus;
   if (status === "pass" || status === "passed") return "completed";
   if (status === "fail") return "failed";
-  return typeof status === "string" ? workflowStatus(status) : "pending";
+  return typeof status === "string" ? workflowStatus(status) : null;
 }
 
 // A unit is delivered (completed) only at `status: succeeded`, whether its change landed by a
@@ -178,42 +185,67 @@ function readCanaryStatus(value: unknown): DisplayStatus | undefined {
 // whether that HEAD passed review; without one it shows plain in-progress, as before.
 function unitStatus(unit: RushUnit): DisplayStatus {
   const status = workflowStatus(unit.status);
+  if (unit.worker !== undefined && (unit.workerKind === "fix" || unit.workerKind === "review")) return status;
   if (status !== "in_progress" || unit.stage !== "done" || !unit.headSha) return status;
   return unit.reviewedHead === unit.headSha ? "reviewed" : "implemented";
 }
 
-function unitStages(unit: RushUnit, fleet: RushPlan["fleet"]): Record<"implement" | "review" | "ci", DisplayStatus> {
+function reviewFixEvidence(unit: Record<string, unknown>): Pick<RushUnit, "recordedFixStatus" | "openFindings"> {
+  const findings = Array.isArray(unit.reviewFindings) ? unit.reviewFindings.filter(isRecord) : [];
+  const openFindings = findings.filter(finding => finding.status === "open").length;
+  if (openFindings) return { recordedFixStatus: "pending", openFindings };
+  if (findings.some(finding => finding.status === "resolved")) return { recordedFixStatus: "completed" };
+  // The first review starts at fixRound 1, even when it passes without a fix.
+  const passed = typeof unit.headSha === "string" && !!unit.headSha && unit.headSha === unit.reviewedHead;
+  if (typeof unit.fixRound === "number" && unit.fixRound > 1 && (passed || unit.status === "succeeded" || unit.status === "completed")) {
+    return { recordedFixStatus: "completed" };
+  }
+  return {};
+}
+
+function unitStages(unit: RushUnit, fleet: RushPlan["fleet"]): IssueStages {
   const status = workflowStatus(unit.status);
-  if (status === "completed" || status === "skipped") return { implement: status, review: status, ci: status };
-
-  const implemented = unit.stage === "done" || unit.stage === "review";
+  const recordedFix = unit.recordedFixStatus ?? "skipped";
   const reviewed = !!unit.headSha && unit.headSha === unit.reviewedHead;
-  // Delivery enters CI before those checks are known to have passed.
-  const inCI = unit.delivery === "ci";
-  const inReview = unit.stage === "review" || unit.delivery === "review" || inCI ||
-    (unit.worker !== undefined && unit.workerKind === "review") || (implemented && !!unit.headSha && unit.delivery === undefined);
-
-  // An issue can stop in one phase while retaining evidence from another.
-  if (status === "blocked" || status === "failed") {
-    if (reviewed || inCI) return { implement: "completed", review: reviewed ? "completed" : "pending", ci: status };
-    if (implemented || inReview) return { implement: "completed", review: status, ci: "pending" };
-    if (unit.stage !== "implement" && unit.stage !== "pending") {
-      // Older plans record stages such as validate without a delivery marker.
-      const saved = {
-        implement: workflowStatus(fleet.implement?.status ?? "pending"),
-        review: workflowStatus(fleet.review?.status ?? "pending"),
-        ci: workflowStatus(fleet.ci?.status ?? "pending"),
-      };
-      if (Object.values(saved).some(stage => stage === "blocked" || stage === "failed")) return saved;
-    }
-    return { implement: status, review: "pending", ci: "pending" };
+  if (status === "completed") {
+    return { implement: status, review: reviewed ? "completed" : "unknown", fix: recordedFix === "completed" ? "completed" : "skipped", ship: status };
   }
 
-  return {
-    implement: implemented ? "completed" : status,
-    review: reviewed ? "completed" : inReview ? status : "pending",
-    ci: inCI ? status : "pending",
-  };
+  const worker = unit.worker !== undefined ? unit.workerKind : undefined;
+  const stages: IssueStages = { implement: "completed", review: "pending", fix: recordedFix, ship: "pending" };
+  if (worker === "fix") {
+    stages.fix = status;
+    return stages;
+  }
+  if (worker === "review") {
+    stages.review = status;
+    return stages;
+  }
+
+  const stopped = status === "blocked" || status === "failed";
+  if (recordedFix === "pending") {
+    if (stopped) stages.fix = status;
+    return stages;
+  }
+  const implemented = unit.stage === "done" || unit.stage === "review" || unit.delivery === "review";
+  // Older blocked units record the delivery phase only in the fleet summary.
+  const legacyBlock = stopped && !unit.delivery && (unit.stage === "validate" || unit.stage === "done");
+  if (stopped && (unit.delivery === "ci" || (legacyBlock && fleet.ci?.status === status))) {
+    if (reviewed || (legacyBlock && workflowStatus(fleet.review?.status ?? "") === "completed")) stages.review = "completed";
+    stages.ship = status;
+  } else if (legacyBlock && fleet.review?.status === status) {
+    stages.review = status;
+  } else if (reviewed) {
+    stages.review = "completed";
+    stages.ship = status;
+  } else if (!implemented) {
+    stages.implement = status;
+  } else if (stopped || unit.stage === "review" || unit.delivery === "review" ||
+    unit.delivery === "ci" || (!unit.delivery && unit.headSha)) {
+    // Draft CI can start before review. Only a pass on the current HEAD starts shipping.
+    stages.review = status;
+  }
+  return stages;
 }
 
 function summarizeStage(statuses: DisplayStatus[]): DisplayStatus | "partial" {
@@ -227,40 +259,46 @@ function summarizeStage(statuses: DisplayStatus[]): DisplayStatus | "partial" {
   return applicable.includes("completed") ? "partial" : "pending";
 }
 
-function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanPresentation {
+function presentRushPlan(plan: RushPlan, owner: string, width: number, readOnly = false): PlanPresentation {
   const stageLabel = (name: string, status: DisplayStatus | "partial", suffix = "") => {
     const style = statusStyle(status === "partial" ? "implemented" : status);
-    return { color: style.color, text: `  ${name} ${style.glyph}${suffix}` };
+    return { color: style.color, text: `${name} ${style.glyph}${suffix}` };
   };
   const fleetLabel = (name: string) => {
     const raw = plan.fleet[name]?.status ?? "pending";
     const status = workflowStatus(raw);
     return stageLabel(name, status, status === "unknown" ? ` ${planText(raw)}` : "");
   };
-  const stageLabels = [fleetLabel("explore")];
-  const addStage = (name: string, statuses: DisplayStatus[]) => {
-    const status = summarizeStage(statuses);
-    stageLabels.push(stageLabel(name, status));
-    if (status !== "in_progress" && statuses.includes("in_progress")) {
-      const style = statusStyle("in_progress");
-      stageLabels.push({ color: style.color, text: ` ${style.glyph}` });
-    }
-  };
-  const issueStages = plan.issues.map(unit => unitStages(unit, plan.fleet));
-  for (const name of ["implement", "review", "ci"] as const) {
-    addStage(name, issueStages.map((issue) => issue[name]));
-  }
+  const context = [{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}` }];
   // The warehouse canary only applies to data work; hide it otherwise.
   if (plan.warehouseCanaryRequired) {
-    const canaries = plan.issues.flatMap((unit) => unit.canaryStatus === undefined ? [] : [
-      workflowStatus(unit.status) === "skipped" ? "skipped" as const : unit.canaryStatus,
-    ]);
-    if (canaries.length) addStage("canary", canaries);
-    else stageLabels.push(fleetLabel("canary"));
+    context.push({ color: "dim", text: "  ·  " });
+    const applicable = plan.issues.filter(unit => unit.canaryStatus !== undefined);
+    const remaining = applicable.filter(unit => workflowStatus(unit.status) !== "skipped");
+    if (remaining.some(unit => unit.canaryStatus != null)) {
+      const statuses = remaining.map(unit => unit.canaryStatus ?? "pending");
+      const status = summarizeStage(statuses);
+      context.push(stageLabel("canary", status));
+      if (status !== "in_progress" && statuses.includes("in_progress")) {
+        const style = statusStyle("in_progress");
+        context.push({ color: style.color, text: ` ${style.glyph}` });
+      }
+    } else if (applicable.length && !remaining.length) {
+      context.push(stageLabel("canary", "skipped"));
+    } else {
+      context.push(fleetLabel("canary"));
+    }
   }
-  const metadata = [[{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}  ·` }, ...stageLabels]];
+  const metadata = [context];
   if (readOnly) metadata.push([{ color: "warning", text: "read-only handoff" }]);
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
+  const applicable = plan.issues.filter(unit => workflowStatus(unit.status) !== "skipped");
+  if (applicable.length) {
+    const stages = applicable.map(unit => unitStages(unit, plan.fleet));
+    const openFindings = applicable.reduce((count, unit) =>
+      workflowStatus(unit.status) === "completed" ? count : count + (unit.openFindings ?? 0), 0);
+    metadata.push(...workflowDiagram(stages, openFindings, width - 2));
+  }
   return {
     metadata,
     rows: visibleRushUnits(plan).map((unit) => {
@@ -269,9 +307,14 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
       const details = [`${unit.stage} · ${unit.status}${unit.delivery ? ` · ${unit.delivery}` : ""}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
       if (unit.dependsOn.length) details.push(`after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
       if (unit.note) details.push(unit.note);
+      const worker = unit.worker !== undefined && workflowStatus(unit.status) === "in_progress" ? unit.workerKind : undefined;
+      let statusLabel: string | undefined;
+      if (status === "unknown" || cancelled) statusLabel = unit.status;
+      else if (worker === "fix") statusLabel = "fixing";
+      else if (worker === "review") statusLabel = "in review";
       return {
         label: `#${unit.id}`, title: unit.title, status, cancelled, details,
-        ...(status === "unknown" || cancelled ? { statusLabel: unit.status } : {}),
+        ...(statusLabel ? { statusLabel } : {}),
       };
     }),
   };
@@ -293,5 +336,5 @@ export function renderRushPlan(
   header?: CompactTaskHeader,
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  return renderPlanPresentation(presentRushPlan(plan, owner, readOnly), width, theme, full, expanded, header);
+  return renderPlanPresentation(presentRushPlan(plan, owner, width, readOnly), width, theme, full, expanded, header);
 }

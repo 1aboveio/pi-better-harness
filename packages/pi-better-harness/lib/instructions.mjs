@@ -58,15 +58,24 @@ function blockPrompt(text, range) {
   return text.slice(range[0] + begin.length, text.indexOf(end)).trim().replace(/\r\n/g, "\n");
 }
 
+function readInstructions(target) {
+  const original = readTarget(target);
+  const raw = original?.toString("utf8") ?? "";
+  if (original && !Buffer.from(raw).equals(original)) throw new Error(`Invalid UTF-8 in ${target}`);
+  const bom = raw.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const text = raw.slice(bom.length);
+  return { original, raw, bom, text, range: blockRange(text) };
+}
+
 // Return undefined for Off. An enabled, empty prompt still has both markers.
 export function currentInstructions(agentDir) {
   const path = join(agentDir, "APPEND_SYSTEM.md");
-  const text = readTarget(writeDestination(path))?.toString("utf8").replace(/^\uFEFF/, "") ?? "";
-  return blockPrompt(text, blockRange(text));
+  const { text, range } = readInstructions(writeDestination(path));
+  return blockPrompt(text, range);
 }
 
-// The marker pair is the opt-in. Only enable may create it. Sync always
-// rereads the shared file under the lock, including changes by other tools.
+// The marker pair is the opt-in. Only enable may create it.
+// Reread under the lock before editing so concurrent changes are preserved.
 export function manageInstructions(action, agentDir = defaultAgentDir(), edit) {
   const path = join(agentDir, "APPEND_SYSTEM.md");
   if (action === "enable") mkdirSync(agentDir, { recursive: true });
@@ -75,15 +84,14 @@ export function manageInstructions(action, agentDir = defaultAgentDir(), edit) {
     return false;
   }
   const target = writeDestination(path);
+  if (action !== "enable" && !readInstructions(target).range) {
+    if (edit) throw new Error("Harness instructions changed. Reopen the editor to use the latest prompt.");
+    return false;
+  }
   const release = acquire(target);
   let pending;
   try {
-    const original = readTarget(target);
-    const raw = original?.toString("utf8") ?? "";
-    if (original && !Buffer.from(raw).equals(original)) throw new Error(`Invalid UTF-8 in ${path}`);
-    const bom = raw.startsWith("\uFEFF") ? "\uFEFF" : "";
-    const text = raw.slice(bom.length);
-    const range = blockRange(text);
+    const { original, raw, bom, text, range } = readInstructions(target);
     if (edit) {
       if (blockPrompt(text, range) !== edit.previous) {
         throw new Error("Harness instructions changed. Reopen the editor to use the latest prompt.");

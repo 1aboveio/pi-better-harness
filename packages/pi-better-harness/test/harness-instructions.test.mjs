@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,7 +32,17 @@ test("the opt-in block preserves surrounding bytes and edits made by other tools
   await symlink(target, path);
   await setting("supplement.md");
   const source = join(agentDir, "supplement.md");
-  assert.equal(manageInstructions("sync", agentDir), false);
+  // Unmanaged dotfiles must be readable even when the adjacent lock is unavailable.
+  await mkdir(target + ".lock");
+  await chmod(root, 0o555);
+  try {
+    assert.equal(manageInstructions("sync", agentDir), false);
+    assert.equal(manageInstructions("disable", agentDir), false);
+    assert.equal(await readFile(path, "utf8"), original);
+  } finally {
+    await chmod(root, 0o755);
+  }
+  await rm(target + ".lock", { recursive: true });
   await writeFile(source, "First version");
   assert.equal(manageInstructions("enable", agentDir), true);
   const first = await readFile(path, "utf8");

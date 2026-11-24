@@ -50,6 +50,7 @@ export class WorkQueryExecutor {
   private watchdog?: ReturnType<typeof setInterval>;
   private watchdogCheck?: ReturnType<typeof setImmediate>;
   private lastResponse = performance.now();
+  private gracedHeartbeat?: bigint;
   private heartbeat!: BigInt64Array;
   private probe?: Int32Array;
   private workerMetrics: WorkerMetrics = {};
@@ -88,13 +89,20 @@ export class WorkQueryExecutor {
     let resumedAt = previousCheck;
     this.watchdog = setInterval(() => {
       const now = performance.now();
-      // After system sleep both threads can resume with an expired heartbeat.
-      if (now - previousCheck > watchdogMs) resumedAt = now;
+      const delayed = now - previousCheck > watchdogMs;
       previousCheck = now;
       if (this.closed || this.failure || now - Math.max(this.lastResponse, resumedAt) <= watchdogMs) return;
       // Drain queued worker responses before treating a delayed timer as worker silence.
       this.watchdogCheck ??= setImmediate(() => {
         this.watchdogCheck = undefined;
+        // After system sleep, allow a stale heartbeat one interval to advance.
+        const tick = Atomics.load(this.heartbeat, 0);
+        if (delayed && this.gracedHeartbeat !== tick &&
+            (tick === 0n || Number(process.hrtime.bigint() - tick) / 1e6 > watchdogMs)) {
+          this.gracedHeartbeat = tick;
+          resumedAt = performance.now();
+          return;
+        }
         this.checkWatchdog();
       });
       this.watchdogCheck.unref();
@@ -121,6 +129,7 @@ export class WorkQueryExecutor {
   }
 
   private startWorker() {
+    this.gracedHeartbeat = undefined;
     if (this.options.budgetBuffer) {
       // startWorker runs only initially or after the preceding thread exited.
       // A dead generation cannot retain source credits in the shared budget.
