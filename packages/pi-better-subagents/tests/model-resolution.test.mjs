@@ -26,6 +26,7 @@ const APPROVED = [
     ["role.developer", "openai/gpt-6.1-sol", "high"],
     ["role.reviewer", "openai/gpt-6-astra", "medium"],
     ["role.architect", "openai/gpt-6-astra", "high"],
+    ["role.supervisor", "openai/gpt-6.1-sol", "medium"],
     ["role.writer", "openai/gpt-6.1-terra", "medium"],
 ];
 

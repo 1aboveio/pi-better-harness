@@ -1007,7 +1007,7 @@ fi
     });
 
     describe("short role names (#370)", () => {
-        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer, writer.";
+        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer, supervisor, writer.";
 
         function newRuns(before) {
             const runsDir = join(runtimeTmp, "pi-better-subagents", "runs");
