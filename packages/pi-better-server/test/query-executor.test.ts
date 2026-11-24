@@ -656,6 +656,27 @@ test("system sleep gives the worker time to resume before the watchdog fires", a
   } finally { await f.close(); }
 });
 
+test("repeated parent stalls grant only one grace period to the same wedged worker", async () => {
+  const reports: string[] = [];
+  const f = await fixture({ watchdogMs: 800, workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url),
+    logWatchdog: line => reports.push(line) });
+  try {
+    await f.bootstrapped;
+    const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
+    f.worker.postMessage({ type: "wedge" });
+    await wedged;
+    const gate = new Int32Array(new SharedArrayBuffer(4));
+    const stall = async () => {
+      Atomics.wait(gate, 0, 0, 1050);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    };
+    await stall();
+    assert.equal(reports.length, 0, "the first delayed check gives the worker time to resume");
+    await stall();
+    assert.equal(reports.length, 1, "the unchanged heartbeat cannot renew its grace");
+  } finally { await f.close(); }
+});
+
 test("delayed parent receipt does not kill a responsive read worker", { timeout: 20000 }, async () => {
   const watchdogMs = 4000;
   const f = await fixture({ watchdogMs });
