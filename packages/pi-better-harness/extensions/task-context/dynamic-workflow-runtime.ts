@@ -110,7 +110,15 @@ export function registerDynamicWorkflow(pi: ExtensionAPI, owner: (ctx: Extension
   }
   const unsubscribe = pi.events.on(WORKFLOW_ASSIGNMENT, (event: unknown) => {
     const request = event as WorkflowAssignmentRequest;
-    const { input, ctx, ref } = request;
+    const { input, ref } = request;
+    const ctx = activeContext;
+    const origin = request.ctx.sessionManager;
+    const originLeaf = origin.getLeafId?.();
+    if (!ctx || ctx.sessionManager.getSessionId() !== origin.getSessionId() ||
+        (originLeaf && !ctx.sessionManager.getBranch().some(entry => entry.id === originLeaf))) {
+      request.error = "The workflow assignment belongs to another session branch.";
+      return;
+    }
     restore(ctx);
     const current = run();
     const s = current?.steps.find(step => step.id === ref.step);
@@ -143,7 +151,7 @@ export function registerDynamicWorkflow(pi: ExtensionAPI, owner: (ctx: Extension
     request.admission = { prompt, settled(receipt) {
       // Re-read the selected branch after asynchronous admission. A fork or a
       // simultaneous independent launch may have changed the latest snapshot.
-      if (!activeContext || activeContext.sessionManager.getSessionId() !== ctx.sessionManager.getSessionId()) return;
+      if (!activeContext || activeContext.sessionManager.getSessionId() !== origin.getSessionId()) return;
       restore(activeContext);
       const latest = run();
       if (latest?.id === current.id && latest.workers[s.id]?.callId === request.callId) {

@@ -7,6 +7,7 @@ import test, { type TestContext } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createGoalSnapshot, goalSetEntry } from "pi-better-goal/src/goal-state.ts";
 import { requestTaskContext } from "pi-better-goal/src/task-context.ts";
+import { captureLaunchContext } from "pi-better-subagents/launch-context.ts";
 import { launchWorkflowAssignment } from "pi-better-subagents/workflow-assignment.ts";
 import extension from "../../extensions/task-context/index.js";
 import { advanceWorkflow, defineWorkflow, phase, type Definition, type DynamicInput, type WorkflowRun } from "../../extensions/task-context/dynamic-workflow.js";
@@ -126,7 +127,7 @@ test("catalog assignments use ordinary launch, record failures, and require veri
   const accepted = await h.run({ action: "define", definition: def });
   let launches = 0;
   const args = { workflow: { runId: accepted.id, step: "draft" }, role: "writer", prompt: "Compile interviews" };
-  const spawn = (fails = false) => launchWorkflowAssignment(h.pi, h.ctx, "spawn-" + launches, args, async p => {
+  const spawn = (fails = false) => launchWorkflowAssignment(h.pi, captureLaunchContext(h.ctx), "spawn-" + launches, args, async p => {
     launches++;
     assert.equal(p.role, "writer");
     assert.equal("skills" in p, false);
