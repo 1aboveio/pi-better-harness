@@ -10,7 +10,7 @@ import { updateHarnessSetting } from "../extensions/shared-harness-settings.ts";
 import { OUTCOME_ENTRY } from "../extensions/task-context/outcome-state.ts";
 import { EXTENSION_NAME } from "../extensions/task-context/types.ts";
 
-function fixture(t, scenario, client = {}) {
+function fixture(t, scenario, client = {}, render = JSON.stringify) {
   const dir = mkdtempSync(join(tmpdir(), "pi-supervisor-extension-"));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -28,7 +28,7 @@ function fixture(t, scenario, client = {}) {
     getProviderAuth: async () => ({ auth: {} }),
     getProvider: () => ({ streamSimple: (_model, context) => { requests.push(context); return { result: async () => {
       await wait(20);
-      return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ advice: "Inspect the original acceptance criterion before expanding the plan.", evidence: ["step:one", "observation"], expected: "The accepted CI work continues.", steps: ["one"] }) }] };
+      return { stopReason: "stop", content: [{ type: "text", text: render({ advice: "Inspect the original acceptance criterion before expanding the plan.", evidence: ["step:one", "observation"], expected: "The accepted CI work continues.", steps: ["one"] }) }] };
     } }; } }),
   } };
   const pi = {
@@ -170,4 +170,20 @@ test("changing user scope triggers a review after the turn even without a Todo e
   assert.equal(f.requests.length, 2);
   assert.match(JSON.stringify(f.requests[1].messages), /limited to the deployment/);
   assert.equal(f.messages.length, 1, "the same proposed pruning does not interrupt again");
+});
+
+test("grounded annotated evidence from a model is accepted and unfamiliar IDs are discarded", async t => {
+  let unfamiliar = false;
+  const render = advice => "```json\n" + JSON.stringify({ ...advice,
+    evidence: [{ id: unfamiliar ? "outside-session" : "step:one", observation: "Compare this item to the Outcome." }] }) + "\n```";
+  const f = fixture(t, "scope-review", {}, render);
+  f.fire("agent_end", {});
+  await wait(65);
+  assert.deepEqual(f.messages[0].details.evidence, ["step:one"]);
+  unfamiliar = true;
+  f.sessionManager.appendMessage({ role: "user", content: "Keep monitoring the original run", timestamp: Date.now() });
+  f.fire("agent_end", {});
+  await wait(65);
+  assert.equal(f.messages.length, 1);
+  assert.equal(f.sessionManager.getBranch().filter(e => e.customType === "pi-better-harness:supervisor-review").length, 1);
 });

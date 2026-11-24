@@ -95,17 +95,21 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       const target = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
       const evidenceRefs = ["outcome", "observation", ...scope.steps.map(step => `step:${step.id}`)];
       const result = await provider.streamSimple(target, {
-        systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return JSON {advice, evidence, expected, steps}. For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
+        systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return a single JSON object with advice (string or null), evidence (array of supplied ID strings), expected (string), and steps (array of Todo ID strings). For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
         messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs }), timestamp: Date.now() }],
-      }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 700,
+      }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
         reasoning: role.effort && role.effort !== "off" ? role.effort : undefined }).result();
       if (result.stopReason !== "stop" || !current()) return;
       const output = result.content.filter(x => x.type === "text").map(x => x.text).join("");
-      const answer = JSON.parse(output);
+      const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(output.trim());
+      const answer = JSON.parse(fenced?.[1] ?? output);
       const { advice } = answer;
-      const evidence: string[] = answer.evidence ?? [], steps: string[] = answer.steps ?? [];
+      const cited = answer.evidence ?? [];
+      if (!Array.isArray(cited) || cited.length > 52) return;
+      const evidence: string[] = cited.map(item => typeof item === "string" ? item : item?.id);
+      const steps: string[] = answer.steps ?? [];
       const expected: string = answer.expected ?? "";
-      if (!Array.isArray(evidence) || evidence.length > 52 || !evidence.every(id => evidenceRefs.includes(id)) ||
+      if (!evidence.every(id => evidenceRefs.includes(id)) ||
           !Array.isArray(steps) || steps.length > 50 || !steps.every(id => scope.steps.some(step => step.id === id && step.status !== "completed")) ||
           typeof expected !== "string" || expected.length > 500) return;
       if (advice && (!evidence.length || !expected.trim() || scenario === "scope-review" && !steps.length)) return;
