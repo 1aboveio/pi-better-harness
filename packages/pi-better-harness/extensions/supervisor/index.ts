@@ -18,7 +18,7 @@ const prompts = {
   "scope-review": "Review unfinished Todo steps against the latest user instruction, objective and boundaries. Preserve necessary investigation. If a step clearly falls outside scope, cite its id and reason, name work to retain and propose a partial plan revision for the owner. Leave running work and artifacts to their owners.",
 };
 const FEEDBACK = "pi-better-harness:supervisor-progress";
-type Receipt = { outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string };
+type Receipt = { outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string; role: { instructions: string; model: string; effort?: string | null } };
 export default function supervisor(pi: ExtensionAPI) {
   installSupervisor(pi, openSupervisorClient);
 }
@@ -30,11 +30,13 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   let pending: AbortController | undefined;
   let pendingScenario: Scenario | undefined;
   let readKey: string | undefined;
+  let reviewedShape: string | undefined;
   let stallEvidence: string | undefined;
   let serial = 0;
   const reset = () => { repeats.reset(); readKey = undefined; stallEvidence = undefined; serial++; pending?.abort(); pending = undefined; };
-  pi.on("session_start", reset);
-  pi.on("session_tree", reset);
+  const newBranch = () => { reset(); reviewedShape = undefined; };
+  pi.on("session_start", newBranch);
+  pi.on("session_tree", newBranch);
   pi.on("session_shutdown", reset);
   pi.on("input", () => { reset(); });
   pi.on("before_agent_start", () => {
@@ -44,6 +46,12 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (selected.includes("commitment-followup")) hints.push("When committing to a recovery, record its action and verification condition with supervisor_followup. Record attempts and verification using observed tool result IDs. Use status for progress inquiries.");
     if (hints.length) return { message: { customType: "pi-better-harness:supervisor-controls", content: hints.join("\n"), display: false } };
   });
+
+  function planShape(ctx: ExtensionContext) {
+    const scope = scopeEvidence(ctx.sessionManager.getBranch());
+    return scope && digest(JSON.stringify([scope.objective, scope.doneWhen, scope.boundaries, scope.lastInstruction,
+      scope.steps.map(step => [step.id, step.step])]));
+  }
 
   async function review(ctx: ExtensionContext, scenario: Scenario, detail: string, publish = true) {
     if (pending || !enabledScenarios().includes(scenario)) return;
@@ -69,7 +77,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       const admission = await catalog.review(scenario, "begin");
       token = admission.token;
       if (!token) return;
-      const role = await catalog.role();
+      const role = await catalog.role(pi, ctx);
       const modelId = role?.model;
       if (!role || typeof modelId !== "string" || !current()) return;
       const slash = modelId.indexOf("/");
@@ -99,9 +107,16 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       if ((await catalog.review(scenario, "finish", token)).status !== "admitted" || !current()) return;
       token = undefined;
       const receipt: Receipt = { key, scenario, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
-        evidence, expected, steps, catalogRevision: role.revision, advice };
+        evidence, expected, steps, catalogRevision: role.revision, role: { instructions: role.instructions, model: modelId, effort: role.effort }, advice };
       pi.appendEntry(ENTRY, receipt);
-      if (advice && publish) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
+      if (scenario === "scope-review") reviewedShape = planShape(ctx);
+      const alreadySuggested = scenario === "scope-review" && branch.some(e => {
+        if (e.type !== "custom" || e.customType !== ENTRY) return false;
+        const r = e.data as Receipt;
+        return r.scenario === scenario && r.outcome === scope.outcomeId && r.plan === scope.planId &&
+          r.advice === advice && r.expected === expected && JSON.stringify(r.steps) === JSON.stringify(steps);
+      });
+      if (advice && publish && !alreadySuggested) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
       return advice ?? "No intervention recommended.";
     } catch { /* An unavailable diagnostic leaves the owner's original operation running. */ }
     finally {
@@ -149,7 +164,8 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (event.toolName === "update_todo" && !event.isError) {
       reset();
       recordProgress(ctx);
-      if (event.input.todo || event.input.outcome) void review(ctx, "scope-review", scopeChange);
+      if ((event.input.todo || event.input.outcome) && enabledScenarios().includes("scope-review") &&
+          planShape(ctx) !== reviewedShape) void review(ctx, "scope-review", scopeChange);
       return;
     }
     if (!enabledScenarios().includes("stall-diagnosis")) { repeats.reset(); return; }
@@ -162,7 +178,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (!value) { repeats.reset(); return; }
     const since = repeats.record(value.fingerprint, Date.now(), goalStallThresholds().stallMs ?? DEFAULT_STALL_THRESHOLDS.stallMs);
     if (since !== undefined) {
-      stallEvidence = `Repeated successful ${value.tool} calls since ${new Date(since).toISOString()} with identical arguments and output. Evidence ${value.fingerprint}.`;
+      stallEvidence = `Repeated successful ${value.tool} calls on ${value.target} since ${new Date(since).toISOString()} with identical arguments and output. Evidence ${value.fingerprint}.`;
       void review(ctx, "stall-diagnosis", stallEvidence);
     }
   });

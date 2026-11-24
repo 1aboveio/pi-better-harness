@@ -4,10 +4,10 @@ import { enabledScenarios } from "../settings/supervisor.ts";
 import { digest, scopeEvidence } from "./evidence.ts";
 
 const ENTRY = "pi-better-harness:shared-read-fault";
-const readers = new Set(["bg_task_status", "bg_task_logs", "bg_task_list", "bg_task_wait_list", "subagent_status", "subagent_list", "subagent_result"]);
+const readers = new Set(["bg_task_status", "bg_task_log", "bg_task_list", "bg_task_wait_list", "subagent_status", "subagent_list", "subagent_result"]);
 type Row = { operation: string; revision: string; incident: string; state: "open" | "verified"; text: string };
 export function matchReadFailure(event: ToolResultEvent) {
-  return event.content.some(b => b.type === "text" && /runtime-unhealthy: runtime_get_snapshot timed out|Runtime scope is still rebuilding; retry the observation\.|runtime-unhealthy: read worker (?:exited|failed|unresponsive)/.test(b.text));
+  return event.content.some(b => b.type === "text" && /^(?:Error: )?(?:runtime-unhealthy: runtime_get_snapshot timed out|Runtime scope is still rebuilding; retry the observation\.|runtime-unhealthy: read worker (?:exited|failed|unresponsive)[^\n]*)$/.test(b.text.trim()));
 }
 export function registerSharedFault(pi: ExtensionAPI) {
   const inFlight = new Map<string, AbortController>();

@@ -1,3 +1,4 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 export function openSupervisorClient(cwd: string, sessionId: string, signal: AbortSignal): Promise<{
     close(): void;
@@ -6,5 +7,5 @@ export function openSupervisorClient(cwd: string, sessionId: string, signal: Abo
     }>;
     sharedReadDiagnosis(): Promise<{ status: string; incident?: { id: string; recommendation: string } }>;
     review(scenario: string, action: "begin" | "finish" | "release", token?: string): Promise<{ status: string; token?: string }>;
-    role(): Promise<{ revision: string; instructions: string; model?: string | null; effort?: ThinkingLevel | "off" | null } | undefined>;
+    role(pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ revision: string; instructions: string; model?: string | null; effort?: ThinkingLevel | "off" | null } | undefined>;
 }>;

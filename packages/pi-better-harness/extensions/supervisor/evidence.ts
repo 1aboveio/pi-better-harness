@@ -17,7 +17,7 @@ export function readFingerprint(event: ToolResultEvent) {
     if (block.type !== "text" || block.text.length > 64_000) return;
     hash.update(JSON.stringify(block.text));
   }
-  return { tool: event.toolName, fingerprint: hash.digest("hex") };
+  return { tool: event.toolName, target: typeof event.input.path === "string" ? event.input.path.slice(-250) : "current workspace", fingerprint: hash.digest("hex") };
 }
 export class RepeatedRead {
   private last?: { fingerprint: string; since: number; count: number };
@@ -33,14 +33,14 @@ export function scopeEvidence(branch: Branch) {
   const newest = [...branch].reverse();
   const outcomeEntry = newest.find(entry => entry.type === "custom" && entry.customType === OUTCOME_ENTRY);
   const outcome = outcomeEntry?.type === "custom" && (outcomeEntry.data as { outcome?: Outcome })?.outcome;
-  if (!outcome || outcome.status !== "active") return;
+  if (!outcome || outcome.status !== "active" || typeof outcome.objective !== "string") return;
   const user = newest.find(entry => entry.type === "message" && entry.message.role === "user");
   const content = user?.type === "message" && user.message.role === "user" ? user.message.content : "";
   const lastInstruction = typeof content === "string" ? content : content.filter(x => x.type === "text").map(x => x.text).join("\n");
   const plan = newest.find(entry => entry.type === "custom" && entry.customType === EXTENSION_NAME &&
     ["set", "clear"].includes((entry.data as PlanEntry | undefined)?.kind ?? ""));
   const data = plan?.type === "custom" ? plan.data as PlanEntry : undefined;
-  const steps = data?.kind === "set" ? data.plan.steps.map(s => ({ id: s.id, step: s.step, status: s.status })) : [];
+  const steps = data?.kind === "set" && Array.isArray(data.plan?.steps) ? data.plan.steps.slice(0, 50).map(s => ({ id: s.id, step: s.step, status: s.status })) : [];
   return {
     outcomeId: outcomeEntry!.id,
     planId: data?.kind === "set" ? data.plan.planId : undefined,
