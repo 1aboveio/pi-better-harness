@@ -78,6 +78,10 @@ test("stalled identical successful reads get one review while changing evidence 
   read("same"); await wait(4); read("same"); read("same"); await wait(60); read("same"); await wait(40);
   assert.equal(f.requests.length, 1);
   assert.equal(f.messages.length, 1);
+  f.fire("session_start", {});
+  read("same"); await wait(4); read("same"); read("same"); await wait(30);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.messages.length, 1);
 });
 
 test("a follow-up query reuses the commitment; verification requires distinct observed results", async t => {
@@ -165,4 +169,5 @@ test("changing user scope triggers a review after the turn even without a Todo e
   await wait(80);
   assert.equal(f.requests.length, 2);
   assert.match(JSON.stringify(f.requests[1].messages), /limited to the deployment/);
+  assert.equal(f.messages.length, 1, "the same proposed pruning does not interrupt again");
 });

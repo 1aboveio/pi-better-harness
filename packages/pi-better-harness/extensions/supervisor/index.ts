@@ -59,7 +59,9 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     const branch = ctx.sessionManager.getBranch();
     const scope = scopeEvidence(branch);
     if (!scope || (scenario === "scope-review" && !scope.steps.some(s => s.status !== "completed"))) return;
-    const key = digest(JSON.stringify([scenario, scope.revision, detail]));
+    // A repeated read's first-observed timestamp changes on reconnect. Its evidence does not.
+    const observationId = scenario === "stall-diagnosis" ? readKey ?? detail : detail;
+    const key = digest(JSON.stringify([scenario, scope.revision, observationId]));
     const cached = branch.find(e => e.type === "custom" && e.customType === ENTRY && (e.data as Receipt)?.key === key);
     if (cached?.type === "custom") return (cached.data as Receipt).advice ?? "No intervention recommended.";
     const previous = lastAttempt.get(scenario);
@@ -112,7 +114,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       token = undefined;
       // Identify a pruning suggestion by the work it removes, even if a later answer rephrases it.
       const scopeTargets = scenario === "scope-review" && steps.length ? digest(JSON.stringify([
-        scope.objective, scope.doneWhen, scope.boundaries, scope.lastInstruction,
+        scope.objective, scope.doneWhen, scope.boundaries,
         [...new Set(steps)].sort().map(id => [id, scope.steps.find(step => step.id === id)?.step]),
       ])) : undefined;
       const receipt: Receipt = { key, scenario, scopeTargets, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
