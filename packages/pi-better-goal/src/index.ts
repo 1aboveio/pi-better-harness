@@ -1230,7 +1230,8 @@ export default function (pi: ExtensionAPI): void {
       }
       const audit = requestTaskContext(pi, "audit", current);
       const criteria = audit.doneWhen?.length ? audit.doneWhen : audit.objective ? [audit.objective] : [];
-      const missing = criteria.filter(criterion => !input.evidence?.some(item => item.criterion === criterion && item.result.trim()));
+      const evidence = [...input.evidence ?? [], ...audit.evidence ?? []];
+      const missing = criteria.filter(criterion => !evidence.some(item => item.criterion === criterion && item.result.trim()));
       if (audit.ledgerBlocker || audit.openSteps?.length || missing.length) {
         const message = [
           "Verify the requested outcome before completing the Goal.",

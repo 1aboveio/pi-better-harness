@@ -162,6 +162,27 @@ test("long todos fold through commands, survive reload, and accept fullscreen mo
   }
 });
 
+test("dynamic Todo shows the whole review loop and expands its tasks in a narrow terminal", () => {
+  rmSync(seededPath, { force: true });
+  rmSync(readyPath, { force: true });
+  writeFileSync(probePath, seedTodoExtension(readyPath));
+  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  startPiSession();
+  waitForFile(readyPath);
+  sendLiteral("/seed-dynamic");
+  sendKey("Enter");
+  waitForFile(seededPath);
+  const graph = waitForScreen(screen => screen.includes("Review draft waiting") && screen.includes("Revise draft ready") && screen.includes("Deliver report"));
+  assert.match(graph, /Draft report ✓ ─→ Review draft waiting/);
+  assert.match(graph, /└─ Revise draft ready ←─+┘/);
+  assert.match(graph, /┬ ─→ Deliver report waiting/);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "35"]);
+  waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ Deliver report waiting"));
+  sendLiteral("\x1b[200~/todo expand\x1b[201~");
+  sendKey("Enter");
+  waitForScreen(screen => screen.includes("todo ▾") && /fix\s+(?:ready · )?Revise draft/.test(screen));
+});
+
 function startPiSession() {
   const command = [
     `cd ${shellQuote(fixtures)}`,
@@ -214,6 +235,23 @@ function seedTodoExtension(path) {
         }
       });
       await ctx.reload();
+    }
+  });
+  pi.registerCommand("seed-dynamic", {
+    handler: async (_args, ctx) => {
+      pi.appendEntry("pi-better-harness:dynamic-workflow", { version: 1, run: {
+        id: "report-example", revision: 3, objective: "Publish the interview report", criteria: ["Both sources verified"],
+        steps: [
+          { id: "draft", title: "Draft report", output: "Draft" },
+          { id: "review", title: "Review draft", dependsOn: ["draft"], output: "Verdict", review: { artifact: "draft", revision: "fix" } },
+          { id: "fix", title: "Revise draft", output: "Revised report" },
+          { id: "ship", title: "Deliver report", dependsOn: ["review"], output: "Receipt" }
+        ],
+        history: [{ step: "draft", result: "draft.md" }, { step: "review", version: 1, verdict: "changes_requested", result: "Verify second source" }],
+        catalogChoices: [], workers: {}
+      } });
+      await ctx.reload();
+      (await import("node:fs")).writeFileSync(${JSON.stringify(seededPath)}, "ready");
     }
   });
   pi.registerCommand("seed-rush", {

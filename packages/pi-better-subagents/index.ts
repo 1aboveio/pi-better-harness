@@ -82,6 +82,7 @@ import {
     type TimingStopReason,
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
+import { launchWorkflowAssignment } from "./workflow-assignment.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
@@ -2804,13 +2805,14 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ctx = captureLaunchContext(ctx);
             restoreDelegationMode(ctx);
             await workerOperations.start();
-            return definition.execute(key, params, signal, onUpdate, ctx);
+            return launchWorkflowAssignment(pi, ctx, key, params, args => definition.execute(key, args, signal, onUpdate, ctx));
         } } : { ...definition, async execute(key, params, signal, _onUpdate, ctx) {
             ctx = captureLaunchContext(ctx);
             catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
             void activateWorkObservation();
-            return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params, signal)) as never;
+            return launchWorkflowAssignment(pi, ctx, key, params, async args =>
+                await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, args, signal)) as never);
         } });
     };
     announceExecutionAdapter(pi, {
@@ -4020,6 +4022,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         ],
         parameters: Type.Object({
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained. On a continuation this is the next user turn; the original task and role stay in saved history." }),
+            workflow: Type.Optional(Type.Object({
+                runId: Type.String(), step: Type.String(),
+            }, { description: "Bind this launch to a ready dynamic workflow item. Supply its selected role or agent and inherit catalog skills." })),
             session_name: Type.Optional(Type.String({ description: "Exact name of one saved conversation in the current folder and descendants. Alternative to session_id. Duplicate names report matching session ids instead of choosing a conversation." })),
             session_id: Type.Optional(Type.String({ description: "Native session id of a saved conversation to continue (reported for every launch and attempt). Omit to start a new conversation. A continuation gets a new run id but keeps this session id, history, workspace, and frozen launch recipe." })),
             name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer'). Ignored when agent or role is set, except as the direct-role alias when alias is omitted." })),

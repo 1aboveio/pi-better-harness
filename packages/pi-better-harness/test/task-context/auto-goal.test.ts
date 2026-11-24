@@ -73,6 +73,8 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
   settings.refresh();
   return {
     entries, ctx, events, messages, emit, settings,
+    startWorkflow: () => commands.get("dynamic-workflow").handler("", ctx),
+    workflow: async (input: unknown) => (await tools.get("dynamic_workflow").execute("wf", input, undefined, undefined, ctx)).details.run,
     setIdle(value: boolean) { idle = value; },
     goal: () => reconstructGoalSnapshot(entries),
     outcome: () => restoreOutcome(entries),
@@ -317,4 +319,20 @@ test("Goal completion checks the associated work ledger in a headless session", 
   await h.update({ ledger: { action: "update", ledgerId, revision: 1,
     changes: [{ id: "qa", status: "completed", evidence: ["Deployment receipt"] }] } });
   assert.equal((await h.complete(evidence)).details.ok, true);
+});
+
+test("agent completion consults bound dynamic work and reuses the recorded objective evidence", async t => {
+  const h = await fixture(t);
+  await h.update({ outcome: accepted });
+  await h.startWorkflow();
+  const run = await h.workflow({ action: "define", definition: { objective: accepted.objective,
+    goalId: h.goal()!.goalId, criteria: accepted.doneWhen, steps: [{ id: "verify", title: "Verify checkout", output: "Receipt" }] } });
+  const evidence = [{ criterion: accepted.doneWhen[0], result: "Receipt 9" }];
+  assert.equal((await h.complete(evidence)).details.ok, false);
+  await h.workflow({ action: "submit", runId: run.id, revision: 1, step: "verify", result: "Receipt 9" });
+  assert.equal((await h.complete(evidence)).details.ok, false);
+  await h.workflow({ action: "finish", runId: run.id, revision: 2, evidence });
+  await h.emit("session_tree");
+  assert.equal((await h.complete()).details.ok, true);
+  assert.equal(h.goal()?.status, "complete");
 });
