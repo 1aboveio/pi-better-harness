@@ -74,6 +74,7 @@ process.on("message", async command => {
     process.send?.({ rpcEvidence: command.rpcEvidence, snapshot: evidence.snapshot() });
     return;
   }
+  if (command === "cpu") { process.send?.(process.cpuUsage()); return; }
   if (command === "metrics") {
     const domain = "../../src/runtime/domain/subagents/index.domain.mjs";
     const { isHealthTickerActive } = await import(domain);

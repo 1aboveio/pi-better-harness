@@ -115,7 +115,7 @@ export class SharedCatalog {
       if (command.type === "runtime_supervisor_review" && typeof command.action === "string" && command.action.startsWith("decision-")) {
         if (!reviewEnabled(this.agentDir, "shared-decisions")) return { status: "disabled" };
         const grant = this.admission.verify(registration!.authority);
-        return supervisorDecision(this.agentDir, grant, command);
+        return supervisorDecision(this.agentDir, { ...grant, projectTrusted: loc.projectTrusted }, command);
       }
       if (command.type === "runtime_supervisor_review" && command.action === "read-health") {
         if (!reviewEnabled(this.agentDir, "shared-fault")) return { status: "disabled" };

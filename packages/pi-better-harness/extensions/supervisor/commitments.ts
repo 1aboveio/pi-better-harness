@@ -32,7 +32,7 @@ function describe(c: Commitment) {
   return [`${c.id} · ${c.status}: ${c.action}`, `Verify: ${c.verification}`, c.observed, c.evidence && `Tool result: ${c.evidence}`,
     c.reminder && `Reminder: ${new Date(c.reminder).toISOString()}`].filter(Boolean).join("\n");
 }
-export function registerCommitments(pi: ExtensionAPI) {
+export function registerCommitments(pi: ExtensionAPI, onFailure: (ctx: ExtensionContext, evidence: string) => void) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const enabled = () => enabledScenarios().includes("commitment-followup");
   function clear() { clearTimeout(timer); timer = undefined; }
@@ -101,11 +101,14 @@ export function registerCommitments(pi: ExtensionAPI) {
       const c = items.get(p.id ?? "");
       if (!c) throw new Error("Unknown commitment in this Outcome.");
       if (p.action === "status") return reply(describe(c));
-      const seen = new Set(["supervisor_followup", "supervisor_request_decision"]);
+
       const latest = branch.map(e => e.type === "custom" && e.customType === ENTRY && (e.data as Commitment)?.id === c.id).lastIndexOf(true);
       const evidence = branch.slice(latest + 1).find(e => e.type === "message" && e.message.role === "toolResult" &&
-        e.message.toolCallId === p.toolCallId && !seen.has(e.message.toolName));
-      if (c.evidence === p.toolCallId && c.evidence) return reply(describe(c));
+        e.message.toolCallId === p.toolCallId && !e.message.toolName.startsWith("supervisor_"));
+      if (c.evidence === p.toolCallId && c.evidence) {
+        if (p.action === "verify" && c.status === "attempted") throw new Error("Verification requires a separate observed result.");
+        return reply(describe(c));
+      }
       if (!evidence || evidence.type !== "message" || evidence.message.role !== "toolResult") throw new Error("Provide a new tool result from this branch after the last commitment update.");
       if (c.status === "verified" || p.action === "verify" && c.status !== "attempted") throw new Error("Record a successful attempt before verification.");
       if (!p.observation?.trim()) throw new Error("Describe what the tool result establishes.");
@@ -114,6 +117,9 @@ export function registerCommitments(pi: ExtensionAPI) {
       if (next.status === "verified") delete next.reminder;
       pi.appendEntry(ENTRY, next);
       schedule(ctx);
+      if (next.status === "failed") onFailure(ctx, JSON.stringify({
+        commitment: next.id, failedRecovery: next.action, expected: next.verification, observed: next.observed,
+      }));
       return reply(describe(next));
     },
   });

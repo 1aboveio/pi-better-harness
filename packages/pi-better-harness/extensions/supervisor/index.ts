@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Api, Model, Context, SimpleStreamOptions, AssistantMessage } from "@earendil-works/pi-ai";
+
 import { openSupervisorClient } from "pi-better-subagents/supervisor-client.mjs";
 import { goalStallThresholds } from "pi-better-goal/src/stall.ts";
 import { DEFAULT_STALL_THRESHOLDS } from "pi-better-goal/src/shared-stall-detector.ts";
@@ -13,18 +13,19 @@ import { registerSharedFault } from "./shared-fault.ts";
 import { digest, ENTRY, readFingerprint, RepeatedRead, scopeEvidence, type Scenario } from "./evidence.ts";
 
 const prompts = {
+  "commitment-followup": "The owner tried an accepted recovery and recorded an observed failure. Recommend a materially different remedy only when the new evidence supports it. Suppress rewordings of the accepted action, untested guesses and status-only updates.",
   "stall-diagnosis": "The owner repeated an identical read with identical results across the stall interval. Compare competing explanations, including productive research or external waits. Recommend a different, specific check only when the evidence supports a cause. Name what result would advance the current acceptance criterion.",
   "scope-review": "Review unfinished Todo steps against the latest user instruction, objective and boundaries. Preserve necessary investigation. If a step clearly falls outside scope, cite its id and reason, name work to retain and propose a partial plan revision for the owner. Leave running work and artifacts to their owners.",
 };
-type Transport = { streamSimple(model: Model<Api>, context: Context, options: SimpleStreamOptions): { result(): Promise<AssistantMessage> } };
-type Receipt = { key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string };
+const FEEDBACK = "pi-better-harness:supervisor-progress";
+type Receipt = { outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string };
 export default function supervisor(pi: ExtensionAPI) {
   installSupervisor(pi, openSupervisorClient);
 }
 export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervisorClient) {
   registerSharedFault(pi);
   registerDecisionTool(pi);
-  registerCommitments(pi);
+  registerCommitments(pi, (ctx, evidence) => { void review(ctx, "commitment-followup", evidence); });
   const repeats = new RepeatedRead();
   let pending: AbortController | undefined;
   let pendingScenario: Scenario | undefined;
@@ -36,6 +37,13 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   pi.on("session_tree", reset);
   pi.on("session_shutdown", reset);
   pi.on("input", () => { reset(); });
+  pi.on("before_agent_start", () => {
+    const selected = enabledScenarios();
+    const hints = [];
+    if (selected.includes("shared-decisions")) hints.push("For an exact action that several owners need the user to authorize, use supervisor_request_decision with the same proposal reference and exact effects.");
+    if (selected.includes("commitment-followup")) hints.push("When committing to a recovery, record its action and verification condition with supervisor_followup. Record attempts and verification using observed tool result IDs. Use status for progress inquiries.");
+    if (hints.length) return { message: { customType: "pi-better-harness:supervisor-controls", content: hints.join("\n"), display: false } };
+  });
 
   async function review(ctx: ExtensionContext, scenario: Scenario, detail: string, publish = true) {
     if (pending || !enabledScenarios().includes(scenario)) return;
@@ -66,27 +74,61 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       if (!role || typeof modelId !== "string" || !current()) return;
       const slash = modelId.indexOf("/");
       const model = ctx.modelRegistry.find(modelId.slice(0, slash), modelId.slice(slash + 1));
-      const transport = ctx.modelRegistry as typeof ctx.modelRegistry & Partial<Transport>;
-      if (!model || !transport.streamSimple) return;
-      const result = await transport.streamSimple(model, {
-        systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return JSON with advice as a concise recommendation in the owner's language, or null for insufficient evidence."].join("\n"),
-        messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail }), timestamp: Date.now() }],
-      }, { sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 700,
+      if (!model) return;
+      const provider = ctx.modelRegistry.getProvider(model.provider);
+      const auth = provider && await ctx.modelRegistry.getProviderAuth(model.provider);
+      if (!provider || !auth || !current()) return;
+      const target = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
+      const evidenceRefs = ["outcome", "observation", ...scope.steps.map(step => `step:${step.id}`)];
+      const result = await provider.streamSimple(target, {
+        systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return JSON {advice, evidence, expected, steps}. For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
+        messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs }), timestamp: Date.now() }],
+      }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 700,
         reasoning: role.effort && role.effort !== "off" ? role.effort : undefined }).result();
       if (result.stopReason !== "stop" || !current()) return;
       const output = result.content.filter(x => x.type === "text").map(x => x.text).join("");
-      const { advice } = JSON.parse(output);
+      const answer = JSON.parse(output);
+      const { advice } = answer;
+      const evidence: string[] = answer.evidence ?? [], steps: string[] = answer.steps ?? [];
+      const expected: string = answer.expected ?? "";
+      if (!Array.isArray(evidence) || evidence.length > 52 || !evidence.every(id => evidenceRefs.includes(id)) ||
+          !Array.isArray(steps) || steps.length > 50 || !steps.every(id => scope.steps.some(step => step.id === id && step.status !== "completed")) ||
+          typeof expected !== "string" || expected.length > 500) return;
+      if (advice && (!evidence.length || !expected.trim() || scenario === "scope-review" && !steps.length)) return;
       if (advice !== null && (typeof advice !== "string" || !advice.trim() || advice.length > 2400)) return;
       if ((await catalog.review(scenario, "finish", token)).status !== "admitted" || !current()) return;
       token = undefined;
-      pi.appendEntry(ENTRY, { key, scenario, revision: scope.revision, catalogRevision: role.revision, advice } satisfies Receipt);
-      if (advice && publish) pi.sendMessage({ customType: ENTRY, content: advice, display: true }, { deliverAs: "steer", triggerTurn: false });
+      const receipt: Receipt = { key, scenario, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
+        evidence, expected, steps, catalogRevision: role.revision, advice };
+      pi.appendEntry(ENTRY, receipt);
+      if (advice && publish) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
       return advice ?? "No intervention recommended.";
     } catch { /* An unavailable diagnostic leaves the owner's original operation running. */ }
     finally {
       try { if (token) await catalog?.review(scenario, "release", token); } catch { /* Lease expires independently. */ }
       catalog?.close();
       if (pending === controller) pending = undefined;
+    }
+  }
+  function recordProgress(ctx: ExtensionContext) {
+    if (!enabledScenarios().length) return;
+    const branch = ctx.sessionManager.getBranch(), scope = scopeEvidence(branch);
+    if (!scope?.planId) return;
+    const prior = new Map<string, string>();
+    for (const e of branch) if (e.type === "custom" && e.customType === FEEDBACK) {
+      const f = e.data as { key: string; observed: string };
+      prior.set(f.key, f.observed);
+    }
+    for (const e of branch) {
+      if (e.type !== "custom" || e.customType !== ENTRY) continue;
+      const r = e.data as Receipt;
+      if (!r.advice || r.plan !== scope.planId || r.outcome !== scope.outcomeId || !r.steps?.length) continue;
+      const observed = r.steps.filter(id => r.scenario === "scope-review"
+        ? !scope.steps.some(s => s.id === id) : scope.steps.some(s => s.id === id && s.status === "completed")).sort().join(", ");
+      if (observed && prior.get(r.key) !== observed) {
+        pi.appendEntry(FEEDBACK, { key: r.key, observed, scenario: r.scenario, outcome: r.outcome, revision: scope.revision,
+          status: observed.split(", ").length === r.steps.length ? "observed" : "partially observed" });
+      }
     }
   }
   const scopeChange = "The owner revised the Outcome or Todo.";
@@ -106,6 +148,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (event.toolName.startsWith("supervisor_")) return;
     if (event.toolName === "update_todo" && !event.isError) {
       reset();
+      recordProgress(ctx);
       if (event.input.todo || event.input.outcome) void review(ctx, "scope-review", scopeChange);
       return;
     }

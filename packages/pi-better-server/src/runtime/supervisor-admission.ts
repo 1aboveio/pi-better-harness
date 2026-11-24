@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type ReviewScenario = "stall-diagnosis" | "scope-review";
+export type ReviewScenario = "stall-diagnosis" | "scope-review" | "commitment-followup";
 export function reviewEnabled(agentDir: string, scenario: string) {
   try {
     const raw = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).piBetterHarness?.supervisorMode;
@@ -21,7 +21,7 @@ export class SupervisorAdmission {
   }
   request(owner: string, command: Record<string, unknown>) {
     const scenario = command.scenario;
-    if (scenario !== "stall-diagnosis" && scenario !== "scope-review") throw new Error("Unsupported Supervisor scenario");
+    if (scenario !== "stall-diagnosis" && scenario !== "scope-review" && scenario !== "commitment-followup") throw new Error("Unsupported Supervisor scenario");
     const lease = this.lease;
     if (lease && (lease.expires <= this.now() || !this.enabled(lease.scenario))) this.lease = undefined;
     if (!this.enabled(scenario)) return { status: "disabled" };

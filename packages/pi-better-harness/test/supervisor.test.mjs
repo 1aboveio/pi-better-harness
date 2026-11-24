@@ -25,10 +25,11 @@ function fixture(t, scenario) {
   const handlers = new Map(), tools = new Map(), messages = [], requests = [];
   const ctx = { sessionManager, cwd: dir, modelRegistry: {
     find: () => ({ id: "model", provider: "test" }),
-    streamSimple: (_model, context) => { requests.push(context); return { result: async () => {
+    getProviderAuth: async () => ({ auth: {} }),
+    getProvider: () => ({ streamSimple: (_model, context) => { requests.push(context); return { result: async () => {
       await wait(20);
-      return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ advice: "Inspect the original acceptance criterion before expanding the plan." }) }] };
-    } }; },
+      return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ advice: "Inspect the original acceptance criterion before expanding the plan.", evidence: ["step:one", "observation"], expected: "The accepted CI work continues.", steps: ["one"] }) }] };
+    } }; } }),
   } };
   const pi = {
     on(name, callback) { handlers.set(name, [...(handlers.get(name) ?? []), callback]); },
@@ -42,7 +43,7 @@ function fixture(t, scenario) {
   }));
   const fire = (name, event) => handlers.get(name)?.forEach(fn => fn(event, ctx));
   sessionManager.appendCustomEntry(OUTCOME_ENTRY, { version: 1, outcome: { objective: "Restore CI", status: "active" } });
-  sessionManager.appendCustomEntry(EXTENSION_NAME, { kind: "set", plan: { steps: [{ id: "one", step: "Refactor unrelated feature", status: "pending" }] } });
+  sessionManager.appendCustomEntry(EXTENSION_NAME, { kind: "set", plan: { planId: "plan", steps: [{ id: "one", step: "Refactor unrelated feature", status: "pending" }] } });
   return { settings, messages, requests, sessionManager, fire, ctx, tools };
 }
 

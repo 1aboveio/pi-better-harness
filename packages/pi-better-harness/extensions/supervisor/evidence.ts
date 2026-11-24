@@ -3,7 +3,7 @@ import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-codin
 import { OUTCOME_ENTRY, type Outcome } from "../task-context/outcome-state.ts";
 import { EXTENSION_NAME, type PlanEntry } from "../task-context/types.ts";
 
-export type Scenario = "stall-diagnosis" | "scope-review";
+export type Scenario = "stall-diagnosis" | "scope-review" | "commitment-followup";
 type Branch = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>;
 export const ENTRY = "pi-better-harness:supervisor-review";
 export const digest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -42,6 +42,8 @@ export function scopeEvidence(branch: Branch) {
   const data = plan?.type === "custom" ? plan.data as PlanEntry : undefined;
   const steps = data?.kind === "set" ? data.plan.steps.map(s => ({ id: s.id, step: s.step, status: s.status })) : [];
   return {
+    outcomeId: outcomeEntry!.id,
+    planId: data?.kind === "set" ? data.plan.planId : undefined,
     revision: [outcomeEntry!.id, user?.id, plan?.id].join("/"),
     objective: outcome.objective.slice(0, 2000),
     doneWhen: outcome.doneWhen?.slice(0, 8).map(s => s.slice(0, 400)),
