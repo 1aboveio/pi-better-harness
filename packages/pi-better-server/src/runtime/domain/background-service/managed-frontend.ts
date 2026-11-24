@@ -8,7 +8,7 @@ import { getCallbackBatcher } from './shared-callback-batcher.js';
 import { registerObservedWaitClient } from "./observed-wait-client.js";
 import type { ObservedWaitHost } from "./observed-waits.js";
 import { observeNavigatorLaunch } from './shared-navigator.ts';
-import { ciObservationEnabled, requestCiRecoveryWake, supervisorConsultTool, supervisorOutcome, supervisorRecoveryType } from './ci-observation.js';
+import { ciObservationRevision, requestCiRecoveryWake, supervisorConsultTool, supervisorOutcome, supervisorRecoveryType } from './ci-observation.js';
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     let ctx: ExtensionContext | undefined, generation = 0, refresh: Promise<void> | undefined, dirty=false;
@@ -147,7 +147,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                         const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
                             getSuppressionReason: () => {
                                 if (!active(n.origin, n.branchId)) return 'The originating session or branch is no longer active';
-                                if (recovery && (!ciObservationEnabled() || supervisorOutcome(captured.sessionManager.getBranch())?.id !== n.outcomeId
+                                if (recovery && (typeof n.settingRevision !== 'string' || ciObservationRevision() !== n.settingRevision || supervisorOutcome(captured.sessionManager.getBranch())?.id !== n.outcomeId
                                     || !captured.isIdle() || Date.now() >= n.validUntil || !wake?.())) return 'CI recovery needs fresh settings, Outcome, or remote evidence';
                             },
                             onDelivered: () => { if (!recovery || recoveryProof()) receipt(true); else retry(); },

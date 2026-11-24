@@ -151,3 +151,18 @@ test("a covered owner attaches its own verification to the settled decision", as
   assert.equal(await run({ verifyToolCallId: "later" }), "verified");
   assert.equal(await run({}), "approved · verified");
 });
+
+test("changing user scope triggers a review after the turn even without a Todo edit", async t => {
+  const f = fixture(t, "scope-review");
+  f.fire("agent_end", {});
+  await wait(80);
+  assert.equal(f.messages.length, 1);
+  f.fire("agent_end", {});
+  await wait(5);
+  assert.equal(f.requests.length, 1);
+  f.sessionManager.appendMessage({ role: "user", content: "Keep the diagnosis limited to the deployment.", timestamp: Date.now() });
+  f.fire("agent_end", {});
+  await wait(80);
+  assert.equal(f.requests.length, 2);
+  assert.match(JSON.stringify(f.requests[1].messages), /limited to the deployment/);
+});

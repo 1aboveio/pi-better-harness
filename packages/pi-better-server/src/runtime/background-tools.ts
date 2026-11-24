@@ -33,7 +33,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
     const recoveryHistory = new Map<string, number>();
     const recoveryWindowMs = 10 * 60_000;
     const interruptedStatuses = ['failed', 'timed_out', 'lost'];
-    const recoveryEnabled = () => !draining() && ci.ciObservationEnabled({ agentDir: () => root });
+    const settingRevision = () => draining() ? undefined : ci.ciObservationRevision({ agentDir: () => root });
+    const recoveryEnabled = () => settingRevision() !== undefined;
     const recovery = new CiRecovery(recoveryEnabled, {
         async read(run, signal, evidence, policy) {
             if (!evidence.policy) return;
@@ -373,19 +374,19 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const outgoing = [];
                     let retryAfterMs = Number.isFinite(nextReviewAt) ? Math.max(1, nextReviewAt - Date.now()) : undefined;
                     if (liveAlerts.size && deliveries.size >= 256) retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
-                    if (recoveryInput) {
+                    const supervisorRevision = recoveryInput && settingRevision();
+                    if (recoveryInput && !supervisorRevision && recoveryCandidates.size) invalidateRecovery();
+                    if (recoveryInput && supervisorRevision) {
                         const capture = (task: any) => {
                             if (task.durable && task.terminal && interruptedStatuses.includes(task.status) && ciEvidence(task.id)?.callback)
                                 rememberRecovery(key, task.id, false, task.endedAt);
                         };
                         for (const task of tasks) capture(task);
-                        const enabled = recoveryEnabled();
-                        if (!enabled && recoveryCandidates.size) invalidateRecovery();
                         // A replacement daemon may not have seen the short-lived terminal
                         // snapshot. Reuse the bounded, exact-recipient history read.
-                        const historyKey = JSON.stringify([key, recoveryInput.outcome.id]);
+                        const historyKey = JSON.stringify([key, recoveryInput.outcome.id, supervisorRevision]);
                         const historyDue = recoveryHistory.get(historyKey) ?? 0;
-                        if (enabled && historyDue !== Infinity && ![...recoveryCandidates.values()].some(item => item.owner === key)) {
+                        if (historyDue !== Infinity && ![...recoveryCandidates.values()].some(item => item.owner === key)) {
                             if (historyDue >= 0 && historyDue <= Date.now()) {
                                 recoveryHistory.set(historyKey, -1); // pending
                                 if (recoveryHistory.size > 128) recoveryHistory.delete(recoveryHistory.keys().next().value!);
@@ -399,20 +400,19 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             const retry = Math.max(1000, historyDue - Date.now());
                             retryAfterMs = Math.min(retryAfterMs ?? retry, retry);
                         }
-                        const liveRuns = new Set(tasks.filter(task => task.active).map(task => ciEvidence(task.id)?.run)
-                            .filter(Boolean).map((run: any) => `${run.repo}:${run.runId}:${run.attempt}`));
-                        for (const [index, candidate] of recoveryCandidates) {
-                            if (candidate.until < Date.now()) { recoveryCandidates.delete(index); continue; }
-                            if (candidate.owner !== key) continue;
+                        const candidates = [...recoveryCandidates].filter(([index, candidate]) => {
+                            if (candidate.until >= Date.now()) return candidate.owner === key;
+                            recoveryCandidates.delete(index);
+                            return false;
+                        });
+                        const liveRuns = new Set(candidates.length ? tasks.filter(task => task.active).map(task => ciEvidence(task.id)?.run)
+                            .filter(Boolean).map((run: any) => `${run.repo}:${run.runId}:${run.attempt}`) : []);
+                        for (const [index, candidate] of candidates) {
                             const evidence = ciEvidence(candidate.id);
                             if (!evidence || !candidate.direct && !evidence.callback) { recoveryCandidates.delete(index); continue; }
                             if (liveRuns.has(`${evidence.run.repo}:${evidence.run.runId}:${evidence.run.attempt}`)) continue;
-                            if (!enabled) {
-                                retryAfterMs = Math.min(retryAfterMs ?? 5000, 5000);
-                                continue;
-                            }
                             let check;
-                            try { check = recovery.inspect(evidence, recoveryInput); }
+                            try { check = recovery.inspect(evidence, { ...recoveryInput, authorization: authority.backgroundDigest([recoveryInput.authorization, supervisorRevision]) }); }
                             catch { continue; /* Do not replace unreadable intervention history. */ }
                             if (check.status !== 'ready') {
                                 if (check.status === 'checking') retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
@@ -427,7 +427,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                                 `Read the latest stage with \`gh ${args.join(' ')}\`, then resume observation of that same run. Do not dispatch or rerun it.`,
                                 ...(check.stage.steps.length ? [`Last observed steps: ${check.stage.steps.map(step => JSON.stringify(step)).join(', ')}.`] : [])].join('\n');
                             const notification = { origin, taskId: candidate.id, operationId: evidence.operation.operationId,
-                                branchId: evidence.operation.owner.branchId, outcomeId: outcome?.id, validUntil: check.checkedAt + recoveryFreshMs, urgent: true,
+                                branchId: evidence.operation.owner.branchId, outcomeId: outcome?.id, settingRevision: supervisorRevision, validUntil: check.checkedAt + recoveryFreshMs, urgent: true,
                                 event: { source: 'background-task', id: receiptId, inspectId: candidate.id, label: 'CI observation recovery',
                                     status: 'observation interrupted', customType: ci.supervisorRecoveryType, content, detailTool: 'bg_task_status' } };
                             liveAlerts.set(receiptId, notification);

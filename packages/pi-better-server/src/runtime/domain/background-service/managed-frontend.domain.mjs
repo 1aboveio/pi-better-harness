@@ -6,7 +6,7 @@ import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
-import { ciObservationEnabled, requestCiRecoveryWake, supervisorConsultTool, supervisorOutcome, supervisorRecoveryType } from "./ci-observation.domain.mjs";
+import { ciObservationRevision, requestCiRecoveryWake, supervisorConsultTool, supervisorOutcome, supervisorRecoveryType } from "./ci-observation.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
@@ -183,7 +183,7 @@ export function createManagedBackgroundFrontend(pi) {
                             getSuppressionReason: () => {
                                 if (!active(n.origin, n.branchId))
                                     return 'The originating session or branch is no longer active';
-                                if (recovery && (!ciObservationEnabled() || supervisorOutcome(captured.sessionManager.getBranch())?.id !== n.outcomeId
+                                if (recovery && (typeof n.settingRevision !== 'string' || ciObservationRevision() !== n.settingRevision || supervisorOutcome(captured.sessionManager.getBranch())?.id !== n.outcomeId
                                     || !captured.isIdle() || Date.now() >= n.validUntil || !wake?.()))
                                     return 'CI recovery needs fresh settings, Outcome, or remote evidence';
                             },

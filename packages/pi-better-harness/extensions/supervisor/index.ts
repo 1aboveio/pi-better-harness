@@ -18,7 +18,7 @@ const prompts = {
   "scope-review": "Review unfinished Todo steps against the latest user instruction, objective and boundaries. Preserve necessary investigation. If a step clearly falls outside scope, cite its id and reason, name work to retain and propose a partial plan revision for the owner. Leave running work and artifacts to their owners.",
 };
 const FEEDBACK = "pi-better-harness:supervisor-progress";
-type Receipt = { outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string; role: { instructions: string; model: string; effort?: string | null } };
+type Receipt = { scopeTargets?: string; outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string; role: { instructions: string; model: string; effort?: string | null } };
 export default function supervisor(pi: ExtensionAPI) {
   installSupervisor(pi, openSupervisorClient);
 }
@@ -32,9 +32,10 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   let readKey: string | undefined;
   let reviewedShape: string | undefined;
   let stallEvidence: string | undefined;
+  const lastAttempt = new Map<Scenario, { key: string; at: number }>();
   let serial = 0;
   const reset = () => { repeats.reset(); readKey = undefined; stallEvidence = undefined; serial++; pending?.abort(); pending = undefined; };
-  const newBranch = () => { reset(); reviewedShape = undefined; };
+  const newBranch = () => { reset(); reviewedShape = undefined; lastAttempt.clear(); };
   pi.on("session_start", newBranch);
   pi.on("session_tree", newBranch);
   pi.on("session_shutdown", reset);
@@ -61,6 +62,9 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     const key = digest(JSON.stringify([scenario, scope.revision, detail]));
     const cached = branch.find(e => e.type === "custom" && e.customType === ENTRY && (e.data as Receipt)?.key === key);
     if (cached?.type === "custom") return (cached.data as Receipt).advice ?? "No intervention recommended.";
+    const previous = lastAttempt.get(scenario);
+    if (publish && previous?.key === key && Date.now() - previous.at < 45_000) return;
+    lastAttempt.set(scenario, { key, at: Date.now() });
     const generation = serial;
     const sessionId = ctx.sessionManager.getSessionId();
     const controller = new AbortController();
@@ -106,7 +110,12 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       if (advice !== null && (typeof advice !== "string" || !advice.trim() || advice.length > 2400)) return;
       if ((await catalog.review(scenario, "finish", token)).status !== "admitted" || !current()) return;
       token = undefined;
-      const receipt: Receipt = { key, scenario, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
+      // Identify a pruning suggestion by the work it removes, even if a later answer rephrases it.
+      const scopeTargets = scenario === "scope-review" && steps.length ? digest(JSON.stringify([
+        scope.objective, scope.doneWhen, scope.boundaries, scope.lastInstruction,
+        [...new Set(steps)].sort().map(id => [id, scope.steps.find(step => step.id === id)?.step]),
+      ])) : undefined;
+      const receipt: Receipt = { key, scenario, scopeTargets, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
         evidence, expected, steps, catalogRevision: role.revision, role: { instructions: role.instructions, model: modelId, effort: role.effort }, advice };
       pi.appendEntry(ENTRY, receipt);
       if (scenario === "scope-review") reviewedShape = planShape(ctx);
@@ -114,7 +123,8 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
         if (e.type !== "custom" || e.customType !== ENTRY) return false;
         const r = e.data as Receipt;
         return r.scenario === scenario && r.outcome === scope.outcomeId && r.plan === scope.planId &&
-          r.advice === advice && r.expected === expected && JSON.stringify(r.steps) === JSON.stringify(steps);
+          (scopeTargets && scopeTargets === r.scopeTargets ||
+            !r.scopeTargets && r.advice === advice && r.expected === expected && JSON.stringify(r.steps) === JSON.stringify(steps));
       });
       if (advice && publish && !alreadySuggested) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
       return advice ?? "No intervention recommended.";
@@ -147,6 +157,12 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     }
   }
   const scopeChange = "The owner revised the Outcome or Todo.";
+  function reviewPlan(ctx: ExtensionContext) {
+    if (enabledScenarios().includes("scope-review") && planShape(ctx) !== reviewedShape)
+      void review(ctx, "scope-review", scopeChange);
+  }
+  // User instructions can revise scope without updating Todo in the same turn.
+  pi.on("agent_end", (_event, ctx) => { reviewPlan(ctx); });
   pi.registerTool({
     name: "supervisor_review", label: "Review Outcome",
     description: "Consult Supervisor about scope or a possible progress stall. Shares the proactive review and returns prior advice without another push.",
@@ -164,8 +180,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (event.toolName === "update_todo" && !event.isError) {
       reset();
       recordProgress(ctx);
-      if ((event.input.todo || event.input.outcome) && enabledScenarios().includes("scope-review") &&
-          planShape(ctx) !== reviewedShape) void review(ctx, "scope-review", scopeChange);
+      if (event.input.todo || event.input.outcome) reviewPlan(ctx);
       return;
     }
     if (!enabledScenarios().includes("stall-diagnosis")) { repeats.reset(); return; }

@@ -40,14 +40,13 @@ export function requestCiRecoveryWake(pi: ExtensionAPI, ctx: ExtensionContext, b
     });
 }
 
-export function ciObservationEnabled(seams?: HarnessSettingsSeams): boolean {
+export function ciObservationRevision(seams?: HarnessSettingsSeams): string | undefined {
     try {
-        const setting = readHarnessSetting<{ enabled?: unknown; scenarios?: unknown }>('supervisorMode', seams);
-        return setting?.enabled === true && Array.isArray(setting.scenarios)
-            && setting.scenarios.every(id => typeof id === 'string') && setting.scenarios.includes('ci-observation');
-    } catch {
-        return false;
-    }
+        const setting = readHarnessSetting<{ enabled?: unknown; scenarios?: unknown; revision?: unknown }>('supervisorMode', seams);
+        if (setting?.enabled === true && Array.isArray(setting.scenarios)
+            && setting.scenarios.every(id => typeof id === 'string') && setting.scenarios.includes('ci-observation'))
+            return typeof setting.revision === 'string' ? setting.revision : 'initial';
+    } catch { /* An unreadable setting cannot enable a recovery. */ }
 }
 
 // Only the current Outcome entry and bounded criteria cross the native grant.

@@ -45,15 +45,14 @@ export function requestCiRecoveryWake(pi, ctx, branchId, validUntil) {
         }
     });
 }
-export function ciObservationEnabled(seams) {
+export function ciObservationRevision(seams) {
     try {
         const setting = readHarnessSetting('supervisorMode', seams);
-        return setting?.enabled === true && Array.isArray(setting.scenarios)
-            && setting.scenarios.every(id => typeof id === 'string') && setting.scenarios.includes('ci-observation');
+        if (setting?.enabled === true && Array.isArray(setting.scenarios)
+            && setting.scenarios.every(id => typeof id === 'string') && setting.scenarios.includes('ci-observation'))
+            return typeof setting.revision === 'string' ? setting.revision : 'initial';
     }
-    catch {
-        return false;
-    }
+    catch { /* An unreadable setting cannot enable a recovery. */ }
 }
 // Only the current Outcome entry and bounded criteria cross the native grant.
 // Never send the branch transcript or infer an Outcome from tool output.
