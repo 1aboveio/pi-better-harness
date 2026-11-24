@@ -75,6 +75,12 @@ export declare const APPROVED_ROLE_DEFAULTS: readonly [{
     readonly effort: "high";
     readonly tier: "frontier";
 }, {
+    readonly id: "role.supervisor";
+    readonly name: "Supervisor";
+    readonly model: "openai/gpt-6.1-sol";
+    readonly effort: "medium";
+    readonly tier: "balanced";
+}, {
     readonly id: "role.writer";
     readonly name: "Writer";
     readonly model: "openai/gpt-6.1-terra";

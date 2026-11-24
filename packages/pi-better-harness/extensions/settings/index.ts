@@ -1,6 +1,7 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentInstructions, manageInstructions, validateInstructionsPrompt } from "../../lib/instructions.mjs";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
+import { openSupervisorSettings } from "./supervisor.ts";
 import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
 import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from "pi-better-background-tasks/src/shared-callback-batcher.ts";
@@ -45,6 +46,8 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
           }, registry.controls(), view, [
+            { id: "supervisor:open", label: "Supervisor mode", currentValue: "Open", values: ["Open"],
+              description: "Choose the supervision scenarios shared by this agent directory." },
             { id: "instructions:toggle", label: "Harness instructions", currentValue: state, values: [state],
               description: "Toggle the global APPEND_SYSTEM.md block. Applies on startup or /reload." },
             ...(prompt === undefined ? [] : [{ id: "instructions:edit", label: "Instructions prompt", currentValue: "Edit",
@@ -55,6 +58,11 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
           return;
         }
         if (!selected) return;
+        if (selected === "supervisor:open") {
+          try { await openSupervisorSettings(ctx); }
+          catch (error) { ctx.ui.notify(`Supervisor mode: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+          continue;
+        }
         if (selected.startsWith("instructions:")) {
           try {
             if (readError) throw readError;
