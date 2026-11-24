@@ -20,8 +20,6 @@ export interface PlanRow {
 export interface PlanPresentation {
   rows: PlanRow[];
   metadata?: { text: string; color: string }[][];
-  /** A whole-run diagram can disclose its underlying Todo rows on expansion. */
-  foldAllRows?: boolean;
 }
 
 export const plainPlanTheme: PlanRenderTheme = { fg: (_color, value) => value };
@@ -32,7 +30,7 @@ function isInProgress(status: DisplayStatus): boolean {
   return status === "in_progress" || status === "implemented" || status === "reviewed";
 }
 
-function compactRowIndices(rows: PlanRow[]): number[] {
+export function compactRowIndices(rows: readonly { status: DisplayStatus }[]): number[] {
   if (rows.length <= COMPACT_PLAN_ROWS) return rows.map((_, index) => index);
   let active = rows.flatMap((row, index) => isInProgress(row.status) ? [index] : []);
   if (!active.length) active = rows.flatMap((row, index) =>
@@ -90,8 +88,6 @@ export function renderPlanPresentation(
     const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);
   }
-
-  if (plan.foldAllRows && !expanded && !full) return lines.map(line => truncateToWidth(line, size));
 
   const labelWidth = Math.min(12, Math.max(1, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
   const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>

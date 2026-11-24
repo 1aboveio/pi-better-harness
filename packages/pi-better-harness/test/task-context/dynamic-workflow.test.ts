@@ -11,7 +11,8 @@ import { captureLaunchContext } from "pi-better-subagents/launch-context.ts";
 import { launchWorkflowAssignment } from "pi-better-subagents/workflow-assignment.ts";
 import extension from "../../extensions/task-context/index.js";
 import { advanceWorkflow, defineWorkflow, phase, type Definition, type DynamicInput, type WorkflowRun } from "../../extensions/task-context/dynamic-workflow.js";
-import { renderDynamic } from "../../extensions/task-context/dynamic-workflow-view.js";
+import { renderDynamic, renderDynamicFrame } from "../../extensions/task-context/dynamic-workflow-view.js";
+import { createPlanWidget } from "../../extensions/task-context/plan-widget.js";
 
 const report: Definition = {
   objective: "Deliver the interview report", criteria: ["Both interviewees are represented"],
@@ -56,7 +57,10 @@ test("two independent tasks join, then versioned review either ships directly or
     assert.match(all, /one ○/);
     assert.match(all, /two ✓/);
     const expanded = renderDynamic(first, width, { fg: (_, s) => s }, true, {});
-    assert.ok(expanded.length > lines.length);
+    assert.match(lines.join("\n"), /… 1 more/);
+    assert.doesNotMatch(expanded.join("\n"), /… 1 more/);
+    for (const step of report.steps) assert.ok(expanded.some(line => line.includes(step.title)));
+    assert.doesNotMatch(all, /\b(?:ready|waiting|standby|complete|working)\b/);
   }
   assert.throws(() => defineWorkflow({ ...report, steps: report.steps.map(s => s.id === "fix" ? { ...s, dependsOn: ["ship"] } : s) }, []), /revision step/);
 });
@@ -65,9 +69,45 @@ test("independent stages retain their individual edges at a join", () => {
   const steps = report.steps.slice(0, 3).map(s => ({ ...s, stage: undefined }));
   const run = defineWorkflow({ ...report, steps }, []);
   const graph = renderDynamic(run, 100, { fg: (_, text) => text }, false, {}).join("\n");
-  assert.match(graph, /Interview buyer ready/);
-  assert.match(graph, /Interview seller ready/);
-  assert.match(graph, /Interview buyer \+ Interview seller → Draft report waiting/);
+  assert.match(graph, /○ Interview buyer/);
+  assert.match(graph, /○ Interview seller/);
+  assert.match(graph, /Interview buyer \+ Interview seller → · Draft report/);
+});
+
+test("a task click selects its diagram node in terminal cells without folding the list", () => {
+  const run = defineWorkflow({ ...report, steps: report.steps.map(s => s.id === "draft" ? { ...s, title: "整理访谈记录", stage: "Draft" } : s) }, []);
+  const theme = { fg: (_: string, text: string) => text, underline: (text: string) => "\x1b[4m" + text + "\x1b[24m" };
+  let selected: string | undefined;
+  let frame: ReturnType<typeof renderDynamicFrame>;
+  const widget = createPlanWidget(width => {
+    frame = renderDynamicFrame(run, width, theme, false, {}, selected);
+    return frame.lines;
+  }, () => false, () => false, () => assert.fail("a task click toggled disclosure"), (x, y) => {
+    const id = frame.stepAt(x, y);
+    return id ? () => { selected = id; } : undefined;
+  });
+  for (const width of [18, 35, 36, 60, 110]) {
+    const lines = widget.render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    const y = lines.findIndex(line => line.includes("整理"));
+    assert.ok(y > 0, lines.join("\n"));
+    const click = { type: "click", button: "left", x: 2, y, width };
+    if (width >= 36) {
+      assert.ok(lines[y]!.includes("│"), "the task list is left of the diagram");
+      assert.equal(widget.handleMouse({ ...click, x: width - 1 }), undefined);
+    }
+    assert.deepEqual(widget.handleMouse({ ...click, type: "press" }), { handled: true, render: false });
+    assert.equal(selected, undefined);
+    assert.deepEqual(widget.handleMouse(click), { handled: true, render: true });
+    assert.equal(selected, "draft");
+    const highlighted = widget.render(width).join("\n");
+    assert.match(highlighted, /\x1b\[4m· Draft\x1b\[24m/);
+    assert.match(highlighted, /draft · /);
+    if (width >= 36) assert.match(highlighted, /Required: Report/);
+    selected = undefined;
+    widget.invalidate();
+    assert.equal(widget.handleMouse(click), undefined);
+  }
 });
 
 async function harness(t: TestContext) {

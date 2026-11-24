@@ -1,7 +1,7 @@
 import { supportsPromptSections, type PromptSectionTarget } from "../execution-policy.js";
 import { registerDynamicWorkflow } from "./dynamic-workflow-runtime.js";
 import { openWork, readDynamic } from "./dynamic-workflow.js";
-import { describeRun, renderDynamic } from "./dynamic-workflow-view.js";
+import { describeRun, renderDynamicFrame, type DynamicFrame } from "./dynamic-workflow-view.js";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
@@ -517,8 +517,12 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
         refreshWidget = localRefresh;
+        let dynamicFrame: DynamicFrame | undefined;
+        let renderedRun: string | undefined;
+        let selectedStep: string | undefined;
         const widget = createPlanWidget(
           (width: number, disclosure?: string): string[] => {
+            dynamicFrame = undefined;
             if (!display || displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
             const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
             const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
@@ -539,14 +543,28 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading;
             }
             const run = dynamic.run();
-            if (run) return renderDynamic(run, width, theme, expanded, {
-              disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
-            });
+            if (run) {
+              if (renderedRun !== run.id) selectedStep = undefined;
+              renderedRun = run.id;
+              dynamicFrame = renderDynamicFrame(run, width, theme, expanded, {
+                disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
+              }, selectedStep);
+              return dynamicFrame.lines;
+            }
             return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading;
           },
-          () => (!rushBinding && !displayedWorkflowOwner && !!dynamic.run()) || (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
+          () => {
+            const run = dynamic.run();
+            if (!rushBinding && !displayedWorkflowOwner && run) return run.steps.length > COMPACT_PLAN_ROWS;
+            return (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS;
+          },
           () => expanded,
           () => setExpanded(!expanded),
+          (x, y) => {
+            const step = dynamicFrame?.stepAt(x, y);
+            if (!step || dynamic.run()?.id !== renderedRun) return undefined;
+            return () => { selectedStep = selectedStep === step ? undefined : step; };
+          },
         );
         return {
           ...widget,

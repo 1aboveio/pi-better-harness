@@ -74,7 +74,11 @@ workflow for dependencies, role handoffs or repeated review. The command works
 in every mode and keeps your saved preference.
 
 The agent records an objective, acceptance criteria, required outputs and task
-dependencies. Todo shows the whole run. Use `/todo expand` to inspect its tasks.
+dependencies. Todo shows tasks on the left and dependencies and review loops on the right.
+Task icons distinguish ready (○), working (●), waiting (·), optional standby (–),
+failed (×), and completed (✓) steps. In mouse-enabled Pi, click a task to highlight
+its stage and inspect its latest result. Use `/todo expand` to show every task.
+Below 36 terminal columns, the diagram follows the list.
 Independent tasks can run together. A join waits for each prerequisite's output.
 If a reviewer requests changes, the revision opens and the revised artifact
 returns to review. Delivery waits for approval of the current version.
