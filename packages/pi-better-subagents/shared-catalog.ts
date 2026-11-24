@@ -6,7 +6,7 @@ import type { AgentSessionOverrides } from "./agent-session-settings.ts";
 import { catalogHostAuthority } from "./catalog-host-admission.ts";
 
 /** Short-lived catalog connection. No transcript or permission authority travels here. */
-export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(), sessionId = "catalog", projectAccess?: boolean, signal?: AbortSignal) {
+export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(), sessionId = "catalog", projectAccess?: boolean, signal?: AbortSignal, hostAuthority = catalogHostAuthority) {
     signal?.throwIfAborted();
     const agentDir = realpathSync(userRoot);
     let registration;
@@ -19,7 +19,7 @@ export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(
     if (registration.version !== 1 || registration.agentDir !== agentDir) throw new Error("Invalid canonical runtime registration");
     const client = await connectCatalogClient(agentDir, registration.serverDir, undefined, signal);
     const register = async (setupSignal?: AbortSignal) => {
-        const authority = await catalogHostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
+        const authority = await hostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
         setupSignal?.throwIfAborted();
         await client.request("runtime_register_catalog", { cwd, sessionId: authority?.sessionId ?? sessionId, authority, projectAccess: projectAccess === false ? "deny" : undefined });
     };

@@ -39,6 +39,26 @@ test("isolated daemon admits live owners, consolidates decisions and honors live
   assert.equal(admitted.status, "admitted");
   assert.equal((await rpc(1, "finish", { token: admitted.token })).status, "stale");
   set(false); assert.equal((await rpc(0, "finish", { token: admitted.token })).status, "disabled");
+  // The Harness can load in a different module graph from the Subagents extension.
+  set(true);
+  writeFileSync(join(agent, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: agent, serverDir: server }));
+  const oldDir = process.env.PI_CODING_AGENT_DIR;
+  const native = await import(new URL("../../pi-better-subagents/supervisor-client.mjs", import.meta.url).href);
+  try {
+    process.env.PI_CODING_AGENT_DIR = agent;
+    const ctx = { cwd: root, isProjectTrusted: () => true, sessionManager: {
+      getSessionId: () => "independent-harness", getLeafId: () => "tip", getBranch: () => [],
+    } };
+    const standalone = await native.openSupervisorClient({ appendEntry() {} }, ctx, AbortSignal.timeout(5000));
+    try {
+      const permission = await standalone.review("scope-review", "begin");
+      assert.ok(permission.token);
+      assert.ok((await standalone.role())?.model);
+      assert.equal((await standalone.review("scope-review", "finish", permission.token)).status, "admitted");
+    } finally { standalone.close(); }
+  } finally {
+    if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
+  }
   const scope = { reference: "run-1", operation: "stop watcher", host: "localhost", resource: "observer-1", effect: "local process stopped" };
   set(true);
   const leader = await rpc(0, "decision-request", { scope });

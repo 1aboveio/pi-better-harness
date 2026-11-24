@@ -33,7 +33,7 @@ export function registerSharedFault(pi: ExtensionAPI, connect: typeof openSuperv
         inFlight.get(flight)?.abort();
         if (row?.state === "open") {
           pi.appendEntry(ENTRY, { ...row, state: "verified", text: `Verified by successful ${event.toolName} for the original input.` } satisfies Row);
-          const reporter = await connect(ctx.cwd, session, AbortSignal.timeout(5000));
+          const reporter = await connect(pi, ctx, AbortSignal.timeout(5000));
           try { await reporter.sharedReadDiagnosis(row.incident); } finally { reporter.close(); }
         }
       }
@@ -45,7 +45,7 @@ export function registerSharedFault(pi: ExtensionAPI, connect: typeof openSuperv
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(7000)]);
     let client: Awaited<ReturnType<typeof openSupervisorClient>> | undefined;
     try {
-      client = await connect(ctx.cwd, session, signal);
+      client = await connect(pi, ctx, signal);
       const { incident } = await client.sharedReadDiagnosis();
       if (!incident || signal.aborted || scenarioRevision("shared-fault") !== setting ||
           ctx.sessionManager.getSessionId() !== session || scopeEvidence(ctx.sessionManager.getBranch())?.revision !== scope.revision ||

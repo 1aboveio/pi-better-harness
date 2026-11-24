@@ -78,12 +78,12 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     const current = () => !signal.aborted && serial === generation && ctx.sessionManager.getSessionId() === sessionId &&
       enabledScenarios().includes(scenario) && scopeEvidence(ctx.sessionManager.getBranch())?.revision === scope.revision;
     try {
-      catalog = await connect(ctx.cwd, sessionId, signal);
+      catalog = await connect(pi, ctx, signal);
       if (!current()) return;
       const admission = await catalog.review(scenario, "begin");
       token = admission.token;
       if (!token) return;
-      const role = await catalog.role(pi, ctx);
+      const role = await catalog.role();
       const modelId = role?.model;
       if (!role || typeof modelId !== "string" || !current()) return;
       const slash = modelId.indexOf("/");

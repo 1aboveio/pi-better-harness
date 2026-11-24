@@ -50,7 +50,7 @@ export function registerDecisionTool(pi: ExtensionAPI, connect: typeof openSuper
       }
       const deadline = AbortSignal.timeout(125_000);
       const signal = abort ? AbortSignal.any([deadline, abort]) : deadline;
-      const client = await connect(ctx.cwd, session, signal);
+      const client = await connect(pi, ctx, signal);
       try {
         let result = await client.decision(ctx.hasUI ? "decision-request" : "decision-query", proposal);
         if (result.status === "ask") {
