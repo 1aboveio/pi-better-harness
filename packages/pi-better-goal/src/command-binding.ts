@@ -1,4 +1,3 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 
 export interface GoalCommandBinding {
@@ -8,12 +7,20 @@ export interface GoalCommandBinding {
   args: string;
 }
 
+interface CommandRegistry {
+  getCommands(): readonly {
+    name: string;
+    source: GoalCommandBinding["source"];
+    sourceInfo: { path?: string | undefined };
+  }[];
+}
+
 export function leadingCommand(text: string): { name: string; args: string } | null {
   const match = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   return match ? { name: match[1]!, args: match[2]?.trim() ?? "" } : null;
 }
 
-export function resolveGoalCommand(pi: ExtensionAPI, text: string): GoalCommandBinding | null {
+export function resolveGoalCommand(pi: CommandRegistry, text: string): GoalCommandBinding | null {
   const parsed = leadingCommand(text);
   if (!parsed) return null;
   if (parsed.name === "goal") throw new Error("A goal cannot invoke /goal recursively.");
@@ -23,7 +30,7 @@ export function resolveGoalCommand(pi: ExtensionAPI, text: string): GoalCommandB
   return { name: command.name, source: command.source, path: command.sourceInfo.path, args: parsed.args };
 }
 
-export function commandAvailable(pi: ExtensionAPI, binding: GoalCommandBinding): boolean {
+export function commandAvailable(pi: CommandRegistry, binding: GoalCommandBinding): boolean {
   return (binding.source === "extension" || existsSync(binding.path)) &&
     pi.getCommands().some((command) => command.name === binding.name &&
     command.source === binding.source && command.sourceInfo.path === binding.path);
