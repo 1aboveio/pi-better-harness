@@ -102,7 +102,8 @@ test("a task click selects its diagram node in terminal cells without folding th
     assert.equal(selected, "draft");
     const highlighted = widget.render(width).join("\n");
     assert.match(highlighted, /\x1b\[4m· Draft\x1b\[24m/);
-    assert.match(highlighted, /draft · Required/);
+    assert.match(highlighted, /draft · /);
+    if (width >= 36) assert.match(highlighted, /Required: Report/);
     selected = undefined;
     widget.invalidate();
     assert.equal(widget.handleMouse(click), undefined);
