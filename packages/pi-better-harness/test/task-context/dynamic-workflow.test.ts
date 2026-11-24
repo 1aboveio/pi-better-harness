@@ -52,13 +52,22 @@ test("two independent tasks join, then versioned review either ships directly or
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     const all = lines.join(" ");
     assert.match(all, /Research/);
-    assert.match(all, /↔/);
+    assert.match(all, /↺|┬/);
     assert.match(all, /one ○/);
     assert.match(all, /two ✓/);
     const expanded = renderDynamic(first, width, { fg: (_, s) => s }, true, {});
     assert.ok(expanded.length > lines.length);
   }
   assert.throws(() => defineWorkflow({ ...report, steps: report.steps.map(s => s.id === "fix" ? { ...s, dependsOn: ["ship"] } : s) }, []), /revision step/);
+});
+
+test("independent stages retain their individual edges at a join", () => {
+  const steps = report.steps.slice(0, 3).map(s => ({ ...s, stage: undefined }));
+  const run = defineWorkflow({ ...report, steps }, []);
+  const graph = renderDynamic(run, 100, { fg: (_, text) => text }, false, {}).join("\n");
+  assert.match(graph, /Interview buyer ready/);
+  assert.match(graph, /Interview seller ready/);
+  assert.match(graph, /Interview buyer \+ Interview seller → Draft report waiting/);
 });
 
 async function harness(t: TestContext) {

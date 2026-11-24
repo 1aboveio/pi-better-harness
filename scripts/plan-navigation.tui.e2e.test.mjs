@@ -172,12 +172,12 @@ test("dynamic Todo shows the whole review loop and expands its tasks in a narrow
   sendLiteral("/seed-dynamic");
   sendKey("Enter");
   waitForFile(seededPath);
-  const graph = waitForScreen(screen => screen.includes("Review draft ↔ Revise draft") && screen.includes("Deliver report"));
-  assert.match(graph, /Draft report → Review draft ↔ Revise draft · waiting/);
-  assert.match(graph, /Revise draft · ready/);
-  assert.match(graph, /Review draft → Deliver report · waiting/);
+  const graph = waitForScreen(screen => screen.includes("Review draft waiting") && screen.includes("Revise draft ready") && screen.includes("Deliver report"));
+  assert.match(graph, /Draft report ✓ ─→ Review draft waiting/);
+  assert.match(graph, /└─ Revise draft ready ←─+┘/);
+  assert.match(graph, /┬ ─→ Deliver report waiting/);
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "35"]);
-  waitForScreen(screen => screen.includes("Revise draft · ready") && screen.includes("Deliver report"));
+  waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ Deliver report waiting"));
   sendLiteral("\x1b[200~/todo expand\x1b[201~");
   sendKey("Enter");
   waitForScreen(screen => screen.includes("todo ▾") && /fix\s+(?:ready · )?Revise draft/.test(screen));

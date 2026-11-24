@@ -793,7 +793,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           return;
         }
         const run = dynamic.run();
-        if (run && !run.evidence && run.goalId) {
+        const goal = run?.goalId ? reconstructGoalSnapshot(ctx.sessionManager.getBranch()) : null;
+        if (run && !run.evidence && goal && goal.goalId === run.goalId && goal.status !== "complete") {
           ctx.ui.notify("This Goal still has an active workflow.", "warning");
           return;
         }
