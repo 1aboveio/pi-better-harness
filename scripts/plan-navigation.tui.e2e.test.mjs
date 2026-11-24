@@ -162,7 +162,7 @@ test("long todos fold through commands, survive reload, and accept fullscreen mo
   }
 });
 
-test("dynamic Todo shows the whole review loop and expands its tasks in a narrow terminal", () => {
+test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow terminal", () => {
   rmSync(seededPath, { force: true });
   rmSync(readyPath, { force: true });
   writeFileSync(probePath, seedTodoExtension(readyPath));
@@ -172,15 +172,15 @@ test("dynamic Todo shows the whole review loop and expands its tasks in a narrow
   sendLiteral("/seed-dynamic");
   sendKey("Enter");
   waitForFile(seededPath);
-  const graph = waitForScreen(screen => screen.includes("Review draft waiting") && screen.includes("Revise draft ready") && screen.includes("Deliver report"));
-  assert.match(graph, /Draft report ✓ ─→ Review draft waiting/);
-  assert.match(graph, /└─ Revise draft ready ←─+┘/);
-  assert.match(graph, /┬ ─→ Deliver report waiting/);
+  const graph = waitForScreen(screen => /✓ Draft report +│ ✓ Draft report ─→ · Review draft/.test(screen));
+  assert.match(graph, /○ Revise draft +│ +└─ ○ Revise draft ←─+┘/);
+  assert.match(graph, /┬ ─→ · Deliver report/);
+  assert.doesNotMatch(graph, /Review draft waiting|Revise draft ready/);
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "35"]);
-  waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ Deliver report waiting"));
-  sendLiteral("\x1b[200~/todo expand\x1b[201~");
-  sendKey("Enter");
-  waitForScreen(screen => screen.includes("todo ▾") && /fix\s+(?:ready · )?Revise draft/.test(screen));
+  const narrow = waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ · Deliver report"));
+  assert.match(narrow, /^✓ Draft[^│\n]*│ ✓ Draft report/m);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "30", "-y", "35"]);
+  waitForScreen(screen => screen.includes("↺ Review draft") && /^✓ Draft report *$/m.test(screen) && !screen.includes("│ ✓ Draft report"));
 });
 
 function startPiSession() {
