@@ -159,8 +159,8 @@ test("catalog assignments use ordinary launch, record failures, and require veri
   await advance({ action: "retry", step: "draft" });
   await spawn();
   await assert.rejects(spawn(), /working/);
-  const observe = (id: string, state: string, verified: boolean) => h.hooks.get("tool_result")({
-    toolName: "subagent_result", input: { id }, details: { assignment: { attemptId: id, state, verified, reason: state } }, content: [{ type: "text", text: "Full report" }],
+  const observe = (id: string, state: string, verified: boolean, hasFinalAnswer = true) => h.hooks.get("tool_result")({
+    toolName: "subagent_result", input: { id }, details: { hasFinalAnswer, assignment: { attemptId: id, state, verified, reason: state } }, content: [{ type: "text", text: "Full report" }],
   }, h.ctx);
   observe("worker-2", "failed", true);
   assert.equal(states(await h.todo())[2], "failed");
@@ -169,7 +169,11 @@ test("catalog assignments use ordinary launch, record failures, and require veri
   observe("foreign", "completed", true);
   observe("worker-3", "completed", false);
   await assert.rejects(advance({ action: "submit", step: "draft", result: "Report" }), /successful/);
-  observe("worker-3", "completed", true);
+  observe("worker-3", "completed", true, false);
+  assert.match((await h.todo()).workers.draft!.error!, /without returning/);
+  await advance({ action: "retry", step: "draft" });
+  await spawn();
+  observe("worker-4", "completed", true);
   const done = await advance({ action: "submit", step: "draft", result: "Report" });
   assert.equal(done.history.at(-1)?.worker?.result, "Full report");
   assert.equal(states(done)[3], "ready");

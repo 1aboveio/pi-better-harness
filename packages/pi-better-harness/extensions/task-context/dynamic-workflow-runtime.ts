@@ -167,12 +167,15 @@ export function registerDynamicWorkflow(pi: ExtensionAPI, owner: (ctx: Extension
     const claim = Object.entries(current.workers).find(([, w]) => w.runId && w.runId === event.input.id);
     if (!claim) return;
     const [stepId, worker] = claim;
-    const details = event.details as { assignment?: { attemptId?: string; state?: string; reason?: string; verified?: boolean } } | undefined;
+    const details = event.details as { hasFinalAnswer?: boolean; outcome?: { outcome?: { outcome?: string; reason?: string } }; assignment?: { attemptId?: string; state?: string; reason?: string; verified?: boolean } } | undefined;
     const a = details?.assignment;
     if (event.isError || !a?.verified || a.attemptId !== worker.runId) return;
     if (a.state === "completed" && !worker.result) {
       const body = event.content.flatMap(b => b.type === "text" ? [b.text] : []).join("\n");
-      if (body.trim()) recordWorker(current, stepId, { ...worker, result: body });
+      const durable = details?.outcome?.outcome;
+      const result = durable?.outcome === "succeeded" ? durable.reason : details?.hasFinalAnswer ? body : undefined;
+      if (result?.trim()) recordWorker(current, stepId, { ...worker, result });
+      else if (details?.hasFinalAnswer === false && !worker.error) recordWorker(current, stepId, { ...worker, error: "The worker finished without returning the required output." });
     }
     if ((a.state === "failed" || a.state === "cancelled") && !worker.error) {
       recordWorker(current, stepId, { ...worker, error: a.reason || a.state });

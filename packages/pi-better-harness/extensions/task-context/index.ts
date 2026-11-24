@@ -525,7 +525,9 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading;
             }
             const run = dynamic.run();
-            if (run) return renderDynamic(run, width, theme, expanded, header);
+            if (run) return renderDynamic(run, width, theme, expanded, {
+              disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
+            });
             return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading;
           },
           () => (!rushBinding && !displayedWorkflowOwner && !!dynamic.run()) || (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
@@ -942,8 +944,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     }
     if (request.action === "inspect") {
       const goal = sessionContext ? reconstructGoalSnapshot(sessionContext.sessionManager.getBranch()) : null;
+      const run = !displayedWorkflowOwner && !rushBinding ? dynamic.run() : undefined;
+      const displayedGoal = run ? run.goalId : outcome?.goalId;
       request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && display && displayMode !== "hidden" &&
-        outcome && request.goalId === outcome.goalId && goal?.goalId === request.goalId && typeof request.width === "number" &&
+        request.goalId === displayedGoal && goal?.goalId === request.goalId && typeof request.width === "number" &&
         canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
     }
     if (!enabled || request.action === "inspect") return;
@@ -1013,7 +1017,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     return { messages: filtered };
   });
   pi.on("before_agent_start", (event, ctx) => {
-    const guide = !workflowPlanOwner(ctx) && !rushBinding ? dynamic.guidance() : undefined;
+    const guidance = dynamic.guidance();
+    const guide = guidance && !workflowPlanOwner(ctx) && !rushBinding ? guidance : undefined;
     const sections = supportsPromptSections(event.systemPromptOptions) ? (event.systemPromptOptions as PromptSectionTarget).sections : undefined;
     if (guide && sections) sections.dynamic_workflow = guide;
     const prompt = guide && !sections ? { systemPrompt: event.systemPrompt + "\n\n" + guide } : undefined;

@@ -702,6 +702,7 @@ export function assembleSubagentResult(
     request: PayloadRequest = {},
     healthLine = "",
     scopeKey = defaultScope(),
+    observed?: { hasFinalAnswer?: boolean },
 ): string {
     healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = effectiveStatus(meta);
@@ -782,6 +783,7 @@ export function assembleSubagentResult(
 
     const exceptional = isRoutineComplete(lifecycle) ? undefined : formatLifecycleDiagnostics(lifecycle);
     const answer = run.finalText || "";
+    if (observed) observed.hasFinalAnswer = Boolean(answer.trim());
     const fallback = !answer
         ? (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`

@@ -97,6 +97,7 @@ describe("subagent_result folded TUI display", () => {
         const tool = subagentResultTool(TypeStub);
 
         const result = await tool.execute("tc", { id });
+        assert.equal(result.details.hasFinalAnswer, true);
         const full = textOf(result);
         assert.equal(full, buildSubagentResultText(id), "model-facing content must equal the bounded result formatter output");
         assert.match(full, /result-line-18/, "model-facing content must keep the full bounded result");

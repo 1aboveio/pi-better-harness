@@ -521,7 +521,7 @@ export function assembleOrphanedResult(id, meta, healthLine, request = {}, scope
         statusCursor: ctx.statusCursor,
     });
 }
-export function assembleSubagentResult(id, meta, request = {}, healthLine = "", scopeKey = defaultScope()) {
+export function assembleSubagentResult(id, meta, request = {}, healthLine = "", scopeKey = defaultScope(), observed) {
     healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = effectiveStatus(meta);
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f")
@@ -601,6 +601,8 @@ export function assembleSubagentResult(id, meta, request = {}, healthLine = "", 
     }
     const exceptional = isRoutineComplete(lifecycle) ? undefined : formatLifecycleDiagnostics(lifecycle);
     const answer = run.finalText || "";
+    if (observed)
+        observed.hasFinalAnswer = Boolean(answer.trim());
     const fallback = !answer
         ? (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`

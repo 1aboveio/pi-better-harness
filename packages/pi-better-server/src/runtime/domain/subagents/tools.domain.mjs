@@ -475,12 +475,13 @@ export function subagentResultTool(Type, baseSession = {}) {
                 verified: true, waits: inspected.dependencies ?? [], ...{ outcome: inspected.outcome },
             }) : observed?.assignment;
             return withAssignmentObservations(assignment ? [{ meta, assignment }] : [], () => {
+                const observedAnswer = {};
                 const resultText = (body) => {
                     const evidence = outcome;
                     const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
                     const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
                     const result = subagentResultText(header + body);
-                    return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                    return { ...result, details: { ...result.details, ...observedAnswer, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
                 };
                 if (params.operation_id && outcome) {
                     const evidence = outcome;
@@ -497,7 +498,7 @@ export function subagentResultTool(Type, baseSession = {}) {
                     }
                     return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
                 }
-                return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey));
+                return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey, observedAnswer));
             });
         },
     };
