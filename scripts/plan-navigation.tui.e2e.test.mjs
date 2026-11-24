@@ -100,11 +100,16 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   sendKey("Enter");
   const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
     /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
-  assert.match(revealed, /explore ✓\s+implement ✓\s+review ✓\s+ci ! ●\s/, "CI shows both the blocked issue and the active issue");
+  assert.match(revealed, /Implement 2\/2 ──→ Review 2\/2 passed .*┬──→ Ship 0\/2 · 1 blocked · 1 active/);
+  assert.match(revealed, /└─ Fix as needed ←─+┘/);
   assert.match(revealed, /Extract shared core/);
   assert.match(revealed, /Add mux support/);
   assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
     "the workflow overview does not open the removed detail view");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
+  const narrow = waitForScreen(screen => /Review 2\/2 passed ←─+┐/.test(screen));
+  assert.match(narrow, /├─→ Fix as needed ─+┘/);
+  assert.match(narrow, /Ship 0\/2 · 1 blocked · 1 active/);
 });
 
 // @covers todo.compact-folding

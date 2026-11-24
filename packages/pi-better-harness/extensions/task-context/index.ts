@@ -8,6 +8,8 @@ import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
+import { commandAvailable } from "pi-better-goal/src/command-binding.ts";
+import { workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
@@ -166,6 +168,18 @@ function workflowPlanOwner(ctx: ExtensionContext): string | null {
     }
   }
   return owner;
+}
+
+// Completion releases the coordinator but leaves its plan available for a reopen.
+function reopeningPlanOwner(pi: ExtensionAPI, ctx: ExtensionContext, goal: GoalSnapshot): string | null {
+  const command = goal.command;
+  if (command?.source !== "skill") return null;
+  const binding = workflowBinding(ctx.sessionManager.getBranch());
+  if (binding) return binding.owner;
+  if (!commandAvailable(pi, command)) return null;
+  const owner = workflowOwnerFromSkill(command.name.slice("skill:".length), command.path,
+    name => pi.getCommands().find(item => item.source === "skill" && item.name === `skill:${name}`)?.sourceInfo.path);
+  return owner?.name ?? null;
 }
 
 export default function taskContextExtension(pi: ExtensionAPI): void {
@@ -595,7 +609,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       }
       if (input.newTask && !input.outcome) throw new Error("A new task requires its outcome.");
       if (input.todo !== undefined && input.workflow !== undefined) throw new Error("Send either todo or workflow, not both.");
-      if (input.todo !== undefined && owner) throw new Error(`${owner} owns the task plan. Send workflow instead of todo.`);
+      let todoOwner = owner;
       const nextOutcome = input.outcome ? prepareOutcome(outcome, input.outcome, input.newTask) : null;
       if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
       let reopenedGoalId: string | undefined;
@@ -606,12 +620,16 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             throw new Error("This Outcome belongs to an active Goal. Verify its acceptance criteria and use update_goal to complete both.");
           }
           if (nextOutcome.status === "active" && goal.status === "complete") {
-            if (input.outcome?.status === "active") reopenedGoalId = nextOutcome.goalId;
+            if (input.outcome?.status === "active") {
+              reopenedGoalId = nextOutcome.goalId;
+              if (input.todo !== undefined && !todoOwner) todoOwner = reopeningPlanOwner(pi, ctx, goal);
+            }
             delete nextOutcome.goalId;
             if (nextOutcome.source === "goal") delete nextOutcome.source;
           }
         }
       }
+      if (input.todo !== undefined && todoOwner) throw new Error(`${todoOwner} owns the task plan. Send workflow instead of todo.`);
       const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
       const detachOnCommit = input.newTask && ledgerId !== null;
       // Commit task memory only after the requested checklist or workflow operation succeeds.
