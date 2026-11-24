@@ -427,6 +427,16 @@ refreshes cannot keep resetting the background task's progress clock. The normal
 quiet and suspected-stall observations remain available while a phase is unchanged.
 A suspected stall is an observation to inspect, not proof that CI is hung.
 
+For an active Harness Outcome, **Supervisor mode > CI observation recovery**
+can diagnose an interrupted local Background task observing a GitHub.com run.
+Pass an explicit repository and run ID through `shell: false` argv. Supported
+forms are `gh run watch` or the helper above through `bg_task_spawn`, and
+`gh run view --json` through `bg_task_watch`. The daemon checks that the
+original attempt is still active (attempt 1 unless the watch pins `--attempt`).
+It does not dispatch or rerun a build. Only the original owner receives the
+suggestion to resume observation. Use `supervisor_consult` with the local
+watcher's Background task ID to request the same diagnosis explicitly.
+
 Confirm that package is visible:
 
 ```sh

@@ -1,10 +1,12 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/managed-frontend.ts. Do not edit directly.
 import { randomUUID } from 'node:crypto';
+import { Type } from 'typebox';
 import { requestBackgroundTool } from "./managed-client.domain.mjs";
 import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
+import { ciObservationEnabled, requestCiRecoveryWake, supervisorConsultTool, supervisorOutcome, supervisorRecoveryType } from "./ci-observation.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
@@ -139,7 +141,12 @@ export function createManagedBackgroundFrontend(pi) {
                     continue;
                 const n = item.notification;
                 const type = n.event?.customType;
-                if ((type === 'background-task-stall' || type === 'background-wait-review')
+                const recovery = type === supervisorRecoveryType;
+                const recoveryProof = () => captured.sessionManager.getBranch().some((entry) => {
+                    const message = entry.type === 'custom_message' ? entry : entry.message;
+                    return message?.customType === type && message.details?.urgentEventId === item.receiptId;
+                });
+                if (!(recovery && recoveryProof()) && (type === 'background-task-stall' || type === 'background-wait-review' || recovery)
                     && (!rechecking?.has(item.receiptId) || !captured.isIdle())) {
                     // Keep the candidate here while busy. Pi's followUp queue cannot
                     // revalidate it when the current turn eventually ends.
@@ -155,7 +162,7 @@ export function createManagedBackgroundFrontend(pi) {
                         .finally(() => { queued.delete(item.token); if (ctx === captured)
                         void reconcile().catch(() => undefined); });
                 };
-                const proof = captured.sessionManager.getBranch().some((entry) => {
+                const proof = recovery ? recoveryProof() : captured.sessionManager.getBranch().some((entry) => {
                     const message = entry.type === 'custom_message' ? entry : entry.message;
                     return item.notification.urgent ? message?.customType === item.notification.event.customType && message.details?.urgentEventId === item.receiptId : message?.customType === 'background-completion-batch' && message.details?.completionEventIds?.includes(item.receiptId);
                 });
@@ -165,13 +172,35 @@ export function createManagedBackgroundFrontend(pi) {
                 }
                 trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
                 if (n.urgent) {
-                    const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
-                        getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
-                        onDelivered: () => receipt(true), onSuppressed: reason => receipt(false, reason) });
                     const retry = () => { queued.delete(item.token); if (version === generation)
                         scheduleHandoffPoll(1000); };
-                    void Promise.resolve(handoff).then(ok => { if (!ok)
-                        retry(); }, retry);
+                    const deliver = (wake) => {
+                        if (recovery && (version !== generation || !wake?.())) {
+                            retry();
+                            return;
+                        }
+                        const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
+                            getSuppressionReason: () => {
+                                if (!active(n.origin, n.branchId))
+                                    return 'The originating session or branch is no longer active';
+                                if (recovery && (!ciObservationEnabled() || supervisorOutcome(captured.sessionManager.getBranch())?.id !== n.outcomeId
+                                    || !captured.isIdle() || Date.now() >= n.validUntil || !wake?.()))
+                                    return 'CI recovery needs fresh settings, Outcome, or remote evidence';
+                            },
+                            onDelivered: () => { if (!recovery || recoveryProof())
+                                receipt(true);
+                            else
+                                retry(); },
+                            onSuppressed: reason => receipt(false, reason) });
+                        void Promise.resolve(handoff).then(ok => { if (!ok)
+                            retry(); }, retry);
+                    };
+                    // A workflow can asynchronously check its gate. Ordinary
+                    // completions and the foreground refresh must not wait on it.
+                    if (recovery)
+                        void requestCiRecoveryWake(pi, captured, n.branchId, n.validUntil).then(deliver).catch(retry);
+                    else
+                        deliver();
                     continue;
                 }
                 getCallbackBatcher(pi).enqueue({ ...n.event, source: 'background-task', id: n.taskId, label: n.taskId, status: n.waitId ? `${n.status}; wait ${n.waitId} ready` : n.status,
@@ -260,6 +289,17 @@ export function createManagedBackgroundFrontend(pi) {
         },
     };
     registerObservedWaitClient(pi, host);
+    pi.registerTool({
+        name: supervisorConsultTool, label: 'Consult Supervisor',
+        description: 'Ask the daemon to diagnose an interrupted CI watcher owned by this session and Outcome. Shares automatic recovery and never launches or restarts a remote run. Any recommendation arrives once through the normal Background callback.',
+        parameters: Type.Object({ id: Type.String({ description: 'Background watcher task ID' }) }),
+        async execute(id, params, signal, _update, context) {
+            adoptContext(context);
+            const result = await requestBackgroundTool(pi, context, id, supervisorConsultTool, params, undefined, signal);
+            await host.reconcileNow().catch(() => undefined);
+            return result;
+        },
+    });
     pi.events?.on?.('pi-better-background-tasks:managed-capability', (request) => { if (ctx && typeof request?.accept === 'function')
         request.accept({ version: 1, assignmentContinuation: 1 }); });
     onBackgroundObservation(pi, () => { details.clear(); logs.clear(); void reconcile().catch(() => undefined); });

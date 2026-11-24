@@ -37,6 +37,7 @@ import { openStore, cancellationCredential, } from "./shared-operation-coordinat
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
 import { processGroupAlive } from "./supervisor/identity.domain.mjs";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.domain.mjs";
+import { ciRunFromArgv, validCiRun } from "./ci-observation.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
@@ -1030,6 +1031,9 @@ export class ObservedWaitHost {
             authorityRef: this.parentAuthority(owner, prepared.plan),
             intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
         });
+        const outcomeId = this.options.currentOutcomeId?.();
+        const ciRun = outcomeId && prepared.spec.shell === false && !prepared.spec.env && prepared.cwd === owner.workspace
+            ? ciRunFromArgv(input.kind, prepared.spec.argv) : undefined;
         const launchContext = {
             kind: input.kind,
             parentOrigin: this.parentOrigin,
@@ -1042,6 +1046,7 @@ export class ObservedWaitHost {
             sandbox: prepared.provenance,
             supervisionPolicy: prepared.plan,
             branchId: owner.branchId ?? null,
+            ...(ciRun && outcomeId ? { ciObservation: { ...ciRun, outcomeId } } : {}),
         };
         // Persist supervision metadata outside the task execution record so a
         // replacement host can still notify the right parent and never re-route a
@@ -1312,6 +1317,25 @@ export class ObservedWaitHost {
             return undefined;
         this.projectionMetrics.projectionsBuilt += 1;
         return this.projectDurable(operation, now);
+    }
+    /** Resolve exact owner and immutable launch/terminal evidence, not a display projection. */
+    ciObservation(origin, taskId, outcomeId, branchIds) {
+        if (!LOCAL_DURABLE_ID.test(taskId))
+            return;
+        const operation = this.operationForTask(taskId);
+        if (!operation || !this.belongsToParentOrigin(operation, origin)
+            || !operation.owner.branchId || !branchIds.includes(operation.owner.branchId))
+            return;
+        const directory = this.observationDirectory(operation);
+        if (!directory)
+            return;
+        const context = this.readLaunchContext(taskId, directory);
+        if (!context?.ciObservation || context.ciObservation.outcomeId !== outcomeId || context.dismissedAt !== undefined)
+            return;
+        const inspection = this.passiveSnapshot(taskId, directory);
+        if (!inspection || inspection.token !== operation.launchToken)
+            return;
+        return { run: context.ciObservation, operation, inspection, policy: context.supervisionPolicy, callback: context.callback };
     }
     /** Rebuild a live incident from the runner checkpoint. Only the native handoff writes its receipt. */
     pendingStallAlert(origin, taskId, waits) {
@@ -4078,6 +4102,8 @@ export class ObservedWaitHost {
                 ...(value.supervisionPolicy && typeof value.supervisionPolicy === "object"
                     ? { supervisionPolicy: value.supervisionPolicy } : {}),
                 ...(typeof value.branchId === "string" || value.branchId === null ? { branchId: value.branchId } : {}),
+                ...(value.ciObservation && typeof value.ciObservation.outcomeId === "string" && validCiRun(value.ciObservation)
+                    ? { ciObservation: value.ciObservation } : {}),
                 ...(typeof value.callbackPendingAt === "number" ? { callbackPendingAt: value.callbackPendingAt } : {}),
                 ...(typeof value.callbackDeliveredAt === "number" ? { callbackDeliveredAt: value.callbackDeliveredAt }
                     : typeof value.callbackNotifiedAt === "number"

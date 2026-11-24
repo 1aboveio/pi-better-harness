@@ -103,7 +103,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const initializeBackground = () => backgroundInitialization ??= (() => {
       options.rpcEvidence?.event('background', 0, 'init-pending');
       return createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope), config.runtimeIdleMs,
-        options.rpcEvidence ? (slot, phase) => options.rpcEvidence!.event('adapter', slot, phase) : undefined)
+        options.rpcEvidence ? (slot, phase) => options.rpcEvidence!.event('adapter', slot, phase) : undefined, catalog.sources)
         .then(host => { options.rpcEvidence?.event('background', 0, 'init-returned'); return backgroundTools = host; })
         .catch(error => { options.rpcEvidence?.event('background', 0, 'init-failed'); backgroundInitialization = undefined; throw error; });
     })();
