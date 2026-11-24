@@ -10,7 +10,7 @@ import { updateHarnessSetting } from "../extensions/shared-harness-settings.ts";
 import { OUTCOME_ENTRY } from "../extensions/task-context/outcome-state.ts";
 import { EXTENSION_NAME } from "../extensions/task-context/types.ts";
 
-function fixture(t, scenario) {
+function fixture(t, scenario, client = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-supervisor-extension-"));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -40,6 +40,7 @@ function fixture(t, scenario) {
   installSupervisor(pi, async () => ({
     close() {}, review: async () => ({ status: "admitted", token: "one" }),
     role: async () => ({ instructions: "Diagnose", model: "test/model", revision: "r1" }),
+    ...client,
   }));
   const fire = (name, event) => handlers.get(name)?.forEach(fn => fn(event, ctx));
   sessionManager.appendCustomEntry(OUTCOME_ENTRY, { version: 1, outcome: { objective: "Restore CI", status: "active" } });
@@ -94,4 +95,59 @@ test("a follow-up query reuses the commitment; verification requires distinct ob
   assert.match((await tool({ id, action: "verify", toolCallId: "check", observation: "CI stage is Building" })).content[0].text, /verified/);
   assert.match((await tool({ id, action: "status" })).content[0].text, /CI stage is Building/);
   assert.equal(f.messages.length, 0);
+});
+
+test("shared read faults suppress duplicate delivery and verify recovery only for the original read", async t => {
+  const f = fixture(t, "shared-fault", {
+    sharedReadDiagnosis: async () => ({ incident: { id: "shared", recommendation: "Retry the same observer." } }),
+  });
+  const emit = (id, isError, text) => f.fire("tool_result", { toolName: "bg_task_log", input: { id },
+    content: [{ type: "text", text }], isError });
+  const failure = "runtime-unhealthy: runtime_get_snapshot timed out";
+  emit("owner-task", false, failure);
+  await wait(0);
+  assert.equal(f.messages.length, 0);
+  emit("owner-task", true, failure);
+  emit("owner-task", true, failure);
+  await wait(0);
+  emit("owner-task", true, failure);
+  await wait(0);
+  assert.equal(f.messages.length, 1);
+  const rows = () => f.sessionManager.getBranch().filter(e => e.customType === "pi-better-harness:shared-read-fault").map(e => e.data.state);
+  emit("other-task", false, "Running");
+  assert.deepEqual(rows(), ["open"]);
+  emit("owner-task", false, "Running");
+  assert.deepEqual(rows(), ["open", "verified"]);
+});
+
+test("only the owner UI may answer a grouped authorization request, including a denial", async t => {
+  const calls = [];
+  const f = fixture(t, "shared-decisions", { decision: async (action, _proposal, token, answer) => {
+    calls.push([action, token, answer]);
+    return action === "decision-request" ? { status: "ask", token: "t", workspace: "repo", durationMinutes: 60 } : { status: answer ?? "missing" };
+  } });
+  const proposal = { reference: "case1", operation: "restart", resource: "observer", host: "local", effect: "restart one observer" };
+  const ctx = { ...f.ctx, isProjectTrusted: () => true, hasUI: true, ui: { select: async title => {
+    assert.match(title, /restart one observer/);
+    return "Deny";
+  } } };
+  const run = ctx => f.tools.get("supervisor_request_decision").execute("id", proposal, undefined, undefined, ctx);
+  assert.equal((await run(ctx)).details.status, "denied");
+  assert.deepEqual(calls[1], ["decision-answer", "t", "denied"]);
+  assert.equal((await run({ ...ctx, hasUI: false })).details.status, "missing");
+  f.settings(false);
+  assert.equal((await run(ctx)).details.status, "disabled");
+  assert.equal(calls.length, 3);
+});
+
+test("a covered owner attaches its own verification to the settled decision", async t => {
+  const f = fixture(t, "shared-decisions", { decision: async () => ({ status: "approved", expires: 60000 }) });
+  const proposal = { reference: "build", operation: "restore observer", host: "local", resource: "run", effect: "observe progress" };
+  const ctx = { ...f.ctx, hasUI: false, isProjectTrusted: () => true };
+  const run = async extra => (await f.tools.get("supervisor_request_decision").execute("decision", { ...proposal, ...extra }, undefined, undefined, ctx)).details.status;
+  assert.equal(await run({}), "approved");
+  assert.equal(await run({ verifyToolCallId: "later" }), "missing observed result after approval");
+  f.sessionManager.appendMessage({ role: "toolResult", toolCallId: "later", toolName: "bg_task_status", content: [{ type: "text", text: "Running" }], isError: false, timestamp: Date.now() });
+  assert.equal(await run({ verifyToolCallId: "later" }), "verified");
+  assert.equal(await run({}), "approved · verified");
 });

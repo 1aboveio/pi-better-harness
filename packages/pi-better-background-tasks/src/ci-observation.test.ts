@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { ciRunFromArgv, requestCiRecoveryWake } from './ci-observation.ts';
+import { ciObserverArgv, ciRunFromArgv, requestCiRecoveryWake } from './ci-observation.ts';
 
 it('only recognizes scoped read-only CI observers and retains their exact attempt', () => {
     expect(ciRunFromArgv('watch', ['gh', 'run', 'view', '123', '-R', 'Example/Build', '--json', 'status,jobs', '--attempt', '2']))
@@ -29,4 +29,12 @@ it('requires the current Goal and workflow permission to wake the original owner
     expect(grant()).toBe(true);
     current = false;
     expect(grant()).toBe(false);
+});
+
+it('recognizes a literal installed watcher command and excludes compound shell commands', () => {
+    const command = 'node /agent/npm/node_modules/@1aboveio/skills/skills/cicd/github-actions/scripts/watch-run.mjs --run 45180745024 --repo 1aboveio/a1';
+    const identify = (command: string) => ciRunFromArgv('process', ciObserverArgv({ command }));
+    expect(identify(command)).toEqual({ repo: '1aboveio/a1', runId: '45180745024', attempt: 1 });
+    for (const suffix of ['; exit', ' && other', '\nother', ' >out', ' --another flag']) expect(identify(command + suffix)).toBeUndefined();
+    expect(identify(command.replace('node_modules', 'node_modules/../node_modules'))).toBeUndefined();
 });

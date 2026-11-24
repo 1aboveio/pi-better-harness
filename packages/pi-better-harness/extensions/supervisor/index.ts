@@ -23,8 +23,8 @@ export default function supervisor(pi: ExtensionAPI) {
   installSupervisor(pi, openSupervisorClient);
 }
 export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervisorClient) {
-  registerSharedFault(pi);
-  registerDecisionTool(pi);
+  registerSharedFault(pi, connect);
+  registerDecisionTool(pi, connect);
   registerCommitments(pi, (ctx, evidence) => { void review(ctx, "commitment-followup", evidence); });
   const repeats = new RepeatedRead();
   let pending: AbortController | undefined;

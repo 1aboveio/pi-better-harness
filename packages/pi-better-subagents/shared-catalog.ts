@@ -36,9 +36,9 @@ export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(
             await register();
             return client.request("runtime_supervisor_review", { action, scope, token, answer });
         },
-        async sharedReadDiagnosis(): Promise<{ status: string; incident?: { id: string; recommendation: string } }> {
+        async sharedReadDiagnosis(verifiedIncident?: string): Promise<{ status: string; incident?: { id: string; recommendation: string } }> {
             await register();
-            return client.request("runtime_supervisor_review", { action: "read-health" });
+            return client.request("runtime_supervisor_review", { action: "read-health", verifiedIncident });
         },
         async review(scenario: string, action: "begin" | "finish" | "release", token?: string): Promise<{ status: string; token?: string }> {
             await register();

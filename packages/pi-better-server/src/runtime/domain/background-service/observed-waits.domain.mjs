@@ -37,7 +37,7 @@ import { openStore, cancellationCredential, } from "./shared-operation-coordinat
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
 import { processGroupAlive } from "./supervisor/identity.domain.mjs";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.domain.mjs";
-import { ciRunFromArgv, validCiRun } from "./ci-observation.domain.mjs";
+import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
@@ -1032,8 +1032,8 @@ export class ObservedWaitHost {
             intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
         });
         const outcomeId = this.options.currentOutcomeId?.();
-        const ciRun = outcomeId && prepared.spec.shell === false && !prepared.spec.env && prepared.cwd === owner.workspace
-            ? ciRunFromArgv(input.kind, prepared.spec.argv) : undefined;
+        const ciRun = outcomeId && !prepared.spec.env && prepared.cwd === owner.workspace
+            ? ciRunFromArgv(input.kind, ciObserverArgv(prepared.spec)) : undefined;
         const launchContext = {
             kind: input.kind,
             parentOrigin: this.parentOrigin,

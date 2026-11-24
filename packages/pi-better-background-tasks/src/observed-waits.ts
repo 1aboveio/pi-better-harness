@@ -79,7 +79,7 @@ import {
 } from "./supervisor/index.js";
 import { processGroupAlive } from "./supervisor/identity.js";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.js";
-import { ciRunFromArgv, validCiRun } from "./ci-observation.js";
+import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.js";
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
 import type { SpawnTaskParams, WatchTaskParams } from "./runtime.js";
 
@@ -1538,8 +1538,8 @@ export class ObservedWaitHost {
       intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
     });
     const outcomeId = this.options.currentOutcomeId?.();
-    const ciRun = outcomeId && prepared.spec.shell === false && !prepared.spec.env && prepared.cwd === owner.workspace
-      ? ciRunFromArgv(input.kind, prepared.spec.argv) : undefined;
+    const ciRun = outcomeId && !prepared.spec.env && prepared.cwd === owner.workspace
+      ? ciRunFromArgv(input.kind, ciObserverArgv(prepared.spec)) : undefined;
     const launchContext: LaunchContext = {
       kind: input.kind,
       parentOrigin: this.parentOrigin,

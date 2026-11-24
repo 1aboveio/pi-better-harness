@@ -8,12 +8,15 @@ import { SharedReadDiagnosis } from "../src/runtime/shared-read-diagnosis.ts";
 
 test("three affected owners get one shared read-plane diagnosis; a verified recovery separates recurrences", () => {
   const diagnosis = new SharedReadDiagnosis();
-  const first = diagnosis.inspect("degraded", 3)!;
-  assert.deepEqual(diagnosis.inspect("degraded", 3), first);
-  assert.deepEqual(diagnosis.inspect("degraded", 3), first);
-  assert.equal(diagnosis.inspect("ready", 3), undefined);
-  assert.notEqual(diagnosis.inspect("degraded", 3)?.id, first.id);
-  assert.notEqual(diagnosis.inspect("rebuilding", 4)?.id, first.id);
+  const first = diagnosis.inspect("degraded", 3, "a")!;
+  assert.deepEqual(diagnosis.inspect("degraded", 3, "b"), first);
+  assert.deepEqual(diagnosis.inspect("degraded", 3, "c"), first);
+  assert.equal(diagnosis.verified("stranger", first.id), false);
+  assert.equal(diagnosis.verified("a", first.id), true);
+  assert.match(diagnosis.inspect("degraded", 3, "b")!.recommendation, /affected read has recovered/);
+  assert.equal(diagnosis.inspect("ready", 3, "a"), undefined);
+  assert.notEqual(diagnosis.inspect("degraded", 3, "a")?.id, first.id);
+  assert.notEqual(diagnosis.inspect("rebuilding", 4, "a")?.id, first.id);
 });
 
 test("one answer survives reopen and is valid only for the exact proposal and trusted workspace", t => {

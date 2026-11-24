@@ -43,9 +43,9 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
             await register();
             return client.request("runtime_supervisor_review", { action, scope, token, answer });
         },
-        async sharedReadDiagnosis() {
+        async sharedReadDiagnosis(verifiedIncident) {
             await register();
-            return client.request("runtime_supervisor_review", { action: "read-health" });
+            return client.request("runtime_supervisor_review", { action: "read-health", verifiedIncident });
         },
         async review(scenario, action, token) {
             await register();

@@ -25,7 +25,10 @@ test("Supervisor settings retain selections and merge edits from another session
     };
     await openSupervisorSettings({ ui: { select } } as Parameters<typeof openSupervisorSettings>[0]);
     assert.equal(index, steps.length);
-    assert.deepEqual(readHarnessSetting("supervisorMode"), { enabled: true, scenarios: ["other", "ci-observation"] });
+    const saved = readHarnessSetting<{ enabled: boolean; scenarios: string[]; revision: string }>("supervisorMode")!;
+    assert.equal(saved.enabled, true);
+    assert.deepEqual(saved.scenarios, ["other", "ci-observation"]);
+    assert.ok(saved.revision);
     process.env.PI_CODING_AGENT_DIR = join(dir, "isolated");
     assert.equal(readHarnessSetting("supervisorMode"), undefined);
   } finally {

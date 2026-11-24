@@ -77,9 +77,23 @@ export function validCiRun(run) {
     return /^[\w-]+\/[\w.-]+$/.test(run.repo) && !run.repo.endsWith('/.') && !run.repo.endsWith('/..')
         && /^[1-9]\d{0,14}$/.test(run.runId) && Number.isSafeInteger(run.attempt) && run.attempt > 0;
 }
-/** Recognize literal argv, never a shell program, alias, output, name or a caller-supplied URL. */
+// Accept a single invocation containing only literal, space-separated words.
+// No shell parsing or execution is needed to identify the run.
+export function ciObserverArgv(spec) {
+    if (spec.shell === false)
+        return spec.argv;
+    const command = spec.command;
+    if (typeof command !== 'string' || command.length > 4096 || /[^a-zA-Z0-9/@_., -]/.test(command))
+        return;
+    return command.trim().split(/ +/);
+}
+/** Recognize known observer invocations, never their stdout or a caller-supplied URL. */
 export function ciRunFromArgv(kind, argv) {
-    if (kind === 'process' && argv?.[0] === 'node' && /^(?:\.\/)?scripts\/watch-github-run\.mjs$/.test(argv[1] ?? '')) {
+    const script = argv?.[1] ?? '';
+    const repositoryWatcher = /^(?:\.\/)?scripts\/watch-github-run\.mjs$/.test(script);
+    const installedWatcher = script.startsWith('/') && !script.split('/').includes('..')
+        && script.endsWith('/node_modules/@1aboveio/skills/skills/cicd/github-actions/scripts/watch-run.mjs');
+    if (kind === 'process' && argv?.[0] === 'node' && (repositoryWatcher || installedWatcher)) {
         const options = new Map();
         for (let i = 2; i < argv.length; i += 2) {
             const flag = argv[i], value = argv[i + 1];
