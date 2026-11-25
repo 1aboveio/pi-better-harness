@@ -1,5 +1,5 @@
 import type { Socket } from "node:net";
-import type { WorkReadModel, WorkScope } from "./read-model.ts";
+import type { WorkReadModel, WorkScope, WorkSnapshot } from "./read-model.ts";
 
 const eventEncodings = new WeakMap<object, string>();
 const snapshotEncodings = new WeakMap<object, string>();
@@ -7,6 +7,10 @@ export function snapshotJSON(snapshot: object): string {
   let json = snapshotEncodings.get(snapshot);
   if (json === undefined) { json = JSON.stringify(snapshot); snapshotEncodings.set(snapshot, json); }
   return json;
+}
+// The global sequence may advance while a session's Background rows and deadlines stay unchanged.
+function backgroundNotificationKey(snapshot: WorkSnapshot) {
+  return JSON.stringify([snapshot.scopeRevision, snapshot.status, snapshot.reason, snapshot.nextDeadline]);
 }
 export const queryEncodingMetrics = { serializations: 0, frames: 0, bytes: 0 };
 
@@ -35,6 +39,7 @@ export class WorkQueries {
   private dispose?: () => void;
   private paused = false;
   private lastSnapshotSeq?: number;
+  private lastBackgroundKey?: string;
   private model: WorkReadModel;
   private socket: Socket;
   private maxQueuedBytes: number;
@@ -51,8 +56,10 @@ export class WorkQueries {
   }
   private event(event: unknown) {
     if (this.socket.destroyed || this.paused) return;
-    if (this.socket.writableLength > this.maxQueuedBytes) { this.paused = true; return; }
     const snapshot = (event as any)?.type === "runtime_snapshot" ? (event as any).snapshot : undefined;
+    const key = snapshot && this.lastBackgroundKey !== undefined ? backgroundNotificationKey(snapshot) : undefined;
+    if (key !== undefined && key === this.lastBackgroundKey) return;
+    if (this.socket.writableLength > this.maxQueuedBytes) { this.paused = true; return; }
     let line: string;
     if (snapshot) {
       let prefix = eventEncodings.get(snapshot);
@@ -68,7 +75,10 @@ export class WorkQueries {
       this.socket.write(JSON.stringify({ type: "event", event: { type: "resync_required", reason: "snapshot-too-large: narrow the scope or limit" } }) + "\n");
       return;
     }
-    if (snapshot) this.lastSnapshotSeq = snapshot.seq;
+    if (snapshot) {
+      this.lastSnapshotSeq = snapshot.seq;
+      this.lastBackgroundKey = key;
+    }
     this.socket.write(line);
     queryEncodingMetrics.frames++; queryEncodingMetrics.bytes += Buffer.byteLength(line);
   }
@@ -76,11 +86,15 @@ export class WorkQueries {
     if (command.type === "runtime_unsubscribe") { this.close(); return { unsubscribed: true }; }
     if (command.type === "runtime_get_metrics") return { ...this.model.metrics };
     const scope = workScope(command.scope);
+    // An explicit read must see new commits. Publication callbacks already observe
+    // the reconciled state and must not poll the inbox again for every subscriber.
+    if (scope.background && !scope.backgroundHistory) this.model.prepareBackgroundQuery();
     const snapshot = this.model.snapshot(scope);
     if (Buffer.byteLength(snapshotJSON(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
       this.lastSnapshotSeq = snapshot.seq;
+      this.lastBackgroundKey = scope.background && !scope.backgroundHistory ? backgroundNotificationKey(snapshot) : undefined;
       this.dispose = this.model.onChange(() => {
         try {
           this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) });

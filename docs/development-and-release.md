@@ -95,6 +95,8 @@ npm test
 npm run test:cross-session
 ```
 
+When designing a plugin hook, timer, subscription or render path, identify which component owns the source data and what change should make it read again. [ADR 0032 · Plugin and runtime performance design](adr/0032-runtime-performance-design.md)
+
 ### Minimal tool output compatibility
 
 The renderer regression suite covers single-line folded call headers, terminal-width
@@ -369,6 +371,8 @@ Verify the workspace and the package being released:
 npm run verify
 npm publish --dry-run -w packages/pi-better-goal --registry=https://registry.npmjs.org/
 ```
+
+For changes to recurring plugin or runtime work, verify the affected work budget and user-visible result on the release candidate. [ADR 0032 · Plugin and runtime performance design](adr/0032-runtime-performance-design.md)
 
 Vendored shared modules (`shared-sandbox-core.ts`, `shared-ssh-core/`,
 `shared-log-utils.ts`, `shared-failure-observations.ts`,

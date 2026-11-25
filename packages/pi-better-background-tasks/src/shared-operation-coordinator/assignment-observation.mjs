@@ -90,6 +90,7 @@ export function createAssignmentReader(path, inboxPath = ":memory:", derivedConn
         connection(refresh = true) { if (refresh) this.revision(); return db; },
         changes() { this.revision(); return inbox.receive(db, identity); },
         acknowledgeChanges(batch, complete) { inbox.acknowledge(batch, complete); },
+        get hasPendingChanges() { return inbox.hasPendingChanges; },
         get changeMetrics() { return inbox.metrics; },
         get snapshotActive() { return snapshot; },
 
