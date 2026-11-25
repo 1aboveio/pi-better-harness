@@ -4,6 +4,44 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.55.0] - 2026-11-25
+
+### Added
+
+- Enable Agent Supervisor in Harness settings to recover interrupted CI observation, diagnose stalled Outcomes and shared daemon faults, review scope, consolidate authorization requests, and follow up on recovery commitments. Each scenario is opt-in. (#896)
+
+### Fixed
+
+- Bound task plans and dynamic workflows now share a Todo view. At 36 terminal columns or wider, the task list appears to the left of the workflow diagram and review loops. In narrower terminals the diagram follows the list. Long provider status text stays within the compact list. (#908)
+
+## [pi-better-server@0.8.0] - 2026-11-25
+
+### Added
+
+- Coordinate Supervisor recovery and shared decisions across sessions. The owning session receives the intervention and records the result. (#896)
+
+### Changed
+
+- Read the Background inbox once per change and notify the sessions whose visible state changed. Queue diagnostics share a sample when explicitly requested. (#907)
+
+## [pi-better-background-tasks@0.21.0] - 2026-11-25
+
+### Added
+
+- When CI observation recovery is enabled, check the original GitHub run after its local watcher stops and suggest resuming observation to the owner. Bundle Server 0.8.0. (#896, #907)
+
+## [pi-better-subagents@0.39.0] - 2026-11-25
+
+### Added
+
+- Add the Supervisor role to the Agent Catalog and bundle Server 0.8.0 for shared recovery and decision handling. (#896)
+
+## [pi-better-goal@0.16.3] - 2026-11-25
+
+### Changed
+
+- Update the shared assignment reader with a lightweight check for pending inbox changes. (#907)
+
 ## [pi-better-harness@0.54.0] - 2026-11-25
 
 ### Added
