@@ -8,6 +8,8 @@ The main thread handles bounded protocol parsing, connection admission, cached e
 
 Diagnostic status returns the last observed liveness reasons with `observedAt` and an explicit observation state. The worker pushes observations with revision and fresh-liveness replies; status reads the cached observation without scheduling or awaiting worker work. These reasons may be stale. Idle admission separately awaits a fresh liveness query before deciding whether to drain. Neither a snapshot nor diagnostic status grants mutation authority.
 
+Ordinary replies and revision broadcasts carry in-memory counters. A `runtime_get_metrics` request asks the read worker for current SQLite inbox diagnostics. Concurrent requests share one sample. If the worker is busy for 100 ms or has an open transaction, the executor returns its last sample with `inboxDiagnosticsFresh: false`. The `inboxDiagnosticsObservedAt` timestamp is null until the first sample from the current worker. A late reply refreshes the cache.
+
 The main-thread work target is at most 10 ms per ordinary dispatch. This is a review threshold, not a measured maximum across every operation. The real-process harness enforces a 250 ms control-status response budget while rebuilding history. Catalog file operations and canonical mutation transactions still execute on the main thread; their worst-case latency remains workload-dependent. They are not covered by the read-worker isolation claim.
 
 ## Bounds and ordering

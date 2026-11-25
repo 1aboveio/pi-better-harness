@@ -138,8 +138,9 @@ export class WorkReadModel {
     }
     return { available: false, received: null, applied: null, pending: null };
   }
-  get metrics() {
-    return { ...this.counters, assignments: this.assignmentMetrics, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
+  get metrics() { return { ...this.indexCounters, assignments: this.assignmentMetrics }; }
+  get indexCounters() {
+    return { ...this.counters, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
@@ -350,7 +351,13 @@ export class WorkReadModel {
     this.listeners.add(notify);
     return () => { this.listeners.delete(notify); release?.(); };
   }
-  get backgroundMetrics() { return { ...this.background.metrics, registry: this.background.registryMetrics, changes: this.background.changeMetrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
+  get inboxDiagnostics() {
+    // The owner can yield while applying a batch. Only sample committed queue state.
+    if (this.db.isTransaction) return undefined;
+    return { assignments: this.assignmentMetrics, backgroundChanges: this.background.changeMetrics, observedAt: Date.now() };
+  }
+  get backgroundMetrics() { return { ...this.backgroundCounters, changes: this.background.changeMetrics }; }
+  get backgroundCounters() { return { ...this.background.metrics, registry: this.background.registryMetrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
   observation(reasons = this.observationInitialized ? this.livenessReasons({ refresh: false }) : []) {
     return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
   }

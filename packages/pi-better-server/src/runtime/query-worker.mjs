@@ -85,7 +85,7 @@ let cacheBytes = 0, cacheHits = 0, queryCount = 0, serializationCount = 0;
 let revisionPending = false, revisionDirty = false;
 const durations = [];
 const cacheComparisons = workerData.queryCacheDiagnostics ? [] : undefined;
-const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
+const metrics = () => ({ ...model.indexCounters, background: model.backgroundCounters, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
   cacheEntries: cache.size, queryDurationMs: [...durations], ...(cacheComparisons ? { cacheComparisons: [...cacheComparisons] } : {}) });
 const snapshot = model.snapshot.bind(model);
 model.snapshot = scope => observeExecution("snapshot", () => {
@@ -156,6 +156,11 @@ function session(id) {
 }
 
 parentPort.on("message", async message => {
+  if (message.type === "inbox-diagnostics") {
+    try { parentPort.postMessage({ type: "inbox-diagnostics", sample: model.inboxDiagnostics }); }
+    catch (error) { parentPort.postMessage({ type: "inbox-diagnostics", error: String(error).slice(0, 512) }); }
+    return;
+  }
   if (message.type === "heartbeat-consumed") { heartbeatPending = false; return; }
   if (message.type === "cancel") {
     const request = requests.get(message.id);

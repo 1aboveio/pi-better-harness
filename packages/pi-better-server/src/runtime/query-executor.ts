@@ -8,6 +8,8 @@ import { executionPhases, inventoryPhases } from "./read-watchdog-probe.ts";
 import { notifyWorkBudget } from "./work-budget.ts";
 import { HostSourceWatches } from "./source-watch.ts";
 
+const INBOX_DIAGNOSTICS_WAIT_MS = 100;
+
 export interface EncodedRead { json: string }
 interface Waiter { connection: number; expiresAt: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
 interface Query {
@@ -16,7 +18,7 @@ interface Query {
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
-interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
+interface WorkerMetrics { background?: Record<string, unknown>; sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
   queryCacheDiagnostics?: boolean;
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
@@ -54,6 +56,8 @@ export class WorkQueryExecutor {
   private heartbeat!: BigInt64Array;
   private probe?: Int32Array;
   private workerMetrics: WorkerMetrics = {};
+  private inboxSample?: WorkReadModel["inboxDiagnostics"];
+  private inboxRequest?: { ready: Promise<boolean>; finish(fresh: boolean, error?: string): void };
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
     status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
   };
@@ -189,6 +193,7 @@ export class WorkQueryExecutor {
       this.workerGeneration++;
       this.internalRecoveryDemand = false;
       this.exited = false; this.failure = undefined; this.termination = undefined;
+      this.inboxSample = undefined;
       this.workerMetrics = {}; this.workerConnections.clear(); this.revision++;
       this.lastResponse = performance.now();
       this.lastObservation = { status: "rebuilding", reason: "Read worker is recovering its source inventory.", observedAt: null, reasons: [] };
@@ -241,7 +246,12 @@ export class WorkQueryExecutor {
   }
 
   metrics() {
-    return { ...this.workerMetrics, sourceSubscriptions: this.sourceWatches.metrics(), executor: { active: this.active ? 1 : 0, queued: this.queue.length,
+    const unavailable = { available: false, received: null, applied: null, pending: null };
+    return { ...this.workerMetrics,
+      assignments: this.inboxSample?.assignments ?? unavailable,
+      background: { ...this.workerMetrics.background, changes: this.inboxSample?.backgroundChanges ?? unavailable },
+      inboxDiagnosticsObservedAt: this.inboxSample?.observedAt ?? null,
+      sourceSubscriptions: this.sourceWatches.metrics(), executor: { active: this.active ? 1 : 0, queued: this.queue.length,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
       cancelled: this.cancelled, timeouts: this.timeouts, queueTimeouts: this.queueTimeouts, callerTimeouts: this.callerTimeouts,
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
@@ -251,9 +261,30 @@ export class WorkQueryExecutor {
       status: this.failure ? "degraded" : "ready" } };
   }
 
+  private sampleInbox(): Promise<boolean> {
+    if (this.failure || this.closed) return Promise.resolve(false);
+    if (this.inboxRequest) return this.inboxRequest.ready;
+
+    let finish!: (fresh: boolean, error?: string) => void;
+    const ready = new Promise<boolean>((resolve, reject) => {
+      // Return cached diagnostics on timeout, but keep the worker request single-flight until its reply.
+      const timer = setTimeout(() => resolve(false), INBOX_DIAGNOSTICS_WAIT_MS);
+      finish = (fresh, error) => {
+        clearTimeout(timer);
+        if (error) reject(new Error(error));
+        else resolve(fresh);
+      };
+    });
+    this.inboxRequest = { ready, finish };
+    this.worker.postMessage({ type: "inbox-diagnostics" });
+    return ready;
+  }
+
   private request(connection: number, input: Record<string, unknown>): Promise<EncodedRead> {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
-    if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
+    if (input.type === "runtime_get_metrics") {
+      return this.sampleInbox().then(fresh => ({ json: JSON.stringify({ ...this.metrics(), inboxDiagnosticsFresh: fresh }) }));
+    }
     if (this.failure) {
       if (connection === 0) this.internalRecoveryDemand = true;
       this.scheduleRecovery(); return Promise.reject(this.failure);
@@ -326,6 +357,12 @@ export class WorkQueryExecutor {
     // Replies to cancelled reads carry no fresh observation or metrics authority.
     if (message.type === "reply" && (!this.active || message.id !== this.active.id || !this.active.waiters.size)) {
       if (message.id === this.active?.id) { this.active = undefined; this.pump(); }
+      return;
+    }
+    if (message.type === "inbox-diagnostics") {
+      if (message.sample) this.inboxSample = message.sample;
+      this.inboxRequest?.finish(Boolean(message.sample), message.error);
+      this.inboxRequest = undefined;
       return;
     }
     if (message.metrics) this.workerMetrics = message.metrics;
@@ -410,6 +447,8 @@ export class WorkQueryExecutor {
     if ([...this.queue, ...(this.active ? [this.active] : [])].some(query =>
       [...query.waiters].some(waiter => waiter.connection === 0))) this.internalRecoveryDemand = true;
     this.failure = error; this.lag.disable();
+    this.inboxRequest?.finish(false);
+    this.inboxRequest = undefined;
     for (const query of [...this.queue, ...(this.active ? [this.active] : [])]) this.finish(query, error);
     this.queue = []; this.active = undefined;
     for (const connection of this.streams.keys()) this.event(connection, JSON.stringify({ type: "event",
