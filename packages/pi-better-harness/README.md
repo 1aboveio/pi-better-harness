@@ -343,6 +343,19 @@ The hub is TUI-only and is included by the installer. To load the settings exten
 pi -e ./packages/pi-better-harness/extensions/settings/index.ts
 ```
 
+### Agent Supervisor
+
+Open **Supervisor mode** in `/harness-settings`. Turn it on and select the scenarios to run. First use starts with an empty selection. Settings apply to sessions sharing the Pi agent directory. Turning the mode off preserves the selection and lets existing tasks continue.
+
+| Scenario | What the owner receives |
+| --- | --- |
+| CI observation recovery | A suggestion to resume observation of the original GitHub run when its local watcher exits and a fresh check confirms the run is active. Use `supervisor_consult` for the managed observer. |
+| Diagnose stalled Outcomes | A diagnostic review after repeated identical successful repository reads return the same evidence throughout the stall interval. |
+| Review Outcome scope | A review of changed Todo steps against the latest user instruction and Outcome. The owner chooses which steps to keep or prune. Use `supervisor_review` for an on-demand review. |
+| Shared daemon fault diagnosis | A shared read-plane diagnosis with an owner-specific verification step when a runtime read fails and the daemon confirms degraded or rebuilding inventory. |
+| Consolidate authorization requests | Owners in a trusted workspace can use `supervisor_request_decision` for the same proposal. The dialog shows the reference, operation, host, resource, side effect, workspace and validity period. Execution still needs the permissions normally required by the tool. |
+| Follow up on recovery commitments | Use `supervisor_followup` to record the action, expected verification and actual tool results. Read progress with `/supervisor-followup`. Request one reminder with `/supervisor-followup remind <id> <minutes>`. |
+
 ## When To Use
 
 Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or model routing. Outcome & Todo is available through Harness.

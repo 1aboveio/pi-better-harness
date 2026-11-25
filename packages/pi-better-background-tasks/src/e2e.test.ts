@@ -129,6 +129,12 @@ describe("manager-domain SDK integration and native server acceptance", () => {
     ].sort());
   });
 
+  it("offers Supervisor consultation on the native frontend and explains disabled recovery", async () => {
+    const harness = await createHarness({ native: true, sessionId: "supervisor-consult-disabled" });
+    expect(await harness.execute("supervisor_consult", { id: "bgs_0123456789abcdef0123" }))
+      .toContain("/harness-settings → Supervisor mode → CI observation recovery");
+  });
+
   it("documents compact default payloads in the tool registry", async () => {
     const harness = await createHarness();
 

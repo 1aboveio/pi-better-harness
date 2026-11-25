@@ -6,6 +6,7 @@ import { backgroundDigest, backgroundParametersDigest } from './managed-authorit
 import { readAdmissionStartToken, readProcessStartTokenFresh } from './process-identity.js';
 import { currentForegroundSandboxPolicy, FOREGROUND_SANDBOX_POLICY_CHANNEL } from './sandbox.js';
 import { backgroundListNeedsHistory, backgroundObservation } from './work-observation.js';
+import { supervisorConsultTool, supervisorOutcome } from './ci-observation.js';
 /** Native host proof carries scope and captured policy, never a transcript or module path. */
 export async function requestBackgroundTool(pi: ExtensionAPI, ctx: ExtensionContext, key: string, tool: string, params: unknown, parameters?: unknown, signal?: AbortSignal): Promise<any> {
     if (signal?.aborted)
@@ -40,7 +41,8 @@ export async function requestBackgroundTool(pi: ExtensionAPI, ctx: ExtensionCont
     try {
         const hello = await client.ready;
         const policy = currentForegroundSandboxPolicy(pi);
-        const branchIds = ctx.sessionManager.getBranch().map(entry => entry.id).filter((value): value is string => typeof value === 'string');
+        const branch = ctx.sessionManager.getBranch();
+        const branchIds = branch.map(entry => entry.id).filter((value): value is string => typeof value === 'string');
         const sessionId = ctx.sessionManager.getSessionId();
         if (!sessionId)
             throw new Error('Background tools require a native session identity');
@@ -48,7 +50,9 @@ export async function requestBackgroundTool(pi: ExtensionAPI, ctx: ExtensionCont
         const start = version === 2 ? readAdmissionStartToken(process.pid) : readProcessStartTokenFresh(process.pid);
         const record = { version, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
             owner: { kind: 'parent-session', sessionId, workspace: realpathSync(ctx.cwd) }, branchIds, projectTrusted: ctx.isProjectTrusted(),
-            pid: process.pid, start, key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundParametersDigest(parameters), policy };
+            pid: process.pid, start, key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundParametersDigest(parameters), policy,
+            supervisorOutcome: ['bg_task_spawn', 'bg_task_watch', 'bg_task', '__background_poll', '__background_receipt', supervisorConsultTool].includes(tool)
+                ? supervisorOutcome(branch) : undefined };
         const staged = `${path}.tmp`;
         writeFileSync(staged, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
         renameSync(staged, path);

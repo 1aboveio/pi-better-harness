@@ -123,6 +123,7 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 | `developer` | `role.developer` | Developer | `openai/gpt-6.1-sol` | high | balanced |
 | `reviewer` | `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
 | `architect` | `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
+| `supervisor` | `role.supervisor` | Supervisor | `openai/gpt-6.1-sol` | medium | balanced |
 | `writer` | `role.writer` | Writer | `openai/gpt-6.1-terra` | medium | unset |
 
 Bundled descriptions are routing boundaries for coordinator mode. Researcher owns

@@ -5,7 +5,7 @@ import { connectWorkClient } from "./shared-work-client.mjs";
 import { catalogSnapshotFromWire, defaultUserRoot } from "./catalog-store.domain.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 /** Short-lived catalog connection. No transcript or permission authority travels here. */
-export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessionId = "catalog", projectAccess, signal) {
+export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessionId = "catalog", projectAccess, signal, hostAuthority = catalogHostAuthority) {
     signal?.throwIfAborted();
     const agentDir = realpathSync(userRoot);
     let registration;
@@ -22,7 +22,7 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
         throw new Error("Invalid canonical runtime registration");
     const client = await connectCatalogClient(agentDir, registration.serverDir, undefined, signal);
     const register = async (setupSignal) => {
-        const authority = await catalogHostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
+        const authority = await hostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
         setupSignal?.throwIfAborted();
         await client.request("runtime_register_catalog", { cwd, sessionId: authority?.sessionId ?? sessionId, authority, projectAccess: projectAccess === false ? "deny" : undefined });
     };
@@ -38,6 +38,18 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
             await register();
             const wire = await client.request("runtime_get_catalog", { overlay });
             return catalogSnapshotFromWire(wire);
+        },
+        async decision(action, scope, token, answer) {
+            await register();
+            return client.request("runtime_supervisor_review", { action, scope, token, answer });
+        },
+        async sharedReadDiagnosis(verifiedIncident) {
+            await register();
+            return client.request("runtime_supervisor_review", { action: "read-health", verifiedIncident });
+        },
+        async review(scenario, action, token) {
+            await register();
+            return client.request("runtime_supervisor_review", { scenario, action, token });
         },
         async edit(edit) { await register(); return client.request("runtime_edit_catalog", edit); },
         async scopedAgents(scope) { await register(); return client.request("runtime_get_catalog_scope", { scope }); },

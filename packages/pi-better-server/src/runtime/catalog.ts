@@ -7,10 +7,16 @@ import { CatalogAdmission } from "./catalog-admission.ts";
 import { overlayDigest } from "./domain/catalog/catalog-overlay.mjs";
 import { watch, lstatSync, type FSWatcher } from "node:fs";
 import { join } from "node:path";
+import { supervisorDecision } from "./supervisor-decisions.ts";
+import { SharedReadDiagnosis, type ReadHealth } from "./shared-read-diagnosis.ts";
+import { SupervisorAdmission, reviewRevision } from "./supervisor-admission.ts";
 import { CatalogSources } from "./catalog-sources.ts";
 
 /** One server-owned filesystem catalog; registrations belong to the live socket. */
 export class SharedCatalog {
+  private readonly readDiagnosis = new SharedReadDiagnosis();
+  private readonly readHealth?: () => { state: ReadHealth; generation: number } | undefined;
+  private readonly supervisor: SupervisorAdmission;
   readonly sources = new CatalogSources();
   private agentDir: string;
   readonly admission: CatalogAdmission;
@@ -18,7 +24,12 @@ export class SharedCatalog {
   private timer?: ReturnType<typeof setInterval>;
   private pending?: ReturnType<typeof setTimeout>;
   private watchers = new Map<string, { watcher: FSWatcher; identity: string }>();
-  constructor(agentDir: string, instanceId: string) { this.agentDir = agentDir; this.admission = new CatalogAdmission(agentDir, instanceId); }
+  constructor(agentDir: string, instanceId: string, readHealth?: () => { state: ReadHealth; generation: number } | undefined) {
+    this.readHealth = readHealth;
+    this.agentDir = agentDir;
+    this.supervisor = new SupervisorAdmission(scenario => reviewRevision(agentDir, scenario));
+    this.admission = new CatalogAdmission(agentDir, instanceId);
+  }
 
   observe(read: () => any, emit: (snapshot: any) => void) {
     if (this.observers.size >= 64) throw new Error("catalog-subscription-limit");
@@ -101,6 +112,24 @@ export class SharedCatalog {
         return { cwd: registration.cwd, sessionId: registration.sessionId, projectTrusted: location().projectTrusted };
       }
       const loc = location();
+      if (command.type === "runtime_supervisor_review" && typeof command.action === "string" && command.action.startsWith("decision-")) {
+        if (!reviewRevision(this.agentDir, "shared-decisions")) return { status: "disabled" };
+        const grant = this.admission.verify(registration!.authority);
+        return supervisorDecision(this.agentDir, { ...grant, projectTrusted: loc.projectTrusted }, command);
+      }
+      if (command.type === "runtime_supervisor_review" && command.action === "read-health") {
+        if (!reviewRevision(this.agentDir, "shared-fault")) return { status: "disabled" };
+        const owner = JSON.stringify([registration!.cwd, registration!.sessionId]);
+        if (command.verifiedIncident !== undefined)
+          return { status: this.readDiagnosis.verified(owner, command.verifiedIncident) ? "verified" : "stale" };
+        const health = this.readHealth?.();
+        const incident = health && this.readDiagnosis.inspect(health.state, health.generation, owner);
+        return incident ? { status: "diagnosed", incident } : { status: "unconfirmed" };
+      }
+      if (command.type === "runtime_supervisor_review") {
+        const grant = this.admission.verify(registration!.authority);
+        return this.supervisor.request(JSON.stringify([grant.cwd, grant.sessionId]), command);
+      }
       if (command.type === "runtime_get_catalog_scope") {
         if (command.scope !== "user" && command.scope !== "project") throw new Error("Invalid catalog scope");
         return listScopedAgents({ ...loc, sources: this.sources }, command.scope);

@@ -3,18 +3,23 @@ import { Check } from 'typebox/value';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { existsSync, openSync, closeSync, readSync, fstatSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, fstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
+import { CatalogSources } from './catalog-sources.ts';
+import { CiRecovery, diagnoseCiRecovery, readCiStage, recoveryFreshMs, runViewArgs, type RecoveryDependencies } from './ci-recovery.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
 export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000,
-    trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void) {
+    trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void,
+    catalog = new CatalogSources(), recoveryDependencies?: Partial<RecoveryDependencies>) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures, reviewSettings] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
         import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'), load('review-settings'),
     ]);
     const identity = await load('process-identity');
+    const [ci, processTools, runnerStore] = await Promise.all([load('ci-observation'), load('process'), load('supervisor/store')]);
     const lease = acquireMutationStore(root);
     const unknownWriters = new Map<string, number>();
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
@@ -24,6 +29,41 @@ export async function createBackgroundTools(root: string, instance: string, drai
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
     const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
+    const recoveryCandidates = new Map<string, { owner: string; id: string; until: number; direct: boolean }>();
+    const recoveryHistory = new Map<string, number>();
+    const recoveryWindowMs = 10 * 60_000;
+    const interruptedStatuses = ['failed', 'timed_out', 'lost'];
+    const settingRevision = () => draining() ? undefined : ci.ciObservationRevision({ agentDir: () => root });
+    const recoveryEnabled = () => settingRevision() !== undefined;
+    const recovery = new CiRecovery(recoveryEnabled, {
+        async read(run, signal, evidence, policy) {
+            if (!evidence.policy) return;
+            const fresh = sandbox.planFor(policy);
+            const original = evidence.policy;
+            // The probe must obey both the launch-time and the live restrictions.
+            const confined = [original, fresh].filter(plan => plan.confined);
+            if (confined.some(plan => plan.permissions?.network === false || plan.permissions?.storedCredentials === 'off')) return;
+            const cwd = evidence.operation.owner.workspace;
+            const spec = { argv: ['gh', ...runViewArgs(run)], shell: false, cwd };
+            for (const plan of confined) sandbox.assertBackgroundExecutionAllowed(spec, plan, { cwd });
+            const caps = confined.map(plan => sandbox.backgroundExecutionLimits(plan).commandTimeoutSeconds ?? 30);
+            let plan = confined[0];
+            if (original.confined && fresh.confined) {
+                if (original.writableRoot !== fresh.writableRoot || !original.permissions || !fresh.permissions) return;
+                plan = { ...original, denyWrite: [...new Set([...original.denyWrite, ...fresh.denyWrite])],
+                    permissions: effectiveBackgroundPolicy({ state: 'enabled', writableRoot: cwd,
+                        permissions: { ...original.permissions, enabled: true } }, { ...fresh.permissions, enabled: true }, cwd).permissions };
+            }
+            const directory = mkdtempSync(join(tmpdir(), 'pi-ci-recovery-'));
+            try {
+                const wrapped = plan ? sandbox.confineCommandSpec(spec, plan, join(directory, 'policy.sb')) : spec;
+                return await readCiStage(run, signal, processTools.commandExecution(wrapped), cwd, 1000 * Math.min(30, ...caps));
+            } finally { rmSync(directory, { recursive: true, force: true }); }
+        },
+        diagnose: (input, signal) => diagnoseCiRecovery(session.modelRuntime,
+            catalog.load({ cwd: input.workspace, userRoot: root, projectTrusted: input.projectTrusted }), input, signal),
+        ...recoveryDependencies,
+    }, runnerStore.writeTextAtomic);
     const traceSeen = new Set<string>();
     const traceHandoff = (stage: string, facts: Record<string, unknown>) => {
         if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== '1') return;
@@ -36,7 +76,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
     };
     const isAttentionDelivery = (item: any) => {
         const type = item.notification.event?.customType;
-        return type === 'background-task-stall' || type === 'background-wait-review';
+        return type === 'background-task-stall' || type === 'background-wait-review' || type === ci.supervisorRecoveryType;
     };
     const sameNativeHost = (item: any, record: any) => item.scope.pid === record.pid && item.scope.start === record.start;
     const deliveryLeaseMs = 30000;
@@ -47,6 +87,20 @@ export async function createBackgroundTools(root: string, instance: string, drai
             if (JSON.parse(view)[0] === key) forgetView(view);
     };
     const effectivePolicy = (record: any) => effectiveBackgroundPolicy(record.policy, permissions.readPermissionSettings({ agentDir: () => root }).background, record.owner.workspace);
+    const currentOutcome = (record: any) => {
+        const value = record.supervisorOutcome;
+        if (!value || !record.branchIds.includes(value.id) || typeof value.objective !== 'string' || !value.objective.trim()
+            || value.objective.length > 2000 || ![value.doneWhen, value.boundaries].every(list => Array.isArray(list) && list.length <= 8
+                && list.every(line => typeof line === 'string' && line.length <= 400))) return;
+        return { id: value.id, objective: value.objective, doneWhen: value.doneWhen, boundaries: value.boundaries };
+    };
+    const candidateKey = (key: string, id: string) => JSON.stringify([key, id]);
+    const rememberRecovery = (key: string, id: string, direct = false, endedAt = Date.now()) => {
+        const index = candidateKey(key, id), previous = recoveryCandidates.get(index);
+        if (previous && !direct) return;
+        recoveryCandidates.set(index, { owner: key, id, direct: direct || previous?.direct === true, until: endedAt + recoveryWindowMs });
+        if (recoveryCandidates.size > 256) recoveryCandidates.delete(recoveryCandidates.keys().next().value!);
+    };
     const assertAdmission = () => {
         if (!current)
             throw new Error('background-authority-unavailable');
@@ -103,6 +157,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
                         enterControl: () => lease.budget.enter('control'),
                         notifyParent, assertAdmission,
+                        currentOutcomeId: () => current && currentOutcome(current.record)?.id,
                         authorizeParentCancellation: ({requester, operation, requestId}: any) => {
                             assertAdmission();
                             const record=current.record;
@@ -204,12 +259,37 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         forgetOwner(ownerKey(item.scope.owner));
                         deliveries.delete(token);
                     }
+                const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
+                const outcome = currentOutcome(record);
+                const ciEvidence = (id: string) => outcome && service.ciObservation(origin, id, outcome.id, record.branchIds);
+                const recoveryInput = outcome && { outcome, policy, projectTrusted: record.projectTrusted === true,
+                    authorization: authority.backgroundDigest([policy ?? null, record.projectTrusted === true, outcome]) };
+                const invalidateRecovery = () => {
+                    for (const [token, item] of deliveries) if (item.notification.event?.customType === ci.supervisorRecoveryType) deliveries.delete(token);
+                    recovery.cancelPending();
+                };
+                if (record.tool === ci.supervisorConsultTool) {
+                    const reply = (status: string, text: string) => ({ content: [{ type: 'text', text }], details: { status } });
+                    if (!recoveryEnabled()) {
+                        invalidateRecovery();
+                        return reply('disabled', 'CI observation recovery is disabled or the daemon is draining. Check /harness-settings → Supervisor mode → CI observation recovery.');
+                    }
+                    const evidence = typeof record.params?.id === 'string' && ciEvidence(record.params.id);
+                    if (!evidence || !recoveryInput) return reply('outside-scope', 'No supported watcher belongs to this active Outcome and branch.');
+                    assertAdmission();
+                    rememberRecovery(key, record.params.id, true);
+                    // Consultation uses the same check and delivery as automatic recovery.
+                    return reply('queued', 'The daemon will check this watcher through the same CI recovery path. Any advice is delivered to the original owner only once.');
+                }
                 if (record.tool === '__background_receipt') {
                     const item = deliveries.get(record.params.token);
                     traceHandoff('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
                         receiptId: item?.receiptId, found: Boolean(item), delivered: record.params.delivered === true });
                     if (!item || ownerKey(item.scope.owner) !== key || isAttentionDelivery(item) && !sameNativeHost(item, record))
                         throw new Error('delivery-receipt-refused');
+                    if (item.notification.event?.customType === ci.supervisorRecoveryType && record.params.delivered === true
+                        && (!outcome || outcome.id !== item.notification.outcomeId))
+                        throw new Error('delivery-recipient-inactive');
                     if (record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId))
                         throw new Error('delivery-recipient-inactive');
                     if (record.params.delivered === true)
@@ -273,7 +353,6 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             if (task && task.dismissedAt === undefined && (!task.parentRecipient?.branchId || record.branchIds.includes(task.parentRecipient.branchId))) { tasks.push(task); present.add(id); }
                         }
                     }
-                    const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                     const liveAlerts = new Map<string, any>();
                     const reviewTasks = tasks.filter(task => task.active && task.progress && task.callback && task.owner.kind === 'parent-session');
                     let intervalMinutes = reviewSettings.DEFAULT_BACKGROUND_REVIEW_INTERVAL_MINUTES;
@@ -295,6 +374,68 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const outgoing = [];
                     let retryAfterMs = Number.isFinite(nextReviewAt) ? Math.max(1, nextReviewAt - Date.now()) : undefined;
                     if (liveAlerts.size && deliveries.size >= 256) retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
+                    const supervisorRevision = recoveryInput && settingRevision();
+                    if (recoveryInput && !supervisorRevision && recoveryCandidates.size) invalidateRecovery();
+                    if (recoveryInput && supervisorRevision) {
+                        const capture = (task: any) => {
+                            if (task.durable && task.terminal && interruptedStatuses.includes(task.status) && ciEvidence(task.id)?.callback)
+                                rememberRecovery(key, task.id, false, task.endedAt);
+                        };
+                        for (const task of tasks) capture(task);
+                        // A replacement daemon may not have seen the short-lived terminal
+                        // snapshot. Reuse the bounded, exact-recipient history read.
+                        const historyKey = JSON.stringify([key, recoveryInput.outcome.id, supervisorRevision]);
+                        const historyDue = recoveryHistory.get(historyKey) ?? 0;
+                        if (historyDue !== Infinity && ![...recoveryCandidates.values()].some(item => item.owner === key)) {
+                            if (historyDue >= 0 && historyDue <= Date.now()) {
+                                recoveryHistory.set(historyKey, -1); // pending
+                                if (recoveryHistory.size > 128) recoveryHistory.delete(recoveryHistory.keys().next().value!);
+                                void observe({ background: true, backgroundHistory: true, ...origin,
+                                    endedAfter: Date.now() - recoveryWindowMs, statuses: interruptedStatuses, limit: 32 }).then(history => {
+                                    if (!recoveryHistory.has(historyKey)) return;
+                                    if (history.status === 'ready') for (const { meta } of history.rows) capture(meta);
+                                    recoveryHistory.set(historyKey, history.status === 'ready' ? Infinity : Date.now() + 3000);
+                                }).catch(() => { if (recoveryHistory.has(historyKey)) recoveryHistory.set(historyKey, Date.now() + 3000); });
+                            }
+                            const retry = Math.max(1000, historyDue - Date.now());
+                            retryAfterMs = Math.min(retryAfterMs ?? retry, retry);
+                        }
+                        const candidates = [...recoveryCandidates].filter(([index, candidate]) => {
+                            if (candidate.until >= Date.now()) return candidate.owner === key;
+                            recoveryCandidates.delete(index);
+                            return false;
+                        });
+                        const liveRuns = new Set(candidates.length ? tasks.filter(task => task.active).map(task => ciEvidence(task.id)?.run)
+                            .filter(Boolean).map((run: any) => `${run.repo}:${run.runId}:${run.attempt}`) : []);
+                        for (const [index, candidate] of candidates) {
+                            const evidence = ciEvidence(candidate.id);
+                            if (!evidence || !candidate.direct && !evidence.callback) { recoveryCandidates.delete(index); continue; }
+                            if (liveRuns.has(`${evidence.run.repo}:${evidence.run.runId}:${evidence.run.attempt}`)) continue;
+                            let check;
+                            try { check = recovery.inspect(evidence, { ...recoveryInput, authorization: authority.backgroundDigest([recoveryInput.authorization, supervisorRevision]) }); }
+                            catch { continue; /* Do not replace unreadable intervention history. */ }
+                            if (check.status !== 'ready') {
+                                if (check.status === 'checking') retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
+                                else if (check.status === 'unverified') retryAfterMs = Math.min(retryAfterMs ?? 15000, 15000);
+                                else recoveryCandidates.delete(index);
+                                continue;
+                            }
+                            const { repo, runId, attempt } = evidence.run;
+                            const receiptId = recovery.receiptId(evidence);
+                            const args = runViewArgs(evidence.run).slice(0, 5).concat(['--attempt', String(attempt), '--json', 'status,jobs']);
+                            const content = [`Supervisor: the local watcher ${evidence.inspection.status}; GitHub run ${repo}/${runId} attempt ${attempt} is ${check.stage.status}.`,
+                                `Read the latest stage with \`gh ${args.join(' ')}\`, then resume observation of that same run. Do not dispatch or rerun it.`,
+                                ...(check.stage.steps.length ? [`Last observed steps: ${check.stage.steps.map(step => JSON.stringify(step)).join(', ')}.`] : [])].join('\n');
+                            const notification = { origin, taskId: candidate.id, operationId: evidence.operation.operationId,
+                                branchId: evidence.operation.owner.branchId, outcomeId: outcome?.id, settingRevision: supervisorRevision, validUntil: check.checkedAt + recoveryFreshMs, urgent: true,
+                                event: { source: 'background-task', id: receiptId, inspectId: candidate.id, label: 'CI observation recovery',
+                                    status: 'observation interrupted', customType: ci.supervisorRecoveryType, content, detailTool: 'bg_task_status' } };
+                            liveAlerts.set(receiptId, notification);
+                            if (![...deliveries.values()].some(item => item.receiptId === receiptId)) {
+                                notifyParent(notification, { receiptId, delivered: () => recovery.delivered(evidence), defer: () => undefined });
+                            }
+                        }
+                    }
                     for (const [token, item] of deliveries) {
                         if (ownerKey(item.scope.owner) !== key) continue;
                         let notification = item.notification;
@@ -315,7 +456,6 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     traceHandoff('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
                     return { ...projection, tasks, retryAfterMs, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };
                 }
-                const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                 if (record.tool === '__background_detail' || record.tool === '__background_action') {
                     const durable = service.readDurableTask(origin, record.params.id);
                     const candidate = registry.readMeta(record.params.id);
@@ -412,7 +552,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
             tail = request;
             return request;
         },
-        async close() { await tail.catch(() => undefined); for (const item of deliveries.values())
+        async close() { await tail.catch(() => undefined); recoveryHistory.clear(); await recovery.close(); for (const item of deliveries.values())
             item.delivery.defer('Runtime closing'); deliveries.clear(); try {
             service.close();
             runtime.suspendScheduledWork();
