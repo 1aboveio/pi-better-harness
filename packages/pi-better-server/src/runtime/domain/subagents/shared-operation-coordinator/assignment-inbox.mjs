@@ -129,6 +129,9 @@ export class AssignmentInbox {
             throw error;
         }
     }
+    get hasPendingChanges() {
+        return Boolean(this.more || this.db.prepare(`SELECT 1 FROM ${this.prefix}pending LIMIT 1`).get());
+    }
     get metrics() {
         const pending = this.db.prepare(`SELECT count(*) AS pending, min(since) AS oldestPendingAt FROM ${this.prefix}pending`).get();
         return { ...this.db.prepare(`SELECT * FROM ${this.prefix}position`).get(),

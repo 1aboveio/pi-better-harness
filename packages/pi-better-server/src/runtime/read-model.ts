@@ -409,10 +409,12 @@ export class WorkReadModel {
     entry.used = now;
     return entry;
   }
+  prepareBackgroundQuery() {
+    this.background.prepareQuery();
+  }
   contentRevision(scope: WorkScope = {}) {
     if (scope.background) {
       if (scope.backgroundHistory) return String(this.revision);
-      this.background.prepareQuery();
       return hash([this.revision, this.background.sourceRevision(scope)]);
     }
     const entry = this.scopeEntry(scope);
@@ -509,7 +511,7 @@ export class WorkReadModel {
       this.reader.acknowledgeChanges(changes, false);
       snapshot.commit();
       for (const row of updated) this.projected.set(row.meta.id, row);
-      if (this.reader.changeMetrics.more || this.reader.changeMetrics.pending) this.dirty = true;
+      if (this.reader.hasPendingChanges) this.dirty = true;
       this.coordinator = snapshot.revision;
       this.counters.assignmentProjections += updated.length; this.counters.projections += updated.length;
       this.invalidations.assignmentInput += updated.length;
