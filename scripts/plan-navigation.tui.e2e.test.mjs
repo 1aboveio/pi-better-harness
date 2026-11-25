@@ -90,7 +90,8 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   assertBlankRowBefore(widget, /^todo  0\/2 complete/i, "Rush todo section");
   const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
   assert.equal(rushHeader, "todo  0/2 complete · ●", "the icon reflects the reviewed issue in CI");
-  assert.match(widget, /◑\s+#214\s+Extract shared core\s+review passed/);
+  assert.match(widget, /◑ +#214 +Extract shared core +│ Implement 2\/2/);
+  assert.match(widget, /review passed +│/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
   sendLiteral("\x1b[200~/todo hide\x1b[201~");
@@ -100,16 +101,20 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   sendKey("Enter");
   const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
     /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
-  assert.match(revealed, /Implement 2\/2 ──→ Review 2\/2 passed .*┬──→ Ship 0\/2 · 1 blocked · 1 active/);
-  assert.match(revealed, /└─ Fix as needed ←─+┘/);
+  assert.match(revealed, /#214 Extract shared core +│ Implement 2\/2/);
+  assert.match(revealed, /↺ Review/);
+  assert.match(revealed, /Ship 0\/2 · 1 blocked · 1 active/);
   assert.match(revealed, /Extract shared core/);
   assert.match(revealed, /Add mux support/);
   assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
     "the workflow overview does not open the removed detail view");
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
-  const narrow = waitForScreen(screen => /Review 2\/2 passed ←─+┐/.test(screen));
-  assert.match(narrow, /├─→ Fix as needed ─+┘/);
-  assert.match(narrow, /Ship 0\/2 · 1 blocked · 1 active/);
+  const narrow = waitForScreen(screen => /#214[^│\n]*│ Implement 2\/2/.test(screen) && screen.includes("↺ Review") &&
+    !screen.includes("Extract shared core"));
+  assert.match(narrow, /↳ Fix as needed/);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "35", "-y", "32"]);
+  const stacked = waitForScreen(screen => /^Implement 2\/2$/m.test(screen) && screen.includes("↺ Review"));
+  assert.ok(stacked.indexOf("#215") < stacked.indexOf("Implement 2/2"));
 });
 
 // @covers todo.compact-folding

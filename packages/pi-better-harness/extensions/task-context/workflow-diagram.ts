@@ -1,72 +1,68 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { statusStyle, type DisplayStatus, type PlanPresentation } from "./plan-presentation.js";
 
-export type IssueStages = Record<"implement" | "review" | "fix" | "ship", DisplayStatus>;
-type Line = NonNullable<PlanPresentation["metadata"]>[number];
-
-const wire = (text: string) => ({ color: "dim", text });
-const cells = (line: Line) => line.reduce((width, part) => width + visibleWidth(part.text), 0);
-
-function stageNode(name: keyof IssueStages, units: IssueStages[], openFindings = 0): Line {
-  const counts = new Map<DisplayStatus, number>();
-  for (const unit of units) counts.set(unit[name], (counts.get(unit[name]) ?? 0) + 1);
-  const eligible = units.length - (counts.get("skipped") ?? 0);
-  const done = counts.get("completed") ?? 0;
-  const node: Line = [{ text: name[0]!.toUpperCase() + name.slice(1), color: "text" }];
-  const detail = (text: string, color: string) => {
-    node.push(wire(node.length === 1 ? " " : " · "), { text, color });
-  };
-  if (name === "implement" || name === "ship") {
-    detail(`${done}/${eligible}`, eligible > 0 && done === eligible ? "success" : "muted");
-  }
-  for (const [state, label] of [
-    ["failed", "failed"], ["blocked", "blocked"], ["unknown", "unknown"], ["in_progress", "active"],
-  ] as const) {
-    const count = counts.get(state);
-    if (count) detail(`${count} ${label}`, statusStyle(state).color);
-  }
-  if (name === "fix") {
-    const pending = counts.get("pending");
-    if (pending) detail(`${pending} pending`, "muted");
-    if (node.length === 1) detail(done ? `${done} fixed` : "as needed", done ? "success" : "dim");
-  }
-  if (name === "review") {
-    if (openFindings) detail(`${openFindings} open finding${openFindings === 1 ? "" : "s"}`, "muted");
-    if (node.length === 1) detail(done ? `${done}/${eligible} passed` : "pending", done && done === eligible ? "success" : "muted");
-  }
-  return node;
+export interface DiagramPart {
+  text: string;
+  color: string;
+  selected?: boolean;
 }
 
-/** The main path leads directly from review to ship. Fix branches below it and returns to review. */
-export function workflowDiagram(units: IssueStages[], openFindings: number, width: number): Line[] {
-  const implement = stageNode("implement", units);
-  const review = stageNode("review", units, openFindings);
-  const fix = stageNode("fix", units);
-  const ship = stageNode("ship", units);
-  const reviewWidth = cells(review);
-  const fixWidth = cells(fix);
-  const branch = Math.max(reviewWidth + 3, fixWidth + 6);
+export interface WorkflowNode {
+  /** Parallel steps can share a node while remaining individually addressable by edges. */
+  ids: string[];
+  name: string;
+  label: DiagramPart[];
+  parents: string[];
+  revision?: string;
+}
 
-  const lead = [...implement, wire(" ──→ ")];
-  const top = [...lead, ...review, wire(" " + "─".repeat(branch - reviewWidth - 1) + "┬──→ "), ...ship];
-  if (cells(top) <= width) {
-    const indent = " ".repeat(cells(lead));
-    return [
-      top,
-      [wire(indent + "↑" + " ".repeat(branch - 1) + "│")],
-      [wire(indent + "└─ "), ...fix, wire(" ←" + "─".repeat(branch - fixWidth - 5) + "┘")],
-    ];
-  }
+const wire = (text: string): DiagramPart => ({ text, color: "dim" });
+const labelWidth = (parts: DiagramPart[]) => parts.reduce((size, part) => size + visibleWidth(part.text), 0);
 
-  const turn = Math.max(reviewWidth + 3, fixWidth + 8);
-  if (turn < width) {
-    return [
-      implement, [wire("  ↓")],
-      [...review, wire(" ←" + "─".repeat(turn - reviewWidth - 2) + "┐")],
-      [wire("  ├─→ "), ...fix, wire(" " + "─".repeat(turn - fixWidth - 7) + "┘")],
-      [wire("  ↓")], ship,
-    ];
+export function workflowDiagram(nodes: WorkflowNode[], width: number): DiagramPart[][] {
+  if (!nodes.length) return [];
+  const byId = new Map(nodes.flatMap(node => node.ids.map(id => [id, node] as const)));
+  const fixes = new Set(nodes.map(node => node.revision));
+  const main = nodes.filter(node => !fixes.has(node.ids[0]!));
+  const path: WorkflowNode[] = [];
+  let next = main.filter(node => !node.parents.length);
+  while (next.length === 1) {
+    const current = next[0]!;
+    path.push(current);
+    next = main.filter(node => node.parents.length === current.ids.length && node.parents.every(id => byId.get(id) === current));
   }
-  // Keep the return destination readable when even the vertical branch cannot fit.
-  return [implement, [wire("↓ "), ...review], [wire("  ↳ "), ...fix], [wire("  ↺ Review")], [wire("↓ "), ...ship]];
+  if (path.length === main.length) {
+    const top: DiagramPart[] = [];
+    const loops: DiagramPart[][] = [];
+    let x = 0;
+    for (const [i, node] of path.entries()) {
+      top.push(...node.label);
+      const size = labelWidth(node.label);
+      if (node.revision) {
+        const fix = byId.get(node.revision)!.label;
+        const fixSize = labelWidth(fix);
+        const span = Math.max(size + 2, fixSize + 6);
+        const indent = " ".repeat(x);
+        top.push(wire(" " + "─".repeat(span - size - 1) + "┬"));
+        loops.push([wire(indent + "↑" + " ".repeat(span - 1) + "│")],
+          [wire(indent + "└─ "), ...fix, wire(" ←" + "─".repeat(span - fixSize - 5) + "┘")]);
+        x += span + 1;
+      } else x += size;
+      if (i < path.length - 1) { top.push(wire(" ─→ ")); x += 4; }
+    }
+    if (x <= width) return [top, ...loops];
+    // Preserve edge direction without wrapping connectors away from their nodes.
+    return path.flatMap((node, i) => {
+      const lines = [[wire(i ? "↓ " : ""), ...node.label]];
+      if (node.revision) lines.push([wire("  ↳ "), ...byId.get(node.revision)!.label], [wire("  ↺ " + node.name)]);
+      return lines;
+    });
+  }
+  return nodes.map(node => {
+    const parents = node.parents.map(id => {
+      const parent = byId.get(id)!;
+      return parent.ids.length > 1 ? id : parent.name;
+    });
+    return [wire(parents.length ? parents.join(" + ") + " → " : ""), ...node.label,
+      ...(node.revision ? [wire(" ↔ "), ...byId.get(node.revision)!.label] : [])];
+  });
 }

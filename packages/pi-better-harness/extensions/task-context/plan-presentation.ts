@@ -64,9 +64,23 @@ export function planText(value: string): string {
   return value.replace(/[\r\n\t]/g, " ");
 }
 
-export function renderPlanPresentation(
+export function alignedPlanLabels(rows: PlanRow[]): string[] {
+  const labels = rows.map(row => planText(row.label));
+  const width = Math.min(12, Math.max(1, ...labels.map(label => visibleWidth(label))));
+  return labels.map(label => {
+    const fitted = truncateToWidth(label, width);
+    return fitted + " ".repeat(width - visibleWidth(fitted));
+  });
+}
+
+export function planRowTitleColor(status: DisplayStatus): string {
+  if (status === "blocked") return "warning";
+  if (status === "failed") return "error";
+  return isInProgress(status) ? "text" : "muted";
+}
+
+export function renderPlanHeading(
   plan: PlanPresentation, width: number, theme: PlanRenderTheme,
-  full = false, expanded = false,
   header?: CompactTaskHeader,
 ): string[] {
   const size = Math.max(1, Math.floor(width));
@@ -81,7 +95,7 @@ export function renderPlanPresentation(
     if (count(status)) summary.push(`${count(status)} ${label}`);
   }
   if (count("pending") && summary.length === 1) summary.push(`${count("pending")} pending`);
-  const lines = !full && header
+  const lines = header
     ? renderCompactTaskHeader(summary[0], size, theme, header, plan.rows.some((row) => isInProgress(row.status)))
     : [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
   for (const metadata of plan.metadata ?? []) {
@@ -89,7 +103,16 @@ export function renderPlanPresentation(
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);
   }
 
-  const labelWidth = Math.min(12, Math.max(1, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
+  return lines.map(line => truncateToWidth(line, size));
+}
+
+export function renderPlanPresentation(
+  plan: PlanPresentation, width: number, theme: PlanRenderTheme,
+  full = false, expanded = false, header?: CompactTaskHeader,
+): string[] {
+  const size = Math.max(1, Math.floor(width));
+  const lines = renderPlanHeading(plan, size, theme, full ? undefined : header);
+  const labels = alignedPlanLabels(plan.rows);
   const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>
     visibleWidth(planText(row.statusLabel ?? statusStyle(row.status).label)))));
   const indices = full || expanded ? plan.rows.map((_, index) => index) : compactRowIndices(plan.rows);
@@ -102,12 +125,9 @@ export function renderPlanPresentation(
     previous = index;
     const row = plan.rows[index]!;
     const style = statusStyle(row.status);
-    const label = truncateToWidth(planText(row.label), labelWidth);
     const prefix = "  " +
-      theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
-      " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 1);
-    const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
-      isInProgress(row.status) ? "text" : "muted";
+      theme.fg(style.color, style.glyph) + " " + theme.fg("dim", labels[index]!) + " ";
+    const titleColor = planRowTitleColor(row.status);
     const badge = planText(row.statusLabel ?? style.label);
     const available = size - visibleWidth(prefix);
     // At narrow widths use an inline status so it survives title truncation.

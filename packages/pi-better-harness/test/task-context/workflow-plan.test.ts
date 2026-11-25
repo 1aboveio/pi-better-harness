@@ -96,7 +96,7 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
     assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>todo<\/warning><dim>  0\/2 complete/);
     assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
-    assert.match(renderWidget(), /Extract shared core.*active/);
+    assert.match(renderWidget(), /#214 Extract shared core +active +│ Implement/);
     assert.match(renderWidget(), /Add mux support/);
     const result = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
     assert.equal((result.details as any).workflowOwner, owner);

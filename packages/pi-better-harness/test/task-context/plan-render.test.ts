@@ -155,7 +155,7 @@ function rushFixture(): RushPlan {
   };
 }
 
-test("native and workflow plans share summary, colors and glyphs with fitted label columns", () => {
+test("native and workflow plans share summary, colors and glyphs in the task list", () => {
   const workflow = rushFixture();
   const native = replacePlan(null, [
     { step: "Completed", status: "completed" },
@@ -168,15 +168,16 @@ test("native and workflow plans share summary, colors and glyphs with fitted lab
   const b = renderRushPlan(workflow, 100, false, ansiTheme.fg);
   assert.equal(a[0], b[0]);
   const strip = (value: string) => value.replace(/\x1b\[[0-9;]*m/g, "");
-  for (const title of ["Completed", "Implement", "Pending", "Policy"]) {
-    const left = a.find((line) => line.includes(title))!;
-    const right = b.find((line) => line.includes("#") && line.includes(title))!;
-    assert.equal(strip(left).indexOf(title), 6, "one-digit native labels do not reserve unused columns");
-    assert.equal(strip(right).indexOf(title), 9, "four-character issue labels have one trailing space");
-    assert.equal(strip(right).trim().replace(/#\d+/g, (id) => String(workflow.issues.findIndex((unit) => `#${unit.id}` === id) + 1)).replace(/ +/g, " "), strip(left).trim().replace(/ +/g, " "));
-    assert.equal(right.slice(0, right.indexOf(" ", 3)), left.slice(0, left.indexOf(" ", 3)));
+  const tasks = b.slice(2).map(line => line.split("│")[0]!);
+  const normalize = (line: string) => strip(line).trim().replace(/ +/g, " ");
+  for (const [i, row] of workflow.issues.entries()) {
+    const nativeRow = a[i + 1]!;
+    const boundRow = tasks.find(line => line.includes(`#${row.id}`))!;
+    assert.equal(normalize(boundRow).replace(`#${row.id}`, String(i + 1)), normalize(nativeRow));
+    const styledTitle = nativeRow.match(new RegExp(`\\x1b\\[[0-9]+m${row.title}\\x1b\\[0m`))![0];
+    assert.ok(boundRow.includes(styledTitle), row.title + " uses its status color");
   }
-  assert.match(strip(b.join("\n")), /Implement 2\/4 · 1 active .*Review 1 blocked .*Ship 1\/4/);
+  assert.match(strip(b.join("\n")), /Implement 2\/4 · 1 active[^]*Review 1 blocked[^]*Ship 1\/4/);
   assert.doesNotMatch(b.join("\n"), /explore|combine|\bci\b|cicd/);
   assert.doesNotMatch(b.join("\n"), /canary/, "no data work, no canary cell");
   assert.notEqual(b.at(-1), "");
@@ -286,7 +287,7 @@ test("issue rows show implemented, review passed and delivered as distinct state
 
 test("stage headers aggregate every applicable issue, even when fleet entries disagree or rows are folded", () => {
   const workflow = rushFixture();
-  const diagram = () => renderRushPlan(workflow, 100).slice(2, 5).join("\n");
+  const diagram = () => renderRushPlan(workflow, 160).slice(2, 5).join("\n");
   const unit = (id: string, fields: Partial<RushPlan["issues"][number]> = {}): RushPlan["issues"][number] => ({
     id, title: `Issue ${id}`, stage: "done", status: "in-flight", headSha: "abc", reviewedHead: "abc", delivery: "ci", dependsOn: [], ...fields,
   });
@@ -365,21 +366,29 @@ test("the default diagram connects fixes back to review and counts findings acro
       { ...unit, id: "3", title: "Retired", status: "cancelled", reviewFindings: findings },
     ],
   }, "graph");
-  const [top, middle, bottom] = renderRushPlan(plan, 100).slice(2, 5) as [string, string, string];
-  assert.match(top, /Implement 2\/2 ──→ Review 1 active · 2 open findings .*┬──→ Ship 0\/2$/);
+  const [top, middle, bottom] = renderRushPlan(plan, 160).slice(2, 5) as [string, string, string];
+  assert.match(top, /#1 Report +fixing +│ Implement 2\/2 ─→ Review 1 active · 2 open findings .*┬ ─→ Ship 0\/2$/);
+  assert.match(middle, /#2 Dashboard +in review +│/);
   assert.match(bottom, /Fix 1 active/);
   assert.equal(top.indexOf("Review"), middle.indexOf("↑"));
   assert.equal(top.indexOf("Review"), bottom.indexOf("└"));
-  assert.equal(top.indexOf("┬"), middle.indexOf("│"));
+  assert.equal(top.indexOf("┬"), middle.lastIndexOf("│"));
   assert.equal(top.indexOf("┬"), bottom.indexOf("┘"));
-  const narrow = renderRushPlan(plan, 40);
-  const review = narrow.find(line => line.includes("Review 1 active"))!;
-  const fix = narrow.find(line => line.includes("Fix 1 active"))!;
-  assert.match(review, /←─+┐$/);
-  assert.match(fix, /├─→ Fix 1 active ─+┘$/);
-  assert.equal(review.indexOf("┐"), fix.indexOf("┘"));
-  assert.match(narrow.join("\n"), /#1 Report +fixing/);
-  assert.match(narrow.join("\n"), /#2 Dashboard +in review/);
+  for (const width of [35, 36, 40]) {
+    const lines = renderRushPlan(plan, width);
+    const task = lines.findIndex(line => line.includes("#1 Report"));
+    const graph = lines.findIndex(line => line.includes("Implement 2/2"));
+    assert.ok(task >= 0 && graph >= 0);
+    if (width >= 36) {
+      assert.equal(task, graph);
+      assert.match(lines[task]!, /#1 Report +│ Implement 2\/2/);
+    } else {
+      const lastTask = lines.findIndex(line => line.includes("#3 Retired"));
+      assert.ok(lastTask > task && graph > lastTask);
+      assert.doesNotMatch(lines[task]!, /│/);
+    }
+    assert.match(lines.join("\n"), /↺ Review/);
+  }
   assert.match(renderRushPlan(plan, 24).join("\n"), /↺ Review/);
 });
 
@@ -403,7 +412,7 @@ test("the workflow metadata shows the canary only when a unit carries warehouse 
   });
   const header = (data: unknown) => renderRushPlan(projectRushPlan(data, "canary"), 120, false).join("\n");
   const data = header(raw({ reason: "changes the settlement job", result: null }));
-  assert.match(data, /rev 3  ·  canary ○\n +Implement 0\/2 · 1 active/);
+  assert.match(data, /rev 3  ·  canary ○\n[^\n]*│ Implement 0\/2 · 1 active/);
   assert.doesNotMatch(header(raw()), /canary/);
   assert.doesNotMatch(header(raw(false)), /canary/);
   assert.doesNotMatch(header(raw({ required: false, reason: "does not change warehouse work" })), /canary/);

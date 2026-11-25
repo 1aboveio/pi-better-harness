@@ -61,6 +61,10 @@ enables it. Existing active, paused or budget-limited Goals stay unchanged, and
 restoring state or toggling settings never starts work. The outcome and Todo are
 preserved; subsequent continuation follows the existing Goal controls.
 
+Todo uses the same workflow view for a bound task plan and a dynamic workflow.
+It shows tasks on the left and the workflow diagram on the right. Below 36 terminal
+columns, the diagram follows the task list.
+
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
@@ -74,11 +78,10 @@ workflow for dependencies, role handoffs or repeated review. The command works
 in every mode and keeps your saved preference.
 
 The agent records an objective, acceptance criteria, required outputs and task
-dependencies. Todo shows tasks on the left and dependencies and review loops on the right.
+dependencies. The diagram shows dependencies and review loops.
 Task icons distinguish ready (○), working (●), waiting (·), optional standby (–),
 failed (×), and completed (✓) steps. In mouse-enabled Pi, click a task to highlight
 its stage and inspect its latest result. Use `/todo expand` to show every task.
-Below 36 terminal columns, the diagram follows the list.
 Independent tasks can run together. A join waits for each prerequisite's output.
 If a reviewer requests changes, the revision opens and the revised artifact
 returns to review. Delivery waits for approval of the current version.
