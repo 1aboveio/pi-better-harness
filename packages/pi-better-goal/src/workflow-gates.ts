@@ -73,7 +73,9 @@ export function boundPlanPath(entries: Iterable<EntryLike>, owner: WorkflowOwner
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
     const data = entry.data;
-    if (entry.customType === WORKFLOW_ENTRY && isRecord(data) && data.version === 1 && data.kind === "set") path = undefined;
+    if (entry.customType === WORKFLOW_ENTRY && isRecord(data) && data.version === 1 && data.kind === "set") {
+      if (data.resumePlan !== true || !isRecord(data.owner) || data.owner.name !== owner.name) path = undefined;
+    }
     if (entry.customType !== WORKFLOW_PLAN_ENTRY || !isRecord(data) || data.version !== 1) continue;
     if (data.kind === "clear") path = undefined;
     else if (data.kind === "set" && data.owner === owner.name && typeof data.path === "string") path = data.path;

@@ -9,6 +9,8 @@ import { reconstructGoalSnapshot, goalSetEntry, goalWithStatus } from "../../../
 import { OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
 import { EXTENSION_NAME } from "../../../pi-better-goal/src/types.js";
 import { currentWorkflowOwner, workflowEntry, WORKFLOW_ENTRY_TYPE } from "../../../pi-better-goal/src/workflow.js";
+import { boundPlanPath } from "../../../pi-better-goal/src/workflow-gates.js";
+import { WORKFLOW_PLAN_ENTRY, workflowBinding } from "../../extensions/task-context/workflow-plan.js";
 import taskExtension from "../../extensions/task-context/index.js";
 import { createSettingsRegistry } from "../../extensions/settings/registry.js";
 import { OUTCOME_ENTRY, restoreOutcome } from "../../extensions/task-context/outcome-state.js";
@@ -73,6 +75,8 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
   settings.refresh();
   return {
     entries, ctx, events, messages, emit, settings,
+    startWorkflow: () => commands.get("dynamic-workflow").handler("", ctx),
+    workflow: async (input: unknown) => (await tools.get("dynamic_workflow").execute("wf", input, undefined, undefined, ctx)).details.run,
     setIdle(value: boolean) { idle = value; },
     goal: () => reconstructGoalSnapshot(entries),
     outcome: () => restoreOutcome(entries),
@@ -85,7 +89,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
 
 const accepted = { objective: "Ship checkout", doneWhen: ["Checkout succeeds"], boundaries: ["No production writes"] };
 
-test("automatic Goals retain the current workflow's completion gates", async t => {
+test("automatic Goals retain the workflow's completion gates on creation and reopen", async t => {
   const h = await fixture(t, { workflow: "available" });
   await h.update({ outcome: accepted });
   assert.equal(h.goal()?.status, "active");
@@ -95,6 +99,24 @@ test("automatic Goals retain the current workflow's completion gates", async t =
   assert.equal(h.goal()?.status, "active");
   assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
   assert.deepEqual(h.messages, [], "binding the active workflow must not invoke the skill again");
+  const original = h.goal()!;
+  await h.command("complete");
+  assert.equal(currentWorkflowOwner(h.entries), null);
+  await assert.rejects(h.update({ outcome: { ...accepted, status: "active" }, todo: [] }), /rush-issues owns the task plan/);
+  assert.equal(h.outcome()?.status, "complete");
+  await h.update({ outcome: { ...accepted, status: "active" } });
+  assert.notEqual(h.goal()?.goalId, original.goalId);
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  const reopened = await h.complete([{ criterion: accepted.doneWhen[0]!, result: "Checkout test passed" }]);
+  assert.equal(reopened.details.ok, false);
+  assert.match(reopened.content[0].text, /plan|scheduler/i);
+  assert.equal(h.goal()?.status, "active");
+  assert.deepEqual(h.messages, []);
+  await h.command("complete");
+  await h.update({ newTask: true, outcome: accepted });
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(h.goal()?.command, undefined, "a new task with the same objective has its own binding");
 });
 
 for (const workflow of ["missing", "invalid"] as const) {
@@ -281,25 +303,40 @@ test("restoring a legacy follow-up preserves its active work and an explicit Goa
   assert.deepEqual((await h.complete()).details.openSteps, ["Verify receipts"]);
 });
 
-test("explicitly reopening a command-backed Outcome retains the Goal's original skill binding", async t => {
+test("reopening the original slash-command Outcome restores its binding without dispatching the skill", async t => {
   const h = await fixture(t, { autoStart: false, workflow: "available" });
   const objective = "/skill:rush-issues verify deployment";
   await h.command(objective);
-  const first = h.goal()!;
-  assert.equal(first.command?.args, "verify deployment");
-  assert.equal(h.outcome()?.objective, objective);
+  const original = h.goal()!;
+  assert.equal(original.command?.args, "verify deployment");
+  const plan = { owner: "rush-issues", runId: "deployment", path: join(h.ctx.cwd, ".resolve-issues/rush/deployment/task-plan.json") };
+  mkdirSync(join(plan.path, ".."), { recursive: true });
+  writeFileSync(plan.path, JSON.stringify({ runId: plan.runId, planRevision: 1, units: [] }));
+  h.entries.push({ type: "custom", customType: WORKFLOW_PLAN_ENTRY, data: { version: 1, kind: "set", ...plan } });
   await h.command("complete");
-  assert.equal(h.goal()?.status, "complete");
-  const messages = h.messages.length;
-
+  for (const todo of [[], [{ step: "Replace workflow plan", status: "pending" }]]) {
+    const entryCount = h.entries.length;
+    await assert.rejects(h.update({ outcome: { objective, status: "active" }, todo }), /rush-issues owns the task plan/);
+    assert.equal(h.entries.length, entryCount, "a rejected reopen must not write any entry");
+    assert.deepEqual(workflowBinding(h.entries), plan);
+    assert.equal((await h.getTodo()).readOnly, true);
+  }
+  const sent = h.messages.length;
   await h.update({ outcome: { objective, status: "active" } });
-
-  assert.notEqual(h.goal()?.goalId, first.goalId);
-  assert.equal(h.goal()?.status, "active");
-  assert.deepEqual(h.goal()?.command, first.command);
-  assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
+  const reopened = h.goal()!;
+  assert.equal(reopened.status, "active");
+  assert.notEqual(reopened.goalId, original.goalId);
+  assert.equal(h.outcome()?.goalId, reopened.goalId);
+  assert.deepEqual(reopened.command, original.command);
+  assert.deepEqual(workflowBinding(h.entries), plan);
+  assert.equal(boundPlanPath(h.entries, currentWorkflowOwner(h.entries)!), plan.path);
   assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
-  assert.equal(h.messages.length, messages, "reopening during the tool turn must not queue another kickoff");
+  assert.equal(h.messages.length, sent);
+
+  await h.command("complete");
+  await h.update({ outcome: { objective: "/skill:rush-issues release deployment", status: "active" } });
+  assert.equal(h.goal()?.status, "complete");
+  assert.equal(h.messages.length, sent);
 });
 
 test("Goal completion checks the associated work ledger in a headless session", async t => {
@@ -317,4 +354,20 @@ test("Goal completion checks the associated work ledger in a headless session", 
   await h.update({ ledger: { action: "update", ledgerId, revision: 1,
     changes: [{ id: "qa", status: "completed", evidence: ["Deployment receipt"] }] } });
   assert.equal((await h.complete(evidence)).details.ok, true);
+});
+
+test("agent completion consults bound dynamic work and reuses the recorded objective evidence", async t => {
+  const h = await fixture(t);
+  await h.update({ outcome: accepted });
+  await h.startWorkflow();
+  const run = await h.workflow({ action: "define", definition: { objective: accepted.objective,
+    goalId: h.goal()!.goalId, criteria: accepted.doneWhen, steps: [{ id: "verify", title: "Verify checkout", output: "Receipt" }] } });
+  const evidence = [{ criterion: accepted.doneWhen[0], result: "Receipt 9" }];
+  assert.equal((await h.complete(evidence)).details.ok, false);
+  await h.workflow({ action: "submit", runId: run.id, revision: 1, step: "verify", result: "Receipt 9" });
+  assert.equal((await h.complete(evidence)).details.ok, false);
+  await h.workflow({ action: "finish", runId: run.id, revision: 2, evidence });
+  await h.emit("session_tree");
+  assert.equal((await h.complete()).details.ok, true);
+  assert.equal(h.goal()?.status, "complete");
 });

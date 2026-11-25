@@ -100,11 +100,16 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   sendKey("Enter");
   const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
     /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
-  assert.match(revealed, /explore ✓\s+implement ✓\s+review ✓\s+ci ! ●\s/, "CI shows both the blocked issue and the active issue");
+  assert.match(revealed, /Implement 2\/2 ──→ Review 2\/2 passed .*┬──→ Ship 0\/2 · 1 blocked · 1 active/);
+  assert.match(revealed, /└─ Fix as needed ←─+┘/);
   assert.match(revealed, /Extract shared core/);
   assert.match(revealed, /Add mux support/);
   assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
     "the workflow overview does not open the removed detail view");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
+  const narrow = waitForScreen(screen => /Review 2\/2 passed ←─+┐/.test(screen));
+  assert.match(narrow, /├─→ Fix as needed ─+┘/);
+  assert.match(narrow, /Ship 0\/2 · 1 blocked · 1 active/);
 });
 
 // @covers todo.compact-folding
@@ -162,6 +167,27 @@ test("long todos fold through commands, survive reload, and accept fullscreen mo
   }
 });
 
+test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow terminal", () => {
+  rmSync(seededPath, { force: true });
+  rmSync(readyPath, { force: true });
+  writeFileSync(probePath, seedTodoExtension(readyPath));
+  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  startPiSession();
+  waitForFile(readyPath);
+  sendLiteral("/seed-dynamic");
+  sendKey("Enter");
+  waitForFile(seededPath);
+  const graph = waitForScreen(screen => /✓ Draft report +│ ✓ Draft report ─→ · Review draft/.test(screen));
+  assert.match(graph, /○ Revise draft +│ +└─ ○ Revise draft ←─+┘/);
+  assert.match(graph, /┬ ─→ · Deliver report/);
+  assert.doesNotMatch(graph, /Review draft waiting|Revise draft ready/);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "35"]);
+  const narrow = waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ · Deliver report"));
+  assert.match(narrow, /^✓ Draft[^│\n]*│ ✓ Draft report/m);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "30", "-y", "35"]);
+  waitForScreen(screen => screen.includes("↺ Review draft") && /^✓ Draft report *$/m.test(screen) && !screen.includes("│ ✓ Draft report"));
+});
+
 function startPiSession() {
   const command = [
     `cd ${shellQuote(fixtures)}`,
@@ -214,6 +240,23 @@ function seedTodoExtension(path) {
         }
       });
       await ctx.reload();
+    }
+  });
+  pi.registerCommand("seed-dynamic", {
+    handler: async (_args, ctx) => {
+      pi.appendEntry("pi-better-harness:dynamic-workflow", { version: 1, run: {
+        id: "report-example", revision: 3, objective: "Publish the interview report", criteria: ["Both sources verified"],
+        steps: [
+          { id: "draft", title: "Draft report", output: "Draft" },
+          { id: "review", title: "Review draft", dependsOn: ["draft"], output: "Verdict", review: { artifact: "draft", revision: "fix" } },
+          { id: "fix", title: "Revise draft", output: "Revised report" },
+          { id: "ship", title: "Deliver report", dependsOn: ["review"], output: "Receipt" }
+        ],
+        history: [{ step: "draft", result: "draft.md" }, { step: "review", version: 1, verdict: "changes_requested", result: "Verify second source" }],
+        catalogChoices: [], workers: {}
+      } });
+      await ctx.reload();
+      (await import("node:fs")).writeFileSync(${JSON.stringify(seededPath)}, "ready");
     }
   });
   pi.registerCommand("seed-rush", {

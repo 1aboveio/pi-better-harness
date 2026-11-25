@@ -18,6 +18,7 @@ export function createPlanWidget(
   isFoldable: () => boolean,
   isExpanded: () => boolean,
   toggle: () => void,
+  actionAt?: (x: number, y: number) => (() => void) | undefined,
 ): Component & { handleMouse(event: PlanMouseEvent): { handled: true; render: boolean } | undefined } {
   let lines: string[] = [];
   return {
@@ -26,11 +27,13 @@ export function createPlanWidget(
       return lines.length ? ["", ...lines] : [];
     },
     handleMouse(event) {
-      if (!isFoldable() || (event.type !== "click" && event.type !== "press") || event.button !== "left" || event.shift || event.alt || event.ctrl ||
+      if ((event.type !== "click" && event.type !== "press") || event.button !== "left" || event.shift || event.alt || event.ctrl ||
           event.x < 0 || event.x >= event.width || event.y < 1 || event.y > lines.length) return undefined;
+      const action = actionAt?.(event.x, event.y - 1) ?? (isFoldable() ? toggle : undefined);
+      if (!action) return undefined;
       // Pi synthesizes click only for a component that handled the initial press.
       if (event.type === "press") return { handled: true, render: false };
-      toggle();
+      action();
       return { handled: true, render: true };
     },
     invalidate() { lines = []; },

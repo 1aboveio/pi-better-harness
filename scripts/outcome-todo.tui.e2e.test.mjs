@@ -111,8 +111,10 @@ export default function(pi){
   const selectedSetting = frame => frame.split("\n").find(line => /^\s*>/.test(line));
   const selectSetting = label => {
     let current = selectedSetting(screen()) ?? "";
-    for (let step = 0; step < 8; step++) {
+    const seen = new Set();
+    while (!seen.has(current)) {
       if (current.includes(label)) return;
+      seen.add(current);
       key("Down");
       const previous = current;
       current = selectedSetting(wait(frame => {

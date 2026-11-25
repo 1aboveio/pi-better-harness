@@ -542,12 +542,13 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 verified: true, waits: inspected.dependencies ?? [], ...{ outcome: inspected.outcome },
             }) : observed?.assignment;
             return withAssignmentObservations(assignment ? [{ meta, assignment }] : [], () => {
+            const observedAnswer: { hasFinalAnswer?: boolean } = {};
             const resultText = (body: string) => {
                 const evidence = outcome as { outcome?: { revision: number; outcome: string; reason: string }; dependencies?: Array<{ dependencies: Array<{ operationId: string }> }> } | null;
                 const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
                 const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
                 const result = subagentResultText(header + body);
-                return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                return { ...result, details: { ...result.details, ...observedAnswer, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
             };
             if ((params as Record<string, unknown>).operation_id && outcome) {
                 const evidence = outcome as { outcome: { revision: number; outcome: string; reason: string }; logs: Array<{ text: string }> };
@@ -564,7 +565,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 }
                 return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
-            return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey));
+            return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey, observedAnswer));
             });
         },
     } as ToolDefinition;

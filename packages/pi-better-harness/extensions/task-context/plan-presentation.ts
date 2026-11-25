@@ -30,7 +30,7 @@ function isInProgress(status: DisplayStatus): boolean {
   return status === "in_progress" || status === "implemented" || status === "reviewed";
 }
 
-function compactRowIndices(rows: PlanRow[]): number[] {
+export function compactRowIndices(rows: readonly { status: DisplayStatus }[]): number[] {
   if (rows.length <= COMPACT_PLAN_ROWS) return rows.map((_, index) => index);
   let active = rows.flatMap((row, index) => isInProgress(row.status) ? [index] : []);
   if (!active.length) active = rows.flatMap((row, index) =>

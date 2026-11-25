@@ -40,6 +40,8 @@ export interface TaskContextRequest {
   action: TaskContextAction;
   doneWhen?: readonly string[];
   openSteps?: readonly string[];
+  /** Evidence retained by a finished workflow bound to this Goal. */
+  evidence?: readonly { criterion: string; result: string }[];
   ledgerBlocker?: string;
   goalId?: string;
   /** Current widget width on a visual ownership inspection. */

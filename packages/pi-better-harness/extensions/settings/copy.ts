@@ -17,6 +17,9 @@ export const controlCopy = new Map<string, SettingCopy>([
     label: "Foreground wait guard",
     description: "Blocks recognized shell waits, such as watching CI or following logs. Pi gets a prompt to run them in the background so the session stays responsive.",
   }],
+  ["dynamic-workflow", {
+    description: "Choose when Pi can plan a workflow automatically. Adaptive uses workflows for dependencies, handoffs or review. /dynamic-workflow starts one run in every mode.",
+  }],
   ["outcome-todo", {
     label: "Outcome and Todo tools",
     description: "Lets Pi record what the session should deliver and track its progress as a checklist.",

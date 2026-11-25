@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.54.0] - 2026-11-25
+
+### Added
+
+- Run task-defined workflows and display their progress in Todo. (#904)
+- Show the Rush review and fix loop alongside delivery progress. A shipped unit counts as reviewed only when its recorded review matches the delivered commit.
+
+### Fixed
+
+- Reject a replacement Todo when reopening an Outcome that owns a workflow plan. Keep the original plan available to its scheduler.
+- Skip the instructions lock for unmarked dotfiles during sync and disable, so read-only dotfile directories can keep Harness instructions off.
+- Bundle Goal 0.16.2, Background Tasks 0.20.3, and Subagents 0.38.0 with Server 0.7.3.
+
+## [pi-better-goal@0.16.2] - 2026-11-25
+
+### Fixed
+
+- Restore the previous skill and bound workflow plan when reopening the same Outcome, including plain-text objectives. The scheduler still verifies completion.
+- Consult task-defined workflow evidence before completing the Goal. (#904)
+
+## [pi-better-server@0.7.3] - 2026-11-25
+
+### Fixed
+
+- Give a read worker one grace period per stale heartbeat after system sleep. Repeated parent stalls can no longer postpone recovery indefinitely.
+
+## [pi-better-subagents@0.38.0] - 2026-11-25
+
+### Added
+
+- Return worker evidence to task-defined workflows. (#904)
+
+### Fixed
+
+- Bundle Server 0.7.3 for bounded read-worker recovery.
+
+## [pi-better-background-tasks@0.20.3] - 2026-11-25
+
+### Fixed
+
+- Bundle Server 0.7.3 for bounded read-worker recovery.
+
 ## [pi-better-harness@0.53.0] - 2026-11-23
 
 ### Added

@@ -65,6 +65,30 @@ Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
+### Dynamic workflows
+
+Run `/dynamic-workflow` to plan the current task once. In `/harness-settings`,
+**Automatic dynamic workflows** defaults to **off**. **On** lets the planning agent
+start a workflow. **Adaptive** lets it handle simple requests directly and use a
+workflow for dependencies, role handoffs or repeated review. The command works
+in every mode and keeps your saved preference.
+
+The agent records an objective, acceptance criteria, required outputs and task
+dependencies. Todo shows tasks on the left and dependencies and review loops on the right.
+Task icons distinguish ready (○), working (●), waiting (·), optional standby (–),
+failed (×), and completed (✓) steps. In mouse-enabled Pi, click a task to highlight
+its stage and inspect its latest result. Use `/todo expand` to show every task.
+Below 36 terminal columns, the diagram follows the list.
+Independent tasks can run together. A join waits for each prerequisite's output.
+If a reviewer requests changes, the revision opens and the revised artifact
+returns to review. Delivery waits for approval of the current version.
+
+The agent can select an inspected catalog role or named agent for a step.
+The ordinary subagent launch applies the catalog skills and current permissions.
+Harness associates the returned assignment and its verified result with the step.
+Resume the session branch to continue from its saved outputs. A bound Goal also
+requires evidence for its objective. A standalone workflow can finish on its own.
+
 The separate **Project work ledger** setting enables a durable project-scoped
 record of the overall outcome, boundaries, and high-level items. It stays off by
 default; turning it off removes ledger views and hints without deleting records.
