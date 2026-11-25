@@ -114,7 +114,7 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   assert.match(narrow, /↳ Fix as needed/);
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "35", "-y", "32"]);
   const stacked = waitForScreen(screen => /^Implement 2\/2$/m.test(screen) && screen.includes("↺ Review"));
-  assert.ok(stacked.indexOf("#215") < stacked.indexOf("Implement 2/2"));
+  assert.match(stacked, /#215[^]*\nImplement 2\/2/);
 });
 
 // @covers todo.compact-folding

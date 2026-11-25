@@ -216,6 +216,24 @@ test("workflow failures and unknown statuses never look active or completed", ()
   assert.doesNotMatch(rendered, /active/);
 });
 
+test("a long workflow status leaves the next task visible in the compact list", () => {
+  const workflow = rushFixture();
+  workflow.issues = [
+    { id: "1", title: "First task", stage: "review", status: "waiting-for-provider-".repeat(100), dependsOn: [] },
+    { id: "2", title: "Next task", stage: "pending", status: "pending", dependsOn: [] },
+  ];
+  const lines = renderRushPlan(workflow, 80);
+  const first = lines.findIndex(line => line.includes("#1 First task"));
+  assert.ok(first >= 0);
+  assert.match(lines[first + 1]!, /waiting-for-provider/);
+  assert.match(lines[first + 2]!, /#2 Next task/);
+
+  Object.assign(workflow.issues[0]!, { status: "in-flight", stage: "done", headSha: "abc", reviewedHead: "abc" });
+  const left = renderRushPlan(workflow, 36).map(line => line.split("│")[0]!.trim());
+  const task = left.findIndex(line => line.includes("#1"));
+  assert.deepEqual(left.slice(task + 1, task + 3), ["review", "passed"]);
+});
+
 test("workflow completion counts exclude cancellation spellings but retain skipped and other unfinished rows", () => {
   const statuses = [
     "succeeded", "completed", "pending", "in-flight", "blocked", "failed",

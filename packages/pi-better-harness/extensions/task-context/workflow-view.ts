@@ -46,9 +46,11 @@ export function renderWorkflowFrame(
       list.push({ line: truncateToWidth(label, listWidth), id: task.id });
       if (badge) {
         const indent = " ".repeat(Math.min(2, listWidth - 1));
-        for (const line of wrapTextWithAnsi(badge, listWidth - indent.length)) {
-          list.push({ line: indent + line, id: task.id });
-        }
+        const available = listWidth - indent.length;
+        // Keep short statuses readable at the split threshold. External status text can be arbitrarily long.
+        const wrapped = visibleWidth(badge) <= available * 2 ? wrapTextWithAnsi(badge, available) : [];
+        const badgeLines = wrapped.length > 0 && wrapped.length <= 2 ? wrapped : [truncateToWidth(badge, available)];
+        for (const line of badgeLines) list.push({ line: indent + line, id: task.id });
       }
     }
     previous = index;
