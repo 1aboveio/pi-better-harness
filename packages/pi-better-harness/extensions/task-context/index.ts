@@ -1,7 +1,8 @@
 import { supportsPromptSections, type PromptSectionTarget } from "../execution-policy.js";
 import { registerDynamicWorkflow } from "./dynamic-workflow-runtime.js";
 import { openWork, readDynamic } from "./dynamic-workflow.js";
-import { describeRun, renderDynamicFrame, type DynamicFrame } from "./dynamic-workflow-view.js";
+import type { WorkflowFrame } from "./workflow-view.js";
+import { describeRun, renderDynamicFrame } from "./dynamic-workflow-view.js";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
@@ -517,7 +518,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
         refreshWidget = localRefresh;
-        let dynamicFrame: DynamicFrame | undefined;
+        let dynamicFrame: WorkflowFrame | undefined;
         let renderedRun: string | undefined;
         let selectedStep: string | undefined;
         const widget = createPlanWidget(

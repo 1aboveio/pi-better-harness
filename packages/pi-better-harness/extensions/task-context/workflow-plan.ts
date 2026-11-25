@@ -1,9 +1,10 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { renderWorkflowFrame } from "./workflow-view.js";
 import type { CompactTaskHeader } from "./compact-task-header.js";
-import { workflowDiagram, type IssueStages } from "./workflow-diagram.js";
+import { workflowDiagram, type DiagramPart, type WorkflowNode } from "./workflow-diagram.js";
 import {
-  plainPlanTheme, planText, renderPlanPresentation, statusStyle,
+  alignedPlanLabels, plainPlanTheme, planRowTitleColor, planText, renderPlanHeading, renderPlanPresentation, statusStyle,
   type DisplayStatus, type PlanPresentation,
 } from "./plan-presentation.js";
 
@@ -203,6 +204,8 @@ function reviewFixEvidence(unit: Record<string, unknown>): Pick<RushUnit, "recor
   return {};
 }
 
+type IssueStages = Record<"implement" | "review" | "fix" | "ship", DisplayStatus>;
+
 function unitStages(unit: RushUnit, fleet: RushPlan["fleet"]): IssueStages {
   const status = workflowStatus(unit.status);
   const recordedFix = unit.recordedFixStatus ?? "skipped";
@@ -259,7 +262,50 @@ function summarizeStage(statuses: DisplayStatus[]): DisplayStatus | "partial" {
   return applicable.includes("completed") ? "partial" : "pending";
 }
 
-function presentRushPlan(plan: RushPlan, owner: string, width: number, readOnly = false): PlanPresentation {
+function issueStageLabel(name: keyof IssueStages, units: IssueStages[], openFindings = 0): DiagramPart[] {
+  const counts = new Map<DisplayStatus, number>();
+  for (const unit of units) counts.set(unit[name], (counts.get(unit[name]) ?? 0) + 1);
+  const eligible = units.length - (counts.get("skipped") ?? 0);
+  const done = counts.get("completed") ?? 0;
+  const node: DiagramPart[] = [{ text: name[0]!.toUpperCase() + name.slice(1), color: "text" }];
+  const detail = (text: string, color: string) => {
+    node.push({ color: "dim", text: node.length === 1 ? " " : " · " }, { text, color });
+  };
+  if (name === "implement" || name === "ship") {
+    detail(`${done}/${eligible}`, eligible > 0 && done === eligible ? "success" : "muted");
+  }
+  for (const [state, label] of [
+    ["failed", "failed"], ["blocked", "blocked"], ["unknown", "unknown"], ["in_progress", "active"],
+  ] as const) {
+    const count = counts.get(state);
+    if (count) detail(`${count} ${label}`, statusStyle(state).color);
+  }
+  if (name === "fix") {
+    const pending = counts.get("pending");
+    if (pending) detail(`${pending} pending`, "muted");
+    if (node.length === 1) detail(done ? `${done} fixed` : "as needed", done ? "success" : "dim");
+  }
+  if (name === "review") {
+    if (openFindings) detail(`${openFindings} open finding${openFindings === 1 ? "" : "s"}`, "muted");
+    if (node.length === 1) detail(done ? `${done}/${eligible} passed` : "pending", done && done === eligible ? "success" : "muted");
+  }
+  return node;
+}
+
+function issueWorkflowNodes(plan: RushPlan): WorkflowNode[] {
+  const units = plan.issues.filter(unit => workflowStatus(unit.status) !== "skipped");
+  if (!units.length) return [];
+  const stages = units.map(unit => unitStages(unit, plan.fleet));
+  const openFindings = units.reduce((count, unit) =>
+    workflowStatus(unit.status) === "completed" ? count : count + (unit.openFindings ?? 0), 0);
+  const node = (id: keyof IssueStages, parents: string[], revision?: string): WorkflowNode => {
+    const label = issueStageLabel(id, stages, openFindings);
+    return { ids: [id], name: label[0]!.text, label, parents, revision };
+  };
+  return [node("implement", []), node("review", ["implement"], "fix"), node("fix", []), node("ship", ["review"])];
+}
+
+function presentRushPlan(plan: RushPlan, owner: string, readOnly: boolean): PlanPresentation {
   const stageLabel = (name: string, status: DisplayStatus | "partial", suffix = "") => {
     const style = statusStyle(status === "partial" ? "implemented" : status);
     return { color: style.color, text: `${name} ${style.glyph}${suffix}` };
@@ -292,13 +338,6 @@ function presentRushPlan(plan: RushPlan, owner: string, width: number, readOnly 
   const metadata = [context];
   if (readOnly) metadata.push([{ color: "warning", text: "read-only handoff" }]);
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
-  const applicable = plan.issues.filter(unit => workflowStatus(unit.status) !== "skipped");
-  if (applicable.length) {
-    const stages = applicable.map(unit => unitStages(unit, plan.fleet));
-    const openFindings = applicable.reduce((count, unit) =>
-      workflowStatus(unit.status) === "completed" ? count : count + (unit.openFindings ?? 0), 0);
-    metadata.push(...workflowDiagram(stages, openFindings, width - 2));
-  }
   return {
     metadata,
     rows: visibleRushUnits(plan).map((unit) => {
@@ -336,5 +375,25 @@ export function renderRushPlan(
   header?: CompactTaskHeader,
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  return renderPlanPresentation(presentRushPlan(plan, owner, width, readOnly), width, theme, full, expanded, header);
+  const presentation = presentRushPlan(plan, owner, readOnly);
+  const nodes = issueWorkflowNodes(plan);
+  if (full) {
+    const graph = workflowDiagram(nodes, Math.max(1, width - 2));
+    return renderPlanPresentation({ ...presentation, metadata: [...(presentation.metadata ?? []), ...graph] }, width, theme, true);
+  }
+  const heading = renderPlanHeading(presentation, width, theme, header);
+  const labels = alignedPlanLabels(presentation.rows);
+  const rows = presentation.rows.map((row, index) => {
+    const style = statusStyle(row.status);
+    return {
+      status: row.status,
+      label: [
+        { color: style.color, text: style.glyph + " " },
+        { color: "dim", text: labels[index]! + " " },
+        { color: planRowTitleColor(row.status), text: row.title },
+      ],
+      badge: { color: style.color, text: row.statusLabel ?? style.label },
+    };
+  });
+  return renderWorkflowFrame(rows, nodes, heading, width, theme, expanded).lines;
 }
