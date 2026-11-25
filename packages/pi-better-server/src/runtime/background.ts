@@ -68,7 +68,7 @@ export class BackgroundObservation {
     // the next list. Reuse the durable bounded inbox before cache validation.
     const batch = this.inbox.receive(this.db, this.identity);
     if (batch.size && this.refresh()) this.changed();
-    if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
+    if (this.inbox.hasPendingChanges) this.schedule();
   }
   sourceRevision(scope: WorkScope): string[] {
     if (!this.ready) return [];
@@ -312,7 +312,7 @@ export class BackgroundObservation {
       this.history?.reconcile();
       if (batch) this.inbox.acknowledge(batch, true);
       this.dirtyOperations.clear();
-      if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
+      if (this.inbox.hasPendingChanges) this.schedule();
       if (this.expiry) clearTimeout(this.expiry);
       const deadlines = [...rows.flatMap(row => row.progress?.nextDeadline ?? []), ...this.recent.map(op => op.terminal_at + 30000), ...[...this.legacy.values()].flatMap(entry => [
         ...entry.recent.map(row => row.endedAt + 30000), ...recentMetaDeadline(entry.origin),

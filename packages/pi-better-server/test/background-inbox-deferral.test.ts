@@ -260,6 +260,14 @@ test("initialized observation diagnostics report unknown cursors rather than thr
     writer.exec("ROLLBACK");
     assert.equal(model.metrics.assignments.applied, 0);
     assert.equal(model.backgroundMetrics.changes.applied, 0);
+    const owner = (model as any).db as import("node:sqlite").DatabaseSync;
+    const repairs = model.inboxDiagnostics!.backgroundChanges.repairs;
+    owner.exec("BEGIN");
+    try {
+      owner.exec("UPDATE background_inbox.diagnostics SET repairs = repairs + 1");
+      assert.equal(model.inboxDiagnostics, undefined, "a diagnostic request cannot publish uncommitted repairs");
+    } finally { owner.exec("ROLLBACK"); }
+    assert.equal(model.inboxDiagnostics!.backgroundChanges.repairs, repairs);
     const reader = (model as any).reader, descriptor = Object.getOwnPropertyDescriptor(reader, "changeMetrics")!;
     const failure = new Error("non-contention diagnostic failure");
     Object.defineProperty(reader, "changeMetrics", { configurable: true, get() { throw failure; } });

@@ -106,6 +106,10 @@ export class AssignmentInbox {
             this.db.exec(this.shared ? `RELEASE ${this.alias}_ack` : "COMMIT");
         } catch (error) { this.db.exec(this.shared ? `ROLLBACK TO ${this.alias}_ack; RELEASE ${this.alias}_ack` : "ROLLBACK"); throw error; }
     }
+    get hasPendingChanges() {
+        return Boolean(this.more || this.db.prepare(`SELECT 1 FROM ${this.prefix}pending LIMIT 1`).get());
+    }
+
     get metrics() {
         const pending = this.db.prepare(`SELECT count(*) AS pending, min(since) AS oldestPendingAt FROM ${this.prefix}pending`).get();
         return { ...this.db.prepare(`SELECT * FROM ${this.prefix}position`).get(),

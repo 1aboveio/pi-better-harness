@@ -1264,6 +1264,74 @@ test("diagnostic liveness does not wait behind SQLite while fresh idle checks st
   } finally { await f.close(); }
 });
 
+test("ordinary replies and publications do not resample inbox diagnostics", { timeout: 10000 }, async () => {
+  const f = await fixture({ intervalMs: 60000 });
+  const { DatabaseSync } = await import("node:sqlite");
+  try {
+    const client = await f.client();
+    await ready(client);
+    const before = await client.request("runtime_get_metrics");
+    assert.equal(before.inboxDiagnosticsFresh, true);
+    const repairs = before.background.changes.repairs;
+    assert.ok(Number.isInteger(repairs));
+
+    const writer = new DatabaseSync(join(f.root, "runtime-read-repair", "background.sqlite"));
+    try { writer.exec("UPDATE diagnostics SET repairs = repairs + 1"); }
+    finally { writer.close(); }
+
+    const changed = new Promise<void>(resolve => {
+      const stop = client.onChange(snapshot => {
+        if (snapshot.rows.some((row: any) => row.meta.id === "sa_diagnostics")) { stop(); resolve(); }
+      });
+    });
+    const dir = join(f.root, "runs", "sa_diagnostics");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ id: "sa_diagnostics", status: "completed", startedAt: 1, cwd: f.root }));
+    await changed;
+    await client.get({ background: true, cwd: f.root, sessionId: "diagnostics" });
+    const cached = f.executor.metrics().background.changes;
+    assert.equal("repairs" in cached && cached.repairs, repairs,
+      "publishing and answering a snapshot must leave the diagnostic sample alone");
+
+    const current = await client.request("runtime_get_metrics");
+    assert.equal(current.inboxDiagnosticsFresh, true);
+    assert.equal(current.background.changes.repairs, repairs + 1, "explicit diagnostics see independent commits");
+  } finally { await f.close(); }
+});
+
+test("concurrent metrics readers share a stalled inbox sample and recover after its reply", { timeout: 10000 }, async t => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    const initial = await client.request("runtime_get_metrics");
+    assert.equal(initial.inboxDiagnosticsFresh, true);
+
+    const post = f.worker.postMessage.bind(f.worker);
+    const held: unknown[] = [];
+    const mock = t.mock.method(f.worker, "postMessage", (message: { type: string }) => {
+      if (message.type === "inbox-diagnostics") held.push(message);
+      else post(message);
+    });
+    const samples = await Promise.all(Array.from({ length: 5 }, () => client.request("runtime_get_metrics")));
+    samples.push(await client.request("runtime_get_metrics"));
+    assert.equal(held.length, 1, "requests during and after the timeout share the outstanding worker message");
+    for (const sample of samples) {
+      assert.equal(sample.inboxDiagnosticsFresh, false);
+      assert.equal(sample.inboxDiagnosticsObservedAt, initial.inboxDiagnosticsObservedAt);
+      assert.deepEqual(sample.background.changes, initial.background.changes);
+    }
+
+    mock.mock.restore();
+    post(held[0]);
+    // The worker receives the snapshot after the held message, so its reply fences the late sample.
+    await client.get({ limit: 1 });
+    const next = await client.request("runtime_get_metrics");
+    assert.equal(next.inboxDiagnosticsFresh, true);
+    assert.ok(next.inboxDiagnosticsObservedAt > initial.inboxDiagnosticsObservedAt);
+  } finally { await f.close(); }
+});
+
 test("diagnostic observation uses pushed state without initiating another inventory", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
