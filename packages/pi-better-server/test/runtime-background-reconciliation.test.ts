@@ -25,11 +25,11 @@ test('unchanged same-owner foreground polls reuse canonical recovery after the f
   const model = new WorkReadModel(root, 'same-owner', { baseDir: root, durableDir: join(root, 'durable'), intervalMs: 60000 });
   let service: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
   const polls: any[] = [];
-  const invoke = async (branchIds: string[]) => {
+  const invoke = async (branchIds: string[], sessionId = 'native') => {
     const id = randomUUID(), secret = randomBytes(32).toString('hex'), path = join(directory, `${id}.json`);
     writeFileSync(path, JSON.stringify({ version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'),
       instanceId: 'same-owner', key: randomUUID(), tool: '__background_poll', params: {}, parametersDigest: '',
-      owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, branchIds, projectTrusted: true, pid: process.pid, start }), { mode: 0o600 });
+      owner: { kind: 'parent-session', sessionId, workspace: root }, branchIds, projectTrusted: true, pid: process.pid, start }), { mode: 0o600 });
     const before = lease.store.getChangeRevision(), metrics = service!.metrics();
     try {
       const reply = await service!.handle({ type: 'runtime_background_tool', authority: { id, secret } });
@@ -68,8 +68,17 @@ test('unchanged same-owner foreground polls reuse canonical recovery after the f
     const changed = service.metrics().reconciles;
     for (const view of views) await invoke(view);
     assert.equal(service.metrics().reconciles, changed, 'the new source observation is retained after its first application');
+    const foreignSessions = Array.from({ length: 16 }, (_, i) => `unrelated-${i}`);
+    for (const sessionId of foreignSessions) await invoke(['anchor'], sessionId);
+    const warmedAll = service.metrics().reconciles;
+    lease.store.recordTerminalOutcome({ operationId: 'changed-source', eventId: 'done', outcome: 'succeeded',
+      owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, reason: 'Finished' });
+    for (const sessionId of foreignSessions) await invoke(['anchor'], sessionId);
+    assert.equal(service.metrics().reconciles, warmedAll, 'a foreign terminal result cannot restart canonical recovery');
+    await invoke(['anchor']);
+    assert.equal(service.metrics().reconciles, warmedAll + 1, 'the affected parent observes the new revision');
     await invoke(['new-branch']);
-    assert.equal(service.metrics().reconciles, changed + 1, 'a genuinely new branch view must recover');
+    assert.equal(service.metrics().reconciles, warmedAll + 2, 'a genuinely new branch view must recover');
   } finally {
     await service?.close(); await model.close(); lease.release();
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;

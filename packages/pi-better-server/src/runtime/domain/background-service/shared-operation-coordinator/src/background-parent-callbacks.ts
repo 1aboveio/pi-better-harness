@@ -17,6 +17,11 @@ export interface RecentBackgroundTerminalPage {
 const pageSize = (limit = 256) => Math.max(1, Math.min(256, requireCounter('limit', limit)));
 const scopeValues = (scope: ParentCallbackScope) => [requirePath('workspace', scope.workspace), requireId('sessionId', scope.sessionId)] as const;
 
+export function parentRecoveryRevision(ctx: StoreContext, scope: ParentCallbackScope): number {
+    const row = getRow(ctx, 'SELECT revision FROM background_recovery_scopes WHERE workspace=? AND session_id=?', ...scopeValues(scope));
+    return Number(row?.revision ?? 0);
+}
+
 export function setParentCallbackPending(ctx: StoreContext, taskId: string, pending: boolean): boolean {
     taskId = requireId('taskId', taskId);
     pending = requireBoolean('pending', pending);

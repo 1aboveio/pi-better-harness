@@ -53,7 +53,10 @@ export function cleanupHarnesses(): void {
 
 /** Restore the schema that discovered cleanup work by scanning operations. */
 export function removePendingCleanupIndex(db: DatabaseSync): void {
-    db.exec(`DROP TRIGGER assignment_cleanup_enqueue;
+    db.exec(`DROP TRIGGER IF EXISTS server_cleanup_grant_INSERT;
+        DROP TRIGGER IF EXISTS server_cleanup_grant_UPDATE;
+        DROP TRIGGER IF EXISTS assignment_cleanup_windows_proof;
+        DROP TRIGGER assignment_cleanup_enqueue;
         DROP TRIGGER assignment_cleanup_terminal;
         DROP TRIGGER assignment_cleanup_transfer;
         DROP TRIGGER assignment_cleanup_verified;

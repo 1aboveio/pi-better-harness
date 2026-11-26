@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createWorkBudget } from '../src/runtime/work-budget.ts';
 
@@ -74,9 +75,68 @@ test('stable revision retains recovery progress across the actual alternating fo
   assert.equal(reads - warmReads, views.length);
 });
 
+test('publication of a terminal task checks the callback index only for its parent', t => {
+  const root = mkdtempSync(join(tmpdir(), 'scoped-callbacks-'));
+  const store = openStore({ path: join(root, 'operations.sqlite') });
+  t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
+  const owner = { kind: 'parent-session', workspace: '/fixture', sessionId: 'recipient' };
+  store.registerOperation({ operationId: 'target', taskId: 'task', launchToken: 'token', owner,
+    observer: { kind: 'local-supervisor', version: '1' } });
+  const recipients = [owner.sessionId, ...Array.from({length: 16}, (_, i) => `foreign-${i}`)];
+  const callbacks: string[] = [], reads: string[] = [];
+  const pending = store.listPendingParentCallbacks.bind(store);
+  store.listPendingParentCallbacks = (scope: any, options: any) => {
+    reads.push(scope.sessionId);
+    return pending(scope, options);
+  };
+  const hosts = recipients.map(sessionId => {
+    const host = contextHost();
+    Object.assign(host, { store, lastOwnedTerminalAt: 0, statusOf: () => 'succeeded',
+      attemptTerminalCallback: (operation: any) => callbacks.push(operation.operationId), emitDurableTaskChange() {} });
+    host.noteParentContext(ctx(['anchor'], sessionId), { recover: false });
+    host.reconcileOwnerChanges();
+    return host;
+  });
+  reads.length = 0;
+  store.recordTerminalOutcome({ owner, operationId: 'target', eventId: 'finished', outcome: 'succeeded', reason: 'Finished' });
+  for (const host of hosts) host.reconcileOwnerChanges();
+  assert.deepEqual(reads, [owner.sessionId]);
+  assert.deepEqual(callbacks, ['target']);
+  for (const host of hosts) host.reconcileOwnerChanges();
+  assert.deepEqual(reads, [owner.sessionId]);
+});
+
+test('callback and abandoned-claim sweeps revisit inserts behind an active page', t => {
+  const root = mkdtempSync(join(tmpdir(), 'callback-page-'));
+  const store = openStore({ path: join(root, 'operations.sqlite') });
+  t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
+  const owner = { kind: 'parent-session', workspace: '/fixture', sessionId: 'recipient' };
+  const add = (id: string) => {
+    store.registerOperation({ operationId: id, taskId: id, launchToken: id, owner, observer: { kind: 'local-supervisor', version: '1' } });
+    store.recordTerminalOutcome({ operationId: id, eventId: id, owner, outcome: 'succeeded', reason: 'Finished' });
+  };
+  for (let i = 0; i < 257; i++) add('z' + String(i).padStart(3, '0'));
+  const deliveries: string[] = [], claims: string[] = [];
+  const host = Object.assign(contextHost(), { store, lastOwnedTerminalAt: 0, statusOf: () => 'succeeded',
+    attemptTerminalCallback: (op: any) => deliveries.push(op.operationId), emitDurableTaskChange() {},
+    currentLaunchContext: (id: string) => { claims.push(id); } });
+  host.noteParentContext(ctx(['anchor'], owner.sessionId), { recover: false });
+  const poll = () => { host.recoverAbandonedDeliveries(); host.reconcileOwnerChanges(); };
+  poll();
+  add('a');
+  poll();
+  assert.equal(deliveries.at(-1), 'z256');
+  assert.equal(claims.at(-1), 'z256');
+  assert.equal(host.hasPendingParentCallbackRecovery(), true);
+  poll();
+  assert.ok(deliveries.includes('a') && claims.includes('a'));
+  poll();
+  assert.equal(host.hasPendingParentCallbackRecovery(), false);
+});
+
 test('separate branch and recipient recovery, paging progress and eviction remain bounded', () => {
   const host = contextHost(), first = ctx(['anchor']), fork = ctx(['fork']), other = ctx(['anchor'], 'other-recipient');
-  host.noteParentContext(first, { recover: false }); host.lastChangeRevision = 4; host.pendingCallbackCursor = 'delivery-page';
+  host.noteParentContext(first, { recover: false }); host.lastChangeRevision = 4; host.pendingCallbackCursor = { after: 'delivery-page', revision: 4 };
   host.noteParentContext(fork, { recover: false });
   assert.equal(host.hasPendingParentCallbackRecovery(), true);
   assert.equal(host.isParentOriginActive({ cwd: '/fixture', sessionId: first.sessionManager.getSessionId() }, 'anchor'), false);
@@ -86,7 +146,7 @@ test('separate branch and recipient recovery, paging progress and eviction remai
   assert.equal(host.isParentOriginActive({ cwd: '/fixture', sessionId: first.sessionManager.getSessionId() }), false);
   host.lastChangeRevision = 4;
   host.noteParentContext(first, { recover: false });
-  assert.equal(host.pendingCallbackCursor, 'delivery-page', 'another view cannot reset an unfinished page');
+  assert.deepEqual(host.pendingCallbackCursor, { after: 'delivery-page', revision: 4 }, 'another view cannot reset an unfinished page');
   assert.equal(host.hasPendingParentCallbackRecovery(), true);
   host.pendingCallbackCursor = undefined;
   assert.equal(host.hasPendingParentCallbackRecovery(), false);

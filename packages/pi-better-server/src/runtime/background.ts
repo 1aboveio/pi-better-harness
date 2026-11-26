@@ -292,10 +292,13 @@ export class BackgroundObservation {
       const previousRows = new Map(this.rows.map(row => [row.id, row]));
       for (const row of rows) { const previous = previousRows.get(row.id); if (previous
         && (previous.status !== row.status || previous.active !== row.active)) this.history?.invalidateOperation(row.operationId); }
+      // One worker can be visible to one of many subscribed parents. Resolve its
+      // files, waits and captured recipient once in this source refresh.
+      const projected = new Map(rows.map(row => [row.operationId, row]));
       for (const entry of this.legacy.values()) {
         const scopedRevision = this.hasInputVersions ? this.scopeVersions.get(JSON.stringify([entry.origin.cwd, entry.origin.sessionId])) ?? 0 : revision;
         if (hasPendingIndex) this.refreshPending(entry, scopedRevision);
-        this.refreshRecent(entry, scopedRevision);
+        this.refreshRecent(entry, scopedRevision, projected);
         const active = this.visibleLegacy(entry.origin);
         const retained = entry.rows.map(row => readMeta(row.id)).filter((row: any) => row && row.dismissedAt === undefined
           && row.status !== "running" && (!row.endedAt || Date.now() - row.endedAt < 30000));
@@ -451,7 +454,7 @@ export class BackgroundObservation {
       ? row.owner.workspace === origin.cwd && row.owner.sessionId === origin.sessionId
       : row.parentRecipient?.workspace === origin.cwd && row.parentRecipient?.sessionId === origin.sessionId;
   }
-  private refreshRecent(entry: BackgroundScope, revision: number): void {
+  private refreshRecent(entry: BackgroundScope, revision: number, projected = new Map<string, any>()): void {
     if (!this.db) return;
     if (entry.recentRevision === undefined || !this.hasInputVersions && entry.recentRevision !== revision) {
       const operations = this.db.prepare(`SELECT * FROM operations o WHERE observer_kind='local-supervisor' AND (
@@ -477,8 +480,10 @@ export class BackgroundObservation {
       }
       for (const [id, op] of this.changedOperations) {
         const direct = op?.owner_kind === "parent-session" && op.owner_workspace === entry.origin.cwd && op.owner_session_id === (entry.origin.sessionId ?? "");
-        const row = (direct || op?.owner_kind === "worker-conversation") && op.observer_kind === "local-supervisor"
-          && op.terminal_revision > 0 && Date.now() - op.terminal_at < 30000 && this.project([op])[0];
+        const recent = (direct || op?.owner_kind === "worker-conversation") && op.observer_kind === "local-supervisor"
+          && op.terminal_revision > 0 && Date.now() - op.terminal_at < 30000;
+        if (recent && !projected.has(id)) projected.set(id, this.project([op])[0]);
+        const row = recent && projected.get(id);
         if (row && this.belongsToDurableOrigin(row, entry.origin)) rows.set(id, row);
         else rows.delete(id);
       }

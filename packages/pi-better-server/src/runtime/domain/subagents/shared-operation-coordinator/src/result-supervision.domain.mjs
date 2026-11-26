@@ -3,7 +3,8 @@
 import { isDeepStrictEqual } from "node:util";
 import { getRow, run } from "./sqlite.domain.mjs";
 import { getOperation, recordSupervision, recordTerminalOutcome } from "./operations.domain.mjs";
-import { requireId, requirePath } from "./validate.domain.mjs";
+import { mapOperation } from "./rows.domain.mjs";
+import { requireCounter, requireId, requirePath } from "./validate.domain.mjs";
 const PREFIX = "result-supervision-v1:";
 /** A bounded observation page. A gap requires restoring active authority, not history. */
 export function resultSupervisionChanges(ctx, after) {
@@ -27,6 +28,24 @@ export function resultSupervisions(ctx, activeOnly = false) {
 export function resultSupervision(ctx, operationId) {
     const row = getRow(ctx, "SELECT value FROM coordinator_state WHERE key = ?", PREFIX + requireId("operationId", operationId));
     return row ? JSON.parse(String(row.value)) : null;
+}
+/** Changes that can make a server cleanup candidate eligible behind an idle scan cursor. */
+export function serverAssignmentCleanupRevision(ctx) {
+    return Number(ctx.db.prepare("SELECT value FROM coordinator_state WHERE key='server-assignment-cleanup-revision'").get()?.value ?? 0);
+}
+/** Pending cleanup under the root daemon's result authority, including past epochs. */
+export function serverAssignmentCleanup(ctx, limit, after) {
+    const host = after ? requireId("hostId", after.hostId) : "server:";
+    if (!host.startsWith("server:"))
+        throw new Error("Expected a server cleanup cursor");
+    // 'server;' is the exclusive upper bound of the 'server:' prefix in SQLite binary order.
+    const rows = ctx.db.prepare(`SELECT op.*, CASE WHEN json_valid(s.value) THEN s.value END AS grant_json
+        FROM assignment_cleanup_pending p
+        CROSS JOIN operations op ON op.operation_id = p.operation_id
+        CROSS JOIN coordinator_state s ON s.key = ? || p.operation_id
+        WHERE (p.supervision_host_id, p.operation_id) > (?, ?) AND p.supervision_host_id < 'server;'
+        ORDER BY p.supervision_host_id, p.operation_id LIMIT ?`).all(PREFIX, host, after ? requireId("operationId", after.operationId) : "", Math.min(256, requireCounter("limit", limit)));
+    return rows.map(row => ({ operation: mapOperation(row), grant: JSON.parse(String(row.grant_json)) }));
 }
 /** The admitting host has stopped its local route before this exact-owner CAS. */
 export function handoffResultSupervision(ctx, input) {

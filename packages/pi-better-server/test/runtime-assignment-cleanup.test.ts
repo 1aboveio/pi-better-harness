@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,6 +13,9 @@ import { processGroupAlive, processGroupExitVerified } from "../src/runtime/doma
 // @ts-expect-error Generated Background supervisor module.
 import { DEFAULT_STOP_WAIT_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_TERMINATION_GRACE_MS } from "../src/runtime/domain/background-service/supervisor/types.domain.mjs";
 import { acquireMutationStore } from "../src/runtime/mutation-store.ts";
+import { startDaemon } from "../src/server.ts";
+import { ENTITY_BUDGET } from "../src/runtime/work-budget.ts";
+import { makeEnv, waitFor } from "./helpers.ts";
 import { RuntimeResultSupervision } from "../src/runtime/result-supervision.ts";
 
 test("Windows PID and legacy group-empty records cannot verify a process tree", () => {
@@ -105,5 +108,66 @@ for (const scenario of ["fresh", "stop-requested", "lost"] as const) test(`resta
     for (const { taskId, token } of tasks) await supervisor.stop(taskId, { token }).catch(() => undefined);
     lease.release();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("idle shutdown drains queued lost groups and leaves unverifiable and foreign tasks recoverable", { timeout: 30000, skip: process.platform === "win32" }, async () => {
+  const env = makeEnv();
+  Object.assign(process.env, env.vars);
+  let now = 1000;
+  const daemon = await startDaemon({ serverDir: env.serverDir, runtimeIdleMs: 60000, startupGraceMs: 0, now: () => now });
+  const lease = acquireMutationStore(env.agentDir);
+  const directory = join(env.root, "supervisor");
+  const supervisor = createLocalSupervisor({ directory });
+  const owner = { kind: "worker-conversation", workspace: env.cwd, sessionId: "worker" };
+  const recipient = { kind: "parent-session", workspace: env.cwd, sessionId: "parent" };
+  const groups = new Map<string, number>();
+  const launched: string[] = [];
+  const unverified = Array.from({ length: ENTITY_BUDGET }, (_, i) => `z-missing-${i.toString().padStart(2, "0")}`);
+  try {
+    lease.store.registerAssignment({ assignmentId: "ending", attemptId: "attempt", owner, recipient });
+    lease.store.registerAssignment({ assignmentId: "unverified", attemptId: "other-attempt", owner, recipient });
+    for (const id of [...unverified, "b-first-group", "c-second-group", "foreign"]) {
+      const taskId = supervisorTaskIdForToken(id);
+      lease.store.registerOperation({ operationId: id, taskId, launchToken: id, owner, assignmentAttemptId: id.startsWith("z-") ? "other-attempt" : "attempt",
+        observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "frontend" } });
+      if (id !== "foreign") lease.store.handoffResultSupervision({ operationId: id, expectedHostId: "frontend", directory,
+        hostId: "server:previous", epoch: "previous", capability: { adapter: "background-results-v1", captured: true, current: true } });
+      if (id.endsWith("-group")) {
+        launched.push(id);
+        await supervisor.start({ operationId: id, token: id, cwd: env.cwd, argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] });
+        const running = await waitFor("live command", () => {
+          const state = supervisor.inspect(taskId);
+          return state?.command?.alive && state.claim?.alive && state;
+        });
+        groups.set(id, running.command.pgid ?? running.command.pid);
+        process.kill(running.claim.pid, "SIGKILL");
+        writeLostRecord(directory, { version: 1, taskId, token: id, status: "lost",
+          reason: "Runner died with a live command", recordedAt: Date.now(), command: running.command });
+      }
+      lease.store.recordTerminalOutcome({ operationId: id, eventId: id, owner, outcome: "lost", reason: "Lost runner" });
+    }
+    const decision = { revision: 1, owner, recipient, outcome: "cancelled", reason: "Ended", processUncertain: true, evidence: [], waits: [] };
+    lease.store.recordAssignmentOutcome({ ...decision, assignmentId: "unverified" });
+    assert.equal(lease.store.resultSupervisions(true).length, 0);
+    now += 60000;
+    await daemon.sweepIdle();
+    assert.equal(existsSync(daemon.socketPath), true, "a full unverified page yields before the idle decision");
+    const revision = lease.store.serverAssignmentCleanupRevision();
+    // Both lost groups enter the queue before the saved idle cursor.
+    lease.store.recordAssignmentOutcome({ ...decision, assignmentId: "ending" });
+    assert.ok(lease.store.serverAssignmentCleanupRevision() > revision);
+    await daemon.sweepIdle();
+    assert.equal(existsSync(daemon.socketPath), true, "terminal operations with actionable cleanup keep the daemon alive");
+    await waitFor("both lost groups to exit before idle shutdown", async () => {
+      await daemon.sweepIdle();
+      return !existsSync(daemon.socketPath);
+    });
+    for (const pgid of groups.values()) assert.equal(processGroupAlive(pgid), false);
+    assert.deepEqual(lease.store.listAssignmentCleanupOperations(256).map((op: any) => op.operationId), ["foreign", ...unverified]);
+  } finally {
+    await daemon.stop();
+    for (const id of launched) await supervisor.stop(supervisorTaskIdForToken(id), { token: id });
+    lease.release();
   }
 });

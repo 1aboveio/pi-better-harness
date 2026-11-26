@@ -104,6 +104,12 @@ const PENDING_CLEANUP_DDL = [
         DELETE FROM assignment_cleanup_pending WHERE operation_id = substr(NEW.key, length('assignment-cleanup-verified:') + 1);
     END`,
 ];
+// Legacy Windows clients can keep writing through an open connection after migration.
+const WINDOWS_CLEANUP_PROOF_GUARD = `CREATE TRIGGER assignment_cleanup_windows_proof BEFORE INSERT ON coordinator_state
+    WHEN NEW.key GLOB 'assignment-cleanup-verified:*' AND NEW.value IS NOT (
+        SELECT 'v2:' || launch_token FROM operations
+        WHERE operation_id = substr(NEW.key, length('assignment-cleanup-verified:') + 1))
+    BEGIN SELECT RAISE(IGNORE); END`;
 const DDL = [
     `CREATE TABLE task_cancellation_authorities (
         credential_hash TEXT PRIMARY KEY,
@@ -345,6 +351,8 @@ export function ensureSchema(ctx) {
         ctx.transaction(() => {
             for (const statement of [...DDL, ...EXPIRY_INDEXES])
                 ctx.db.exec(statement);
+            if (process.platform === "win32")
+                ctx.db.exec(WINDOWS_CLEANUP_PROOF_GUARD);
             run(ctx, "INSERT INTO schema_meta (key, value) VALUES (?, ?)", SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
         });
         return;
@@ -397,23 +405,32 @@ function ensureAssignmentCleanupSchema(ctx) {
         ctx.db.exec(statement);
     const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
     const hasPending = () => !!getRow(ctx, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assignment_cleanup_pending'");
-    if (hasPending())
+    const needsWindowsGuard = () => process.platform === "win32" &&
+        !getRow(ctx, "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'assignment_cleanup_windows_proof'");
+    if (hasPending() && !needsWindowsGuard())
         return;
     ctx.transaction(() => {
-        if (hasPending())
+        const createQueue = !hasPending();
+        const installGuard = needsWindowsGuard();
+        if (!createQueue && !installGuard)
             return;
-        ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
-        // Legacy writers leave the nullable provenance unset.
-        if (!hasColumn())
-            ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
-        ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
-        for (const statement of PENDING_CLEANUP_DDL)
-            ctx.db.exec(statement);
-        if (process.platform === "win32") {
-            // Earlier Windows writers mistook an unsupported group probe for proof of exit.
-            ctx.db.exec("DELETE FROM coordinator_state WHERE key GLOB 'assignment-cleanup-verified:*'");
+        if (createQueue) {
+            ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
+            // Legacy writers leave the nullable provenance unset.
+            if (!hasColumn())
+                ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
+            ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+            for (const statement of PENDING_CLEANUP_DDL)
+                ctx.db.exec(statement);
         }
-        ctx.db.exec(`INSERT INTO assignment_cleanup_pending
+        if (installGuard) {
+            ctx.db.exec(WINDOWS_CLEANUP_PROOF_GUARD);
+            // Discard marks from writers which treated an unsupported Windows group probe as proof.
+            ctx.db.exec(`DELETE FROM coordinator_state WHERE key GLOB 'assignment-cleanup-verified:*' AND value IS NOT (
+                SELECT 'v2:' || launch_token FROM operations
+                WHERE operation_id = substr(coordinator_state.key, length('assignment-cleanup-verified:') + 1))`);
+        }
+        ctx.db.exec(`INSERT OR IGNORE INTO assignment_cleanup_pending
             SELECT op.operation_id, op.supervision_host_id FROM operations op
             JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
             JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id

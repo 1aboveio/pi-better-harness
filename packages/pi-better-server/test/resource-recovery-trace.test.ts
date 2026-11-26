@@ -21,7 +21,7 @@ test('resource fixture trace instruments the real recovery gate without replacin
   }
   assert.equal(instrumented.split('service.hasPendingParentCallbackRecovery()').length, source.split('service.hasPendingParentCallbackRecovery()').length, 'tracing must not invoke recovery-state accessors');
   assert.ok(!instrumented.includes('service.recoveryScopeState()'), 'trace reads must not create or evict scope state');
-  assert.equal(instrumented.split('lease.store.getChangeRevision()').length, source.split('lease.store.getChangeRevision()').length, 'capture the original coordinator read without additional I/O');
+  assert.equal(instrumented.split('lease.store.parentRecoveryRevision(record.owner)').length, source.split('lease.store.parentRecoveryRevision(record.owner)').length, 'capture the original coordinator read without additional I/O');
   const result = await load(target.href, {}, () => assert.fail('target should be instrumented'));
   assert.equal(result.shortCircuit, true);
   assert.deepEqual(ts.transpileModule(result.source, { reportDiagnostics: true,
