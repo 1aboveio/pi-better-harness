@@ -71,11 +71,7 @@ export function snapshotTree(root, store, omit = new Set()) {
     walk("");
     return entries;
 }
-function restoreSymlink(dest, entry) {
-    symlinkSync(entry.target, dest);
-    lchmodSync?.(dest, entry.mode);
-}
-export function restoreTree(root, store, entries) {
+function materializeTree(root, entries, copyRegularFile) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const directories = new Set(["."]);
     for (const entry of entries) {
@@ -89,11 +85,11 @@ export function restoreTree(root, store, entries) {
             directories.add(entry.name);
         }
         else if (entry.type === "symlink") {
-            restoreSymlink(dest, entry);
+            symlinkSync(entry.target, dest);
+            lchmodSync?.(dest, entry.mode);
         }
         else {
-            copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
-            chmodSync(dest, entry.mode);
+            copyRegularFile(entry, dest);
         }
     }
     for (const entry of entries.slice().reverse()) {
@@ -101,28 +97,18 @@ export function restoreTree(root, store, entries) {
             chmodSync(join(root, entry.name), entry.mode);
     }
 }
-export function copyTree(source, dest, entries) {
-    const options = { recursive: true, verbatimSymlinks: true };
-    const links = new Map();
-    for (const entry of entries) {
-        if (entry.type === "symlink")
-            links.set(join(source, entry.name), entry);
-    }
-    if (!links.size || typeof lchmodSync !== "function") {
-        cpSync(source, dest, options);
-        return;
-    }
-    // cpSync preserves the link text but creates links with the process's default mode.
-    cpSync(source, dest, {
-        ...options,
-        filter(from, to) {
-            const link = links.get(from);
-            if (!link)
-                return true;
-            restoreSymlink(to, link);
-            return false;
-        },
+export function restoreTree(root, store, entries) {
+    materializeTree(root, entries, (entry, dest) => {
+        copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+        chmodSync(dest, entry.mode);
     });
+}
+export function copyTree(source, dest, entries) {
+    const rootMode = lstatSync(source).mode & 0o7777;
+    materializeTree(dest, entries, (entry, target) => {
+        cpSync(join(source, entry.name), target, { verbatimSymlinks: true, force: false, errorOnExist: true });
+    });
+    chmodSync(dest, rootMode);
 }
 export function verifyTree(root, entries, omit) {
     if (JSON.stringify(snapshotTree(root, undefined, omit)) !== JSON.stringify(entries)) {

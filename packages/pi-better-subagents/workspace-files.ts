@@ -86,12 +86,11 @@ export function snapshotTree(root: string, store?: string, omit: ReadonlySet<str
     return entries;
 }
 
-function restoreSymlink(dest: string, entry: Extract<SavedEntry, { type: "symlink" }>): void {
-    symlinkSync(entry.target, dest);
-    lchmodSync?.(dest, entry.mode);
-}
-
-export function restoreTree(root: string, store: string, entries: SavedEntry[]): void {
+function materializeTree(
+    root: string,
+    entries: SavedEntry[],
+    copyRegularFile: (entry: Extract<SavedEntry, { type: "file" }>, dest: string) => void,
+): void {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const directories = new Set(["."]);
     for (const entry of entries) {
@@ -104,10 +103,10 @@ export function restoreTree(root: string, store: string, entries: SavedEntry[]):
             mkdirSync(dest);
             directories.add(entry.name);
         } else if (entry.type === "symlink") {
-            restoreSymlink(dest, entry);
+            symlinkSync(entry.target, dest);
+            lchmodSync?.(dest, entry.mode);
         } else {
-            copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
-            chmodSync(dest, entry.mode);
+            copyRegularFile(entry, dest);
         }
     }
     for (const entry of entries.slice().reverse()) {
@@ -115,26 +114,19 @@ export function restoreTree(root: string, store: string, entries: SavedEntry[]):
     }
 }
 
-export function copyTree(source: string, dest: string, entries: SavedEntry[]): void {
-    const options = { recursive: true, verbatimSymlinks: true };
-    const links = new Map<string, Extract<SavedEntry, { type: "symlink" }>>();
-    for (const entry of entries) {
-        if (entry.type === "symlink") links.set(join(source, entry.name), entry);
-    }
-    if (!links.size || typeof lchmodSync !== "function") {
-        cpSync(source, dest, options);
-        return;
-    }
-    // cpSync preserves the link text but creates links with the process's default mode.
-    cpSync(source, dest, {
-        ...options,
-        filter(from, to) {
-            const link = links.get(from);
-            if (!link) return true;
-            restoreSymlink(to, link);
-            return false;
-        },
+export function restoreTree(root: string, store: string, entries: SavedEntry[]): void {
+    materializeTree(root, entries, (entry, dest) => {
+        copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+        chmodSync(dest, entry.mode);
     });
+}
+
+export function copyTree(source: string, dest: string, entries: SavedEntry[]): void {
+    const rootMode = lstatSync(source).mode & 0o7777;
+    materializeTree(dest, entries, (entry, target) => {
+        cpSync(join(source, entry.name), target, { verbatimSymlinks: true, force: false, errorOnExist: true });
+    });
+    chmodSync(dest, rootMode);
 }
 
 export function verifyTree(root: string, entries: SavedEntry[], omit?: ReadonlySet<string>): void {

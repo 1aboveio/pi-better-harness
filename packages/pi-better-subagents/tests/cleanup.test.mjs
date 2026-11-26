@@ -276,12 +276,13 @@ describe("enforceRegistrySizeCapOnce", () => {
         rmSync(baseDir(), { recursive: true, force: true });
         const id = "sa_scratch_links";
         const scratch = realpathSync(mkdtempSync(join(RUNTIME, "pi-task-scratch-")));
-        writeFileSync(join(scratch, "artifact"), "kept", { mode: 0o640 });
-        symlinkSync("artifact", join(scratch, "link"));
+        mkdirSync(join(scratch, "nested"), { mode: 0o750 });
+        writeFileSync(join(scratch, "nested", "artifact"), "kept", { mode: 0o640 });
+        symlinkSync("nested/artifact", join(scratch, "link"));
         symlinkSync("missing", join(scratch, "dangling"));
         lchmodSync?.(join(scratch, "link"), 0o700);
         lchmodSync?.(join(scratch, "dangling"), 0o755);
-        const names = ["", "artifact", "link", "dangling"];
+        const names = ["", "nested", "nested/artifact", "link", "dangling"];
         const modes = names.map(name => lstatSync(join(scratch, name)).mode);
         writeMeta(meta(id, { taskRuntime: true, taskScratch: scratch }));
         const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1, protectedIds: new Set() });
