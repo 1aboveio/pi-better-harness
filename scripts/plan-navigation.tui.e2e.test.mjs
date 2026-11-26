@@ -124,8 +124,8 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
     /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
   assert.match(revealed, /#214 Extract shared core +│ Implement 2\/2/);
-  assert.match(revealed, /↺ Review/);
-  assert.match(revealed, /Ship 0\/2 · 1 blocked · 1 active/);
+  assert.match(revealed, /Review ✓2\/2 ─┬ ─→ Ship/);
+  assert.match(revealed, /Ship 0\/2 !1 ●1/);
   assert.match(revealed, /Extract shared core/);
   assert.match(revealed, /Add mux support/);
   assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
@@ -133,7 +133,7 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
   const narrow = waitForScreen(screen => /#214[^│\n]*│ Implement 2\/2/.test(screen) && screen.includes("↺ Review") &&
     !screen.includes("Extract shared core"));
-  assert.match(narrow, /↳ Fix as needed/);
+  assert.match(narrow, /↳ Fix —/);
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "35", "-y", "32"]);
   const stacked = waitForScreen(screen => /^Implement 2\/2$/m.test(screen) && screen.includes("↺ Review"));
   assert.match(stacked, /#215[^]*\nImplement 2\/2/);

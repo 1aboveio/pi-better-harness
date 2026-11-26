@@ -9,6 +9,11 @@ export const EVENT_REGISTER_PROVIDER = "pi-better-goal:register-provider";
 export const EVENT_ACTIVITY = "pi-better-goal:activity";
 export const EVENT_TERMINAL_ATTENTION = "pi-better-goal:terminal-attention";
 
+/** Session-local transition and synchronous inspection of verified foreground/worker idleness. */
+export const sessionIdleEvent = (sessionId: string) => `pi-better-goal:idle:${sessionId}`;
+export type SessionIdleState = boolean | "checking";
+export interface SessionIdleInspection { idle?: SessionIdleState; verify?: boolean }
+
 export type ActivityCategory =
   | "foreground-running"
   | "background-running"

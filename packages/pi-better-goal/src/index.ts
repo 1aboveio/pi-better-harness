@@ -49,6 +49,9 @@ import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./reh
 import { canStartGoalFromOutcome, GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
+  sessionIdleEvent,
+  type SessionIdleInspection,
+  type SessionIdleState,
   EVENT_READY,
   EVENT_REGISTER_PROVIDER,
   EVENT_TERMINAL_ATTENTION,
@@ -348,6 +351,27 @@ export default function (pi: ExtensionAPI): void {
   let collecting = false;
   let collectionPending = false;
   let latestSnapshot: ActivitySnapshot | null = null;
+  let idleChannel: string | undefined;
+  let stopIdleInspection: (() => void) | undefined;
+  let sessionIdle: SessionIdleState = false;
+  let verifyIdleOnSettle = false;
+
+  function setSessionIdle(idle: SessionIdleState) {
+    if (!idleChannel || idle === sessionIdle) return;
+    sessionIdle = idle;
+    pi.events.emit(idleChannel, idle);
+  }
+
+  function updateSessionIdle(goal: GoalSnapshot | null) {
+    if (foregroundRunning || (goal && goal.status !== "paused" && goal.status !== "complete")) {
+      setSessionIdle(false);
+    } else if (dirtyProviders.size || lastAppliedSnapshotSequence !== snapshotSequence) {
+      setSessionIdle("checking");
+    } else {
+      setSessionIdle(latestSnapshot?.coverage === "verified" && !latestSnapshot.foregroundRunning && !latestSnapshot.backgroundRunning);
+    }
+  }
+
   let backgroundDrainTracker: BackgroundDrainTracker | null = null;
   let lastAttentionSignature = "";
   let continuationQueuedFor: string | null = null;
@@ -435,6 +459,7 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(goal);
+    updateSessionIdle(goal);
     // Force a full redraw when the dock height changes (absent ↔ visible clock).
     refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
@@ -453,6 +478,7 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(null);
+    updateSessionIdle(null);
     refreshGoalWidget?.(wasVisible);
   };
 
@@ -699,6 +725,7 @@ export default function (pi: ExtensionAPI): void {
         if (cached && !provider.onActivityChanged && !explicit && Date.now() < (compatibilityReadAt.get(provider.id) ?? 0)) return cached;
         if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
             !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
+        if (sessionIdle === true) setSessionIdle("checking");
         dirtyProviders.delete(provider.id);
         let value: BackgroundProviderSnapshot;
         try {
@@ -748,6 +775,7 @@ export default function (pi: ExtensionAPI): void {
       clearIdleContinuation();
     }
 
+    updateSessionIdle(goal);
     pi.events.emit(EVENT_ACTIVITY, snapshot);
     if (execution !== executionGeneration) return null;
     const attention = terminalAttentionSignature(snapshot);
@@ -855,6 +883,7 @@ export default function (pi: ExtensionAPI): void {
       providerUnsubscribers.set(provider.id, provider.onActivityChanged(() => {
         if (!currentCtx || execution !== executionGeneration || providers.get(provider.id) !== provider) return;
         dirtyProviders.add(provider.id);
+        if (sessionIdle === true) setSessionIdle("checking");
         collectIfPossible();
       }, currentCtx));
     }
@@ -997,6 +1026,7 @@ export default function (pi: ExtensionAPI): void {
     providerCache.delete(accepted.id);
     providerCacheSequences.set(accepted.id, ++snapshotSequence);
     dirtyProviders.add(accepted.id);
+    if (sessionIdle === true) setSessionIdle("checking");
     providerBindings.delete(accepted.id);
     bindProviderSubscriptions();
     if (latestSnapshot) collectIfPossible();
@@ -1467,6 +1497,29 @@ export default function (pi: ExtensionAPI): void {
       preferences = { ...preferences, autoStartFromOutcome: false };
       notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
     }
+    if (typeof stopIdleInspection === "function") stopIdleInspection();
+    idleChannel = undefined;
+    sessionIdle = false;
+    verifyIdleOnSettle = false;
+    latestSnapshot = null;
+    const sessionId = ctx.sessionManager.getSessionId?.();
+    if (ctx.hasUI && ctx.mode === "tui" && sessionId) {
+      idleChannel = sessionIdleEvent(sessionId);
+      stopIdleInspection = pi.events.on(idleChannel + ":inspect", (value) => {
+        const request = value as SessionIdleInspection;
+        request.idle = sessionIdle;
+        // A plain conversation may only have a passive, unverified provider cache.
+        if (!request.verify) return;
+        if (foregroundRunning) {
+          // The Recap settlement handler can run before Goal's handler.
+          verifyIdleOnSettle = true;
+          return;
+        }
+        if (!latestSnapshot || !hasUnverifiedActivity(latestSnapshot)) return;
+        const goal = getGoal(ctx);
+        if (!goal || goal.status === "paused" || goal.status === "complete") void publishSnapshot(ctx, true, "connect");
+      });
+    }
     const restoredGoal = getGoal(ctx);
     if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
       setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
@@ -1516,6 +1569,8 @@ export default function (pi: ExtensionAPI): void {
     backgroundDrainTracker = null;
     continuationQueuedFor = null;
     providerCache.clear();
+    latestSnapshot = null;
+    setSessionIdle(false);
     currentCtx = ctx;
     await publishSnapshot(ctx);
     syncPollingState();
@@ -1640,6 +1695,8 @@ export default function (pi: ExtensionAPI): void {
     agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
+    verifyIdleOnSettle = false;
+    setSessionIdle(false);
     agentLoopActive = true;
     clearIdleContinuation();
     continuationQueuedFor = null;
@@ -1730,7 +1787,9 @@ export default function (pi: ExtensionAPI): void {
     escapeAbortSuppression = undefined;
     currentCtx = ctx;
     foregroundRunning = false;
-    const snapshot = await publishSnapshot(ctx);
+    const verify = verifyIdleOnSettle;
+    verifyIdleOnSettle = false;
+    const snapshot = await publishSnapshot(ctx, true, verify ? "connect" : undefined);
     if (!snapshot) return;
     const goal = getGoal(ctx);
     if (!isPokeable(goal) || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
@@ -1834,6 +1893,9 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     currentCtx = undefined;
     latestSnapshot = null;
+    if (typeof stopIdleInspection === "function") stopIdleInspection();
+    stopIdleInspection = undefined;
+    idleChannel = undefined;
     collectionPending = false;
     try {
       setNavigatorPanel(ctx, EXTENSION_NAME, undefined);

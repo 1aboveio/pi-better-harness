@@ -48,7 +48,7 @@ Todo uses the same workflow view for a bound task plan and a dynamic workflow.
 The task list and diagram start at equal widths. Drag their divider in fullscreen Pi
 or enter `/todo split 3:2` to give the task list three fifths of the available width.
 The session remembers the ratio across reloads. Use `/todo split 1:1` to restore equal columns.
-Below 36 terminal columns, the diagram follows the task list.
+Below 36 terminal columns, the diagram follows the task list. Stage counts use the task symbols, so `Implement 0/2 ●2` shows two tasks in progress and zero completed. In a mixed stage, `!1 ●2` shows one blocked task and two running.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks continue to govern workflow-owned plans. See the [usage guide](docs/usage.md#goal--todo).
@@ -273,9 +273,11 @@ survive sessions and upgrades.
 
 ### Session recap
 
-In `/harness-settings`, **Session recap** enables a short summary above the editor after a conversation settles. It defaults to Off. **Recap prompt** opens the current instructions for editing. Save a blank prompt to restore the default or press Escape to keep your previous instructions. Both settings are saved as user defaults. Editing the prompt takes effect on the next summary.
+Enable **Session recap** in `/harness-settings` to add a one-line summary to the conversation transcript. The default is Off. Expand the entry with Pi’s expand-output shortcut to read the full text and any agreed next step. Saved recaps scroll with the conversation and reappear on their original branch.
 
-Each recap uses a separate request to the model that answered. It sends a bounded selection of recent user and assistant text. Pi hosts with the public configured model streaming API can generate summaries; existing summaries restore locally on older hosts. Recap and the optional Next line stay on their session branch. The summary request has its own session identity and usage. The main model receives its usual prompt, tools and conversation.
+Recap waits for the foreground turn and queued messages to settle and for the session’s background workers to drain. If a Goal exists, it must be paused or complete. A later pause or worker completion can produce the recap without another turn. Work that resumes during generation cancels the pending summary.
+
+**Recap prompt** changes the instructions for the next summary. Clear the prompt to restore the default. Each recap uses a separate request to the answering model with bounded recent conversation text. Saved recaps stay outside the main model’s context. Generation requires a Pi host with configured model streaming and transcript entry renderers.
 
 ### Harness instructions
 

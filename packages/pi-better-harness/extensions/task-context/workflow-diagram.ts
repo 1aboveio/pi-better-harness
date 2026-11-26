@@ -6,6 +6,11 @@ export interface DiagramPart {
   selected?: boolean;
 }
 
+/** Use the same status marks as the task rows, with a count for each nonempty group. */
+export function diagramCounts(groups: { glyph: string; color: string; count: number }[]): DiagramPart[] {
+  return groups.filter(group => group.count > 0).map(({ glyph, color, count }) => ({ text: ` ${glyph}${count}`, color }));
+}
+
 export interface WorkflowNode {
   /** Parallel steps can share a node while remaining individually addressable by edges. */
   ids: string[];

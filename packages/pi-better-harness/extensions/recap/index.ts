@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
+import { sessionIdleEvent, type SessionIdleInspection } from "pi-better-goal/src/types.ts";
+import { Text, TruncatedText } from "@earendil-works/pi-tui";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import {
   DEFAULT_PROMPT,
@@ -8,7 +10,7 @@ import {
   restoredSummary,
   summarize,
   supportsRecap,
-  type Summary,
+  parseSummary,
 } from "./summary.ts";
 
 type Preferences = { enabled?: boolean; prompt?: string };
@@ -26,36 +28,25 @@ function preferences(value: unknown): Preferences {
 export default function recapExtension(pi: ExtensionAPI): void {
   let prefs: Preferences = {};
   let run: AbortController | undefined;
-  let answerId: string | undefined;
+  let ended: { timestamp: number; aborted: boolean } | undefined;
+  let stopWatching: (() => void) | undefined;
 
   function cancel() {
+    ended = undefined;
+    stopWatching?.();
+    stopWatching = undefined;
     run?.abort();
     run = undefined;
-    answerId = undefined;
   }
 
-  function display(ctx: ExtensionContext, summary?: Summary) {
-    if (ctx.mode !== "tui" || !ctx.hasUI) return;
-    ctx.ui.setWidget(
-      ENTRY,
-      summary
-        ? (_tui, theme) => {
-            const lines = [theme.bold("Recap") + "  " + summary.recap];
-            if (summary.next) lines.push(theme.fg("accent", "Next") + "   " + summary.next);
-            return new Text(lines.join("\n"), 0, 0);
-          }
-        : undefined,
-      { placement: "aboveEditor" },
-    );
-  }
-
-  function restore(ctx: ExtensionContext) {
-    cancel();
-    if (!prefs.enabled || ctx.mode !== "tui") return display(ctx);
-    const branch = ctx.sessionManager.getBranch();
-    const answer = latestAnswer(branch);
-    display(ctx, answer && restoredSummary(branch, answer.id));
-  }
+  pi.registerEntryRenderer?.<{ version: number }>(ENTRY, (entry, { expanded }, theme) => {
+    if (entry.data?.version !== 2) return;
+    const summary = parseSummary(entry.data);
+    if (!summary) return;
+    const line = theme.fg("muted", "Recap") + "  " + summary.recap;
+    if (!expanded) return new TruncatedText(line, 0, 0);
+    return new Text(line + (summary.next ? "\n" + theme.fg("muted", "Next") + "   " + summary.next : ""), 0, 0);
+  });
 
   function save(update: Preferences) {
     prefs = updateHarnessSetting<Preferences>(KEY, (current) => ({ ...preferences(current), ...update }));
@@ -70,21 +61,21 @@ export default function recapExtension(pi: ExtensionAPI): void {
       return;
     }
     save({ prompt: prompt && prompt !== DEFAULT_PROMPT ? prompt : undefined });
-    restore(ctx);
+    cancel();
   }
 
   const toggle = {
     id: "session-recap",
     label: "Session recap",
     values: ["Off", "On"],
-    description: "Summarize settled conversations above the editor using a separate model request.",
+    description: "Add a short recap to the transcript when the session and its work are idle.",
     get: () => (prefs.enabled ? "On" : "Off"),
     change(value: string, ctx: ExtensionCommandContext) {
       if (value !== "On" && value !== "Off") throw new Error("Unknown Recap setting");
       save({ enabled: value === "On" });
-      restore(ctx);
-      if (prefs.enabled && !supportsRecap(ctx))
-        ctx.ui.notify("Recap generation requires Pi's configured model streaming API.", "warning");
+      cancel();
+      if (prefs.enabled && (!pi.registerEntryRenderer || !supportsRecap(ctx)))
+        ctx.ui.notify("Recap requires Pi transcript entry renderers and the configured model streaming API.", "warning");
     },
   };
   const promptLink = {
@@ -103,7 +94,7 @@ export default function recapExtension(pi: ExtensionAPI): void {
     description: "Edit the session recap instructions",
     handler: (_args, ctx) => editPrompt(ctx),
   });
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", () => {
     try {
       prefs = preferences(readHarnessSetting(KEY));
     } catch {
@@ -111,62 +102,86 @@ export default function recapExtension(pi: ExtensionAPI): void {
     }
     unsubscribe ??= pi.events.on("harness-settings:request", register);
     register();
-    restore(ctx);
-  });
-  pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.on("agent_start", (_event, ctx) => {
     cancel();
-    display(ctx);
   });
+  pi.on("session_tree", cancel);
+  pi.on("agent_start", cancel);
   pi.on("agent_end", (event, ctx) => {
-    if (!prefs.enabled || ctx.mode !== "tui") return;
+    if (!prefs.enabled || !ctx.hasUI || ctx.mode !== "tui" || !pi.registerEntryRenderer || !supportsRecap(ctx)) return;
     const last = event.messages.at(-1);
-    const answer = latestAnswer(ctx.sessionManager.getBranch());
-    if (last?.role === "assistant" && last.stopReason === "stop" && last.timestamp === answer?.message.timestamp)
-      answerId = answer.id;
+    if (last?.role === "assistant" && (last.stopReason === "stop" || last.stopReason === "aborted")) {
+      ended = { timestamp: last.timestamp, aborted: last.stopReason === "aborted" };
+    }
   });
   pi.on("agent_settled", (event, ctx) => {
-    const id = answerId;
-    answerId = undefined;
-    if (
-      !id ||
-      (event as { aborted?: boolean }).aborted ||
-      ctx.hasPendingMessages() ||
-      !prefs.enabled ||
-      !ctx.hasUI ||
-      ctx.mode !== "tui"
-    )
-      return;
-    const branch = ctx.sessionManager.getBranch();
-    const answer = latestAnswer(branch);
-    if (answer?.id !== id || restoredSummary(branch, id)) return;
+    const end = ended;
+    ended = undefined;
+    if (!end || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+    const interrupted = end.aborted || (event as { aborted?: boolean }).aborted === true;
     const sessionId = ctx.sessionManager.getSessionId();
-    const request = new AbortController();
-    run = request;
-    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]);
-    void summarize(ctx, branch, answer, prefs.prompt || DEFAULT_PROMPT, signal)
-      .then((record) => {
-        if (
-          !record ||
-          signal.aborted ||
-          run !== request ||
-          ctx.sessionManager.getSessionId() !== sessionId ||
-          latestAnswer(ctx.sessionManager.getBranch())?.id !== id
-        )
-          return;
-        pi.appendEntry(ENTRY, record);
-        display(ctx, record);
-      })
-      .catch(() => {
-        /* Auxiliary failures never interrupt foreground work. */
-      })
-      .finally(() => {
-        if (run === request) run = undefined;
-      });
+    const channel = sessionIdleEvent(sessionId);
+    const check = (verify = false) => {
+      const inspection: SessionIdleInspection = { verify };
+      pi.events.emit(channel + ":inspect", inspection);
+      // Standalone Recap works without a Goal. A persisted Goal needs its activity owner.
+      if (inspection.idle !== undefined) return inspection.idle;
+      return !reconstructGoalSnapshot(ctx.sessionManager.getBranch()) &&
+        !pi.getAllTools?.().some(tool => ["subagent_spawn", "bg_task_spawn", "get_background_activity"].includes(tool.name));
+    };
+    const eligible = () => ctx.sessionManager.getSessionId() === sessionId && ctx.isIdle() && !ctx.hasPendingMessages();
+    let saveWhenIdle: (() => void) | undefined;
+    const onIdle = (idle: unknown) => {
+      // Keep the same summary through a provider refresh. Only verified new work cancels it.
+      if (idle === "checking") return;
+      if (idle !== true) {
+        run?.abort();
+        run = undefined;
+        saveWhenIdle = undefined;
+        return;
+      }
+      if (!eligible()) return;
+      if (saveWhenIdle) { saveWhenIdle(); return; }
+      if (run) return;
+      const branch = ctx.sessionManager.getBranch();
+      const goal = reconstructGoalSnapshot(branch);
+      if (goal && goal.status !== "paused" && goal.status !== "complete") return;
+      const answer = latestAnswer(branch, interrupted);
+      if (!answer || (interrupted ? goal?.status !== "paused" : answer.message.timestamp !== end.timestamp) ||
+          restoredSummary(branch, answer.id)) {
+        cancel();
+        return;
+      }
+      const request = new AbortController();
+      run = request;
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]);
+      void summarize(ctx, branch, answer, prefs.prompt || DEFAULT_PROMPT, signal, goal?.status, interrupted)
+        .then(record => {
+          if (run !== request) return;
+          if (!record || signal.aborted || !eligible()) { cancel(); return; }
+          saveWhenIdle = () => {
+            saveWhenIdle = undefined;
+            const current = ctx.sessionManager.getBranch();
+            const currentGoal = reconstructGoalSnapshot(current);
+            if (currentGoal?.goalId === goal?.goalId && latestAnswer(current, interrupted)?.id === answer.id &&
+                !restoredSummary(current, answer.id)) {
+              if (currentGoal?.status !== goal?.status) {
+                run = undefined;
+                onIdle(true);
+                return;
+              }
+              pi.appendEntry(ENTRY, record);
+            }
+            cancel();
+          };
+          onIdle(check());
+        })
+        .catch(() => { if (run === request) cancel(); });
+    };
+    stopWatching = pi.events.on(channel, onIdle);
+    onIdle(check(true));
   });
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", () => {
     cancel();
-    display(ctx);
     unsubscribe?.();
     unsubscribe = undefined;
   });

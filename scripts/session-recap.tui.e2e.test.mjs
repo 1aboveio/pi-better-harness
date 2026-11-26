@@ -163,7 +163,9 @@ test(
     await wait((p) => p.includes(panel));
     send("Second exchange");
     key("Enter");
-    await wait((p) => requests.length >= 4 && p.includes(panel));
+    const transcript = await wait(p => requests.length >= 4 && p.split(panel).length === 3);
+    assert.ok(transcript.indexOf(panel) < transcript.indexOf("Second exchange"));
+    assert.ok(transcript.lastIndexOf(panel) > transcript.indexOf("Second exchange"));
     assert.equal(requests.length, 4);
     for (const body of [requests[0], requests[2]])
       assert.doesNotMatch(JSON.stringify(body), /RECAP-(STYLE|OUTPUT)-CANARY/);
@@ -175,7 +177,7 @@ test(
     assert.deepEqual(requests[0].tools, requests[2].tools);
     send("/reload");
     key("Enter");
-    await wait((p) => p.includes("Reloaded") && p.includes(panel));
+    await wait(p => p.includes("Reloaded") && p.split(panel).length === 3);
     assert.equal(requests.length, 4);
     tmux("new-session", "-d", "-s", "keep-alive");
     tmux("kill-session", "-t", "recap");
