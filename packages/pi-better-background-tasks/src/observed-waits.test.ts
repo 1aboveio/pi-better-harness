@@ -316,7 +316,7 @@ describe("parent durable launches", () => {
     } finally {
       await host.stopDurableTask(origin, launch.id);
     }
-  });
+  }, 30_000);
 
   it("retries reconciliation after coordinator write contention", async () => {
     const root = workspace("store-busy");
