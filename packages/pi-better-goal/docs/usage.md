@@ -26,9 +26,9 @@ or `/goal resume` on a saved Goal or unfinished Todo, including older checklists
 Explicit resume starts work once. Pausing stores the hold before interrupting the
 foreground turn. Already delegated tasks keep their execution owners.
 
-In `/harness-settings`, **Goal and Todo tools** controls agent access.
-**Auto-run saved Goals** optionally starts a newly saved Goal with acceptance
-criteria. Saving a checklist, opening a session and changing a setting do not
+In `/harness-settings`, **Auto-start Goals** defaults to Off. Turn it on to start a newly
+saved Goal with acceptance criteria, explicitly reopened work, or an issue workflow
+invoked with `/skill:rush-issues` or `/skill:resolve-issues`. Saving a checklist, opening a session and changing a setting do not
 start execution. A workflow-owned Goal keeps its coordinator and completion gates.
 
 ## Commands And Tools
@@ -109,10 +109,10 @@ model as an ordinary message.
 
 ## Persistent User Controls
 
-All three controls default to `on`, preserving the existing behavior. `/goal settings`
+Automatic Goal start defaults to `off`. The three execution controls default to `on`. `/goal settings`
 opens the interactive settings page in the TUI and reports values and the
 preference-file location outside the TUI, even with no goal. `/goal` and
-`get_goal` also report all three values. Configure them independently:
+`get_goal` also report the current values. Configure them independently:
 
 ```text
 /goal settings auto-continue off
@@ -152,12 +152,11 @@ other extensions' callback delivery are unchanged.
 
 Changes are saved atomically to
 `~/.pi/agent/settings.json` under `piBetterHarness.goal`, or under
-`$PI_CODING_AGENT_DIR/extensions` when set. They apply immediately in this
+`$PI_CODING_AGENT_DIR/settings.json` when set. They apply immediately in this
 session and are loaded on session start/reload in other sessions. They are
 user-wide preferences, not goal state or project settings. A missing file or
-missing control in a version-1 file uses the enabled default. Read/validation
-errors are reported without overwriting the file; the session retains its
-current settings (enabled defaults for a fresh extension). A failed save
+missing control in a version-1 file uses its default. Read/validation
+errors leave the file intact and disable automatic Goal start. A failed save
 does not change the active settings.
 
 ```json
@@ -376,17 +375,12 @@ The extension emits these events on `pi.events`:
 - `pi-better-goal:terminal-attention` when terminal or unhealthy background work needs attention
 - `pi-better-harness:task-context` with a synchronous mutable request
 
-`pi-better-harness:task-context` carries
-`{ action: "inspect" | "start" | "pause" | "resume" | "complete", goalId?, objective? }`.
-Goal emits it after persisting a Goal set or before clearing a Goal: a new goal id
-starts, a completed or paused goal reports that state, a non-active to active
-transition resumes, and `clear` pauses the saved Goal rather than deleting or
-completing it. `objective` is present only on `start` and is the raw original
-Goal trigger. A Harness runtime that owns task context sets `request.enabled` to a
-boolean whenever it is installed, even when Goal & Todo is off. Goal then
-omits its duplicated active-objective text. Without Harness, `enabled` remains
-undefined and standalone Goal prompts are unchanged. `inspect` is sent before a
-turn's prompt is assembled so Goal can detect that runtime.
+Goal uses `pi-better-harness:task-context` to inspect saved work, adopt a Todo,
+bind execution to it and report lifecycle changes. Requests use the current
+`goalId` for binding, pause, resume, completion and audit. Clearing execution
+pauses the saved Goal. On `inspect`, Harness sets `enabled` to true and reports
+whether its panel displays the requested Goal. This lets Goal choose where to
+show its objective and clock. Standalone Goal supplies its own prompt and widget.
 
 Other extensions can register providers by emitting `pi-better-goal:register-provider` with:
 

@@ -70,7 +70,7 @@ test("Outcome & Todo tool schemas, including the optional outcome, use only prov
   await hooks.get("session_start")({}, ctx);
   t.after(() => hooks.get("session_shutdown")({}, ctx));
   assert.deepEqual([...tools.keys()].sort(), ["dynamic_workflow", "get_todo", "update_todo"]);
-  assert.deepEqual([...active], [], "a fresh runtime exposes neither Todo tool before the human enables it");
+  assert.deepEqual([...active], ["update_todo", "get_todo"]);
   for (const [name, tool] of tools) {
     assert.deepEqual(findProviderRejectedKeywords(plain(tool.parameters)), [], name);
   }

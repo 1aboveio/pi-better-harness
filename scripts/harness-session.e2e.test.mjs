@@ -193,7 +193,7 @@ async function runTool(name, params) {
 
 // @covers harness.default-capability
 // @level e2e
-test("the harness loads every default extension with Outcome & Todo off", { skip }, () => {
+test("the harness loads every default extension and exposes the Todo tools", { skip }, () => {
   for (const name of [
     "bash",
     "write",
@@ -203,6 +203,8 @@ test("the harness loads every default extension with Outcome & Todo off", { skip
     "remote_bash",
     "ssh_profile",
     "ssh_mux",
+    "update_todo",
+    "get_todo",
     "update_goal",
     "get_goal",
   ]) {
@@ -212,8 +214,6 @@ test("the harness loads every default extension with Outcome & Todo off", { skip
   assert.ok(commands.has("sandbox"), "the human-only /sandbox command must be registered");
   assert.ok(commands.has("todo"), "the human-owned /todo command must be registered");
   assert.ok(!commands.has("plan"), "the retired /plan command must not be registered");
-  assert.ok(tools.has("update_todo") && tools.has("get_todo"), "Outcome & Todo registers its tools behind the toggle");
-  assert.ok(!["update_todo", "get_todo"].some((name) => activeTools.has(name)), "a fresh harness session must start with Todo tools off");
   assert.ok(!tools.has("update_plan") && !tools.has("get_plan"), "the retired Plan tool names must not be registered");
 });
 

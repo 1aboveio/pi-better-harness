@@ -28,14 +28,14 @@ restriction in the older observed-waits proposal without changing parent gates.
 
 ### Outcome ownership and settings
 
-`pi-better-harness` absorbs Plan as its **Outcome & Todo** runtime. The original
-accepted decision made the runtime off by default behind one human-controlled
-`/harness-settings` toggle. The human has since accepted separate display and
-hook controls: **Outcome & Todo display** (`outcome-todo-display`) defaults On,
-while **Outcome & Todo hooks** (legacy id `outcome-todo`) defaults Off. The
-independent **Long-term work ledger** control (`outcome-todo-ledger`) also
-defaults Off. Saved v1 `enabled` remains the hooks authority; the optional
-display preference defaults to true and the optional ledger preference to false.
+Harness owns the **Goal & Todo** runtime. The Todo tools are available whenever
+Harness is loaded. Saved work appears in the session panel, which the user can
+hide or show with `/todo`. **Auto-start Goals** is the only Goal setting in
+`/harness-settings` and defaults to Off. It also controls issue-workflow Goal
+binding and automatic execution of explicitly reopened work. Legacy `enabled`
+and `display` fields do not gate these features. **Project work ledger** remains
+an independent opt-in.
+
 Installation and first load do not write session state, settings, or
 outcome/todo records. Missing state produces no placeholder.
 
@@ -97,21 +97,19 @@ execution plan:
   never completes the outcome automatically.
 - The ledger extends `update_todo` and `get_todo` without changing workflow-owned
   canonical task plans, Goal lifecycle, permissions, or Outcome & Todo
-  display/hooks. Creating or listing a ledger does not associate it with a
+  display mode. Creating or listing a ledger does not associate it with a
   session, inject old work, start a Goal, or execute anything. Explicit
   association, recovery reminders, detaching and UI follow the
   [session association contract](#explicit-session-association).
 - Temporary widget visibility and cleanup remain separate from durable records.
   Hiding or clearing a display never deletes ledger history or completed evidence.
 
-The **Long-term work ledger** setting is a third, independent Outcome & Todo
-control (`outcome-todo-ledger`), default Off, alongside display and hooks. Turning
+The **Project work ledger** setting (`outcome-todo-ledger`) defaults to Off. Turning
 it off removes ledger views, selectors, mutations, and hints; it never deletes
 records, clears the session reference, changes Goal pause/authorization state, or
 disables ordinary Todo/workflow behavior. Turning it on restores the session
 association and rebuilds hints from the stored record, but never adopts a ledger
-in a fresh session. Enabling it does not enable hooks or display; those remain
-separate gates.
+in a fresh session.
 
 ### Explicit session association
 
@@ -134,8 +132,7 @@ The human controls association deliberately:
   completed evidence, and revision sequence. `attach` refuses to silently replace
   a different current association; `switch` is the explicit replacement.
 - `/ledger detach` removes only the session reference. `/ledger show` inspects
-  the current record while the ledger setting is on, including while hooks are
-  off. `/ledger list`, `/ledger show`, `/ledger attach`, and `/ledger switch`
+  the current record while the ledger setting is on. `/ledger list`, `/ledger show`, `/ledger attach`, and `/ledger switch`
   require the ledger setting to be on. While it is off, the list/show commands
   disclose no ledger content; `/ledger detach` remains available to clear the
   reference explicitly.
@@ -147,14 +144,14 @@ The `ledger` payload is not accepted alongside outcome, Todo, or workflow change
 in one call, so a failed task operation cannot partially commit a ledger change.
 `create`, `update`, `list`, and `read` remain unassociated.
 
-While hooks and the ledger setting are on, Harness publishes a bounded recovery
+While the ledger setting is on, Harness publishes a bounded recovery
 reminder built from the durable record after compaction, resume, branch
 restoration, explicit attach, or enabling either gate. The reminder carries the
 overall outcome, totals, and at most a few unfinished items plus their progress,
 next step, or blocker. It is reference only: it does not authorize work, resume a
 paused Goal, change permissions, or supersede the workflow's canonical plan. A
 context filter drops ledger reminders whose `details.ledgerId` no longer matches
-the active reference, so detach, switch, hooks off, or ledger off remove stale
+the active reference, so detach, switch, or ledger off remove stale
 work instructions from the next model request. Display off hides the surface
 without changing the reference.
 
@@ -176,8 +173,7 @@ Workflow-owned rows remain the canonical execution rows: their item/stage/
 status/delivery projection still comes from `workflow-plan.ts` and the canonical
 task plan. The ledger adds context, not an engineering stage model or mirrored
 execution state. Ordinary Todo items are not forced into implement/review/CI
-stages. Association and restoration never start a Goal, enable hooks or display,
-change preferences, or start an agent turn.
+stages. Association and restoration never start a Goal, change preferences, or start an agent turn.
 
 ## Bridge Contract
 
@@ -204,15 +200,13 @@ Goal communicates through the synchronous, mutable event
   `resume`.
 - Clearing a goal emits `pause` for the current goal before the clear entry. It
   never deletes or completes the Harness outcome.
-- A Harness runtime sets `request.enabled` to a boolean whenever it is present.
-  This remains the hook and prompt authority. Hooks enable capture, matching
+- A Harness runtime sets `request.enabled` to true. Harness owns capture, matching
   lifecycle bridge writes, reminders, and automated cleanup; Harness writes
   lifecycle changes only for the matching bound `goalId`.
 - On `inspect`, the optional response `display: true` means Harness actually
   displays the requested `goalId` and its runtime fits the requested widget width.
   Only then is the standalone Goal clock suppressed.
-  Standalone Goal and hidden or unmatched fallback remain available; display and
-  hooks are independent.
+  Standalone Goal and hidden or unmatched fallback remain available.
 - With Harness present, regardless of `enabled`, Goal suppresses its duplicated
   business-outcome prompt text (`Pi Better Goal active objective...` and the
   workflow `Active objective...` line). Workflow instructions, permission and
@@ -229,7 +223,7 @@ of cycles. Harness consumes the public event contract and remains optional.
 
 Goal owns the boolean `autoStartFromOutcome` preference, default Off, exposed in
 `/goal settings` and directly on the `/harness-settings` main page as
-**Auto-start Goal**. After a successful
+**Auto-start Goals**. After a successful
 explicit `update_todo` outcome commit, Harness emits the synchronous
 `pi-better-harness:outcome-accepted` event with the session ID and saved outcome.
 Goal validates the session and requires an active, unbound outcome with objective
@@ -264,21 +258,18 @@ automatic creation, preserving workflow scheduler and completion checks.
   `/ledger attach` or explicitly requests `update_todo` ledger attach; neither
   action copies the record or authorizes old work. Detach and switch remove
   stale context before the next model request.
-- Long-term work ledger is Off by default and independent of hooks/display.
+- Long-term work ledger is Off by default and independent of automatic Goal execution.
   Turning it off keeps stored records and the session reference while stopping
   views, ledger selectors/mutations, and hints; turning it on restores them from
   storage without adopting work in a fresh session.
-- `/goal` does not enable Outcome & Todo hooks. A human must enable hooks in
-  `/harness-settings`; saved outcomes and checklists display by default even with
-  hooks off. Display off does not stop active hooks. `/todo` commands remain
-  available with hooks off for explicit user control.
+- Saving and inspecting a Todo are available with either auto-start setting.
 - The compact surface uses one Todo heading with its caret after Todo and the
   completion count on the left. Matching Goal status and its existing active-time
   clock appear on the right; outcome text is one muted, truncated subtitle. The
   collapsed view shows up to five relevant rows and the expanded view all rows;
   clicks toggle them. `/todo` reveals the compact Overview when display is on and
   returns it to automatic display; the full objective, acceptance criteria, boundaries, and plan
-  remain available through `get_todo` when hooks are enabled. The fullscreen detail
+  remain available through `get_todo`. The fullscreen detail
   view is not part of the normal Todo interaction. No permanent status bar is added,
   and existing critical permission and paused notices remain unchanged.
 - Runtime implementation, settings wiring, installation manifests, and the TUI
@@ -300,7 +291,7 @@ settings. No private extension-runner state is changed.
 
 The retired record's shutdown handlers run with the real session context before
 Harness restores its widget, releasing its factory listeners and timers. The
-mask works in either load order, on reload, and while Outcome & Todo hooks are off.
+mask works in either load order and on reload.
 Without Harness, the old package can load normally. Missing loader APIs or an
 unexpected result shape produce a compatibility warning instead of an unsafe
 mutation. No package files or session histories are deleted or rewritten.
@@ -329,7 +320,7 @@ reload associates the ledger with the session or writes session entries. They
 also confirm the default-Off long-term ledger toggle blocks ledger payloads and
 queries until explicitly enabled, while leaving the existing tools and workflow
 writer unchanged. The existing task-context, workflow-plan, Goal, and
-display/hooks suites remain the boundary regression.
+Todo display suites remain the boundary regression.
 
 Session-association tests drive the registered extension with real settings,
 session entries, tool calls, and durable stores. They prove that an explicit
@@ -342,7 +333,7 @@ rather than the conversation summary, while the context filter removes reminders
 for a detached or replaced ledger. Completion tests prove Outcome completion is
 refused while associated items are open, that completing a Todo does not complete
 the ledger, and that a new unrelated task detaches the old reference. Additional
-integration coverage keeps a paused Goal, independent hooks/display controls, and
+integration coverage keeps a paused Goal, session display controls, and
 a workflow-owned canonical plan unchanged around association and reminder events.
 The compact-header test proves the ledger count line stays within width and adds
 no second widget. Toggle tests prove off removes views, hints, and ledger

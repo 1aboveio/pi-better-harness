@@ -79,7 +79,6 @@ export default function(pi){
     models:[{id:'local',name:'Local test',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
   pi.on('session_start',async(_event,ctx)=>{await pi.setModel(ctx.modelRegistry.find('outcome-todo-test','local'));writeFileSync(${JSON.stringify(ready)}+'.tmp',JSON.stringify({themeMuted:ctx.ui.theme.fg('muted','X')}));renameSync(${JSON.stringify(ready)}+'.tmp',${JSON.stringify(ready)});});
   pi.registerCommand('probe-todo-tools',{description:'Record active tools and registered settings without starting a turn',handler:async()=>{pi.events.emit('legacy-plan:probe',{});pi.events.emit('harness-settings:request',{});writeFileSync(${JSON.stringify(probe)}+'.tmp',JSON.stringify({active:pi.getActiveTools(),all:pi.getAllTools().map(t=>t.name),commands:pi.getCommands().map(c=>c.name),settings:[...controls.values()]}));renameSync(${JSON.stringify(probe)}+'.tmp',${JSON.stringify(probe)});}});
-  pi.registerCommand('emit-goal-start',{description:'Offer a Goal start to Harness without a model turn',handler:async()=>{pi.events.emit('pi-better-harness:task-context',{action:'start',goalId:'goal_ignored',objective:'IGNORED_GOAL_OBJECTIVE'});}});
   pi.registerCommand('seed-bound-goal',{description:'Seed an active Goal bound to the accepted outcome',handler:async(_args,ctx)=>{
     const now = Math.floor(Date.now()/1000);
     pi.appendEntry('pi-better-goal',{version:1,kind:'set',source:'command',at:now,goal:{
@@ -126,7 +125,7 @@ export default function(pi){
   };
   const setSetting = (label, enabled) => {
     command("/harness-settings");
-    wait(frame => /Goal and Todo panel\s+(?:On|Off)/.test(frame) && /Goal and Todo tools\s+(?:On|Off)/.test(frame) &&
+    wait(frame => /Auto-start Goals\s+(?:On|Off)/.test(frame) &&
       /Project work ledger\s+(?:On|Off)/.test(frame));
     selectSetting(label);
     const expected = enabled ? "On" : "Off";
@@ -138,8 +137,6 @@ export default function(pi){
     key("Escape");
     wait(frame => !frame.includes("Harness settings"));
   };
-  const setHooks = enabled => setSetting("Goal and Todo tools", enabled);
-  const setDisplay = enabled => setSetting("Goal and Todo panel", enabled);
   const setLedger = enabled => setSetting("Project work ledger", enabled);
   const probeState = () => {
     rmSync(probe, { force: true });
@@ -202,12 +199,10 @@ export default function(pi){
     const mutedPrefix = readyState.themeMuted.slice(0, readyState.themeMuted.indexOf("X"));
 
     const fresh = probeState();
-    assert.ok(!fresh.active.some(name => ["update_todo", "get_todo"].includes(name)), "fresh default must not expose todo tools");
+    assert.ok(["update_todo", "get_todo"].every(name => fresh.active.includes(name)));
     assert.deepEqual(fresh.settings.filter(item => item.id.startsWith("outcome-todo")), [
-      { id: "outcome-todo-display", label: "Goal and Todo panel", value: "On" },
-      { id: "outcome-todo", label: "Goal and Todo tools", value: "Off" },
       { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "Off" },
-    ], "display defaults On, hooks default Off, and each has its own id and label");
+    ], "only the independent ledger has a Todo setting");
     assert.ok(!fresh.all.includes("work_ledger"), "the unified interface adds no public work_ledger tool");
     assert.deepEqual(readFileSync(legacyEffects, "utf8").trim().split("\n").map(JSON.parse), ["factory", "shutdown"], "legacy factory listeners must be cleaned up before startup");
     assert.doesNotMatch(screen(), /LEGACY_PLAN_WIDGET/);
@@ -217,12 +212,7 @@ export default function(pi){
     command("OFF_PROBE");
     wait(frame => frame.includes("Probe complete"));
     assert.equal(calls().length, 1);
-    assert.ok(!calls()[0].tools?.some(name => ["update_todo", "get_todo"].includes(name)), "disabled tools must not be sent to the provider");
-
-    setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: false });
-    const enabledTools = probeState().active;
-    assert.ok(["update_todo", "get_todo"].every(name => enabledTools.includes(name)));
+    assert.ok(["update_todo", "get_todo"].every(name => calls()[0].tools?.includes(name)));
 
     command("SEED_OUTCOME_ONLY");
     wait(frame => frame.includes("Seed complete") && calls().length === 3);
@@ -239,7 +229,7 @@ export default function(pi){
     assert.doesNotMatch(compact, /^\s*ledger /m, "a fresh session must not adopt a project ledger automatically");
 
     setLedger(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: true });
+    assert.deepEqual(preferences(), { version: 1, ledger: true });
     command(`/ledger attach ${ledgerId}`);
     const withLedger = wait(frame => /^\s*ledger 1\/3 complete · 2 open · next: Ship worker/m.test(frame) && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
     const ledgerRows = withLedger.split("\n");
@@ -291,52 +281,9 @@ export default function(pi){
       "revealing the overview leaves the editor active");
     key("C-u");
 
-    setHooks(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true, ledger: true });
-    assert.ok(!probeState().active.some(name => ["update_todo", "get_todo"].includes(name)));
-    const hooksOff = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame) && frame.includes("Journey task 1"));
-    assertCompactOutcome(hooksOff, { mutedPrefix });
-    command("/emit-goal-start");
-    const ignored = wait(frame => frame.includes("Journey task 1") && !frame.includes("IGNORED_GOAL_OBJECTIVE"));
-    assert.ok(!ignored.includes("IGNORED_GOAL_OBJECTIVE"), "hooks off must not write a Goal-bridged outcome");
-    assert.equal(calls().length, 5, "the ignored Goal offer must not start a turn");
-    command("OFF_PROBE_AGAIN");
-    wait(frame => frame.includes("Probe complete") && calls().length === 6);
-    const hooksOffCall = calls()[5];
-    assert.ok(!hooksOffCall.messages.some(message => message.role === "custom" && String(message.customType ?? "").includes("outcome-reminder")),
-      "hooks off must not inject an outcome reminder into the model context");
-    assert.doesNotMatch(JSON.stringify(hooksOffCall.messages), /Choose work that advances this outcome/, "no reminder text may reach the model with hooks off");
-
-    command("/todo expand");
-    wait(frame => /Journey task 9/.test(frame));
-    command("/todo collapse");
-    wait(frame => /^todo\s+▸\s{2}0\/9 complete/im.test(frame) && !frame.includes("Journey task 9"));
-    command("/todo hide");
-    wait(frame => !headerLine(frame));
-    command("/todo");
-    const hooksOffRevealed = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) &&
-      frame.includes("Journey task 1") && !/^› /m.test(frame));
-    assert.doesNotMatch(hooksOffRevealed, /Goal \(saved\):|↑↓ navigate/, "hooks off still reveals only the compact overview");
-    command("/todo hide");
-    wait(frame => !headerLine(frame));
-    command("/todo show");
-    wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame));
-
-    setDisplay(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: false, ledger: true });
-    assertNoHeader(screen());
-    command("/todo");
-    send("DISPLAY_OFF_TODO_SENTINEL");
-    const displayOff = wait(frame => frame.includes("DISPLAY_OFF_TODO_SENTINEL"));
-    assertNoHeader(displayOff);
-    assert.match(displayOff, /DISPLAY_OFF_TODO_SENTINEL/, "the settings-off display stays hidden when /todo asks to reveal it");
-    key("C-u");
-    setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: false, ledger: true });
-    assert.ok(["update_todo", "get_todo"].every(name => probeState().active.includes(name)), "display off must not disable hooks");
-    assertNoHeader(screen());
-    setDisplay(true);
-    wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame));
+    setSetting("Auto-start Goals", true);
+    setSetting("Auto-start Goals", false);
+    assert.equal(calls().length, 5, "changing auto-start never starts existing work");
 
     command("/seed-bound-goal");
     wait(() => existsSync(boundReady));
@@ -345,23 +292,14 @@ export default function(pi){
     assertNoStandaloneGoal(bound);
     assert.equal(bound.split("\n").filter(line => /^todo(?:\s|$)/.test(line)).length, 1, "one compact header owns the bound Goal");
 
-    setDisplay(false);
+    command("/todo hide");
     const standalone = wait(frame => /^goal active \d+:\d{2}\b/m.test(frame) && !headerLine(frame));
     assert.match(standalone, new RegExp(`^goal active \\d+:\\d{2} ${objective.slice(0, 10)}`, "m"), "display off returns the clock to Goal's standalone line");
-    setDisplay(true);
+    command("/todo show");
     const combined = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && /active\s+\d+:\d{2}\s*$/m.test(frame));
     assertNoStandaloneGoal(combined);
 
-    setHooks(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true, ledger: true });
-    const displayWithoutHooks = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && /active\s+\d+:\d{2}\s*$/m.test(frame));
-    assertCompactOutcome(displayWithoutHooks, { bound: true, mutedPrefix });
-    assertNoStandaloneGoal(displayWithoutHooks);
-
-    setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: true });
-    wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && frame.includes("Journey task 1"));
-    assert.equal(calls().length, 6, "settings, navigation, Goal display and toggles must not start agent turns");
+    assert.equal(calls().length, 5, "showing and hiding the Todo does not start work");
     assert.ok(calls().every(call => !String(call.systemPrompt).includes("LEGACY_PLAN_PROMPT")), "legacy prompt hooks must never run");
 
     rmSync(ready, { force: true });
@@ -372,8 +310,6 @@ export default function(pi){
     assertNoStandaloneGoal(reloaded);
     const reloadedState = probeState();
     assert.deepEqual(reloadedState.settings.filter(item => item.id.startsWith("outcome-todo")), [
-      { id: "outcome-todo-display", label: "Goal and Todo panel", value: "On" },
-      { id: "outcome-todo", label: "Goal and Todo tools", value: "On" },
       { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "On" },
     ], "reload keeps exactly one control per id with its saved value");
     assert.ok(!reloadedState.all.includes("work_ledger"), "reload keeps the unified interface free of a public ledger tool");

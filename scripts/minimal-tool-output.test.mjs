@@ -293,26 +293,12 @@ test("minimal mode suppresses streaming error bodies and inline images without d
 
 test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", async () => {
   const definitions = new Map();
-  const controls = new Map();
   const bus = events();
-  bus.on("harness-settings:register", (candidate) => {
-    if (candidate && Array.isArray(candidate.values) && typeof candidate.change === "function") {
-      controls.set(candidate.id, candidate);
-    }
-  });
   const pi = {
     events: bus, registerTool(definition) { definitions.set(definition.name, definition); },
     registerCommand() {}, registerShortcut() {}, on() {},
   };
   for (const extension of [sandboxExtension, subagentsExtension, backgroundTasksExtension, goalExtension, taskContextExtension, sshExtension]) extension(pi);
-  const ctx = {
-    mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true,
-    sessionManager: { getBranch: () => [] },
-    ui: { notify() {}, setWidget() {}, setStatus() {} },
-  };
-  const todoControl = controls.get("outcome-todo");
-  assert.ok(todoControl, "Outcome & Todo owns its native settings control");
-  await todoControl.change("On", ctx);
   const hook = install();
   hook.setEnabled(true);
   const cases = [

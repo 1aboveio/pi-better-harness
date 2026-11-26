@@ -19,7 +19,7 @@ const callbackDescription = (source: "session" | "default") => [
 
 // Keep each package page beside the controls used for the same task.
 const taskOrder = [
-  "setting:outcome-todo", "setting:outcome-todo-display", "setting:goal-auto-start", "link:goal", "setting:dynamic-workflow", "setting:outcome-todo-ledger",
+  "setting:goal-auto-start", "setting:dynamic-workflow", "setting:outcome-todo-ledger",
   "link:subagents", "link:agents", "link:sandbox",
   "setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID,
   "setting:navigator-view", "setting:navigator-sticky",

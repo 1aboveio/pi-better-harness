@@ -6,7 +6,7 @@ const rows: { key: keyof GoalPreferences; label: string }[] = [
   { key: "autoContinue", label: "Automatic continuation" },
   { key: "conversationalResume", label: "Conversational resume" },
   { key: "pauseOnEscape", label: "Pause on Esc" },
-  { key: "autoStartFromOutcome", label: "Auto-run saved Goals" },
+  { key: "autoStartFromOutcome", label: "Auto-start Goals" },
 ];
 
 export function createGoalSettingsPage(

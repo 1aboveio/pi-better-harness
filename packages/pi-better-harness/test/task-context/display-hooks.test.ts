@@ -57,12 +57,12 @@ async function fixture(t: TestContext, preferences?: { enabled: boolean; display
     active: () => active, render: (width = 80) => widgets.get("background-work-list").render(width) };
 }
 
-test("saved task display defaults on without enabling hooks or writing configuration or session entries", async t => {
+test("saved work displays on startup without writing preferences or session entries", async t => {
   const f = await fixture(t);
   const before = structuredClone(f.entries);
-  assert.equal(f.settings.get("outcome-todo-display").get(), "On");
-  assert.equal(f.settings.get("outcome-todo").get(), "Off");
-  assert.deepEqual(f.active(), ["read"]);
+  assert.equal(f.settings.has("outcome-todo-display"), false);
+  assert.equal(f.settings.has("outcome-todo"), false);
+  assert.deepEqual(f.active(), ["read", "update_todo", "get_todo"]);
   assert.equal(existsSync(f.settingsPath), false);
   for (const width of [40, 100]) {
     const lines = f.render(width);
@@ -71,11 +71,7 @@ test("saved task display defaults on without enabling hooks or writing configura
     assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
     assert.doesNotMatch(lines.join("\n"), /resolve-issues|Outcome \(/);
   }
-  f.events.emit("pi-better-harness:task-context", { action: "pause", goalId: f.goal.goalId });
-  f.events.emit("pi-better-harness:task-context", { action: "start", goalId: "another", objective: "Do not capture" });
   assert.deepEqual(f.entries, before);
-  assert.equal(f.hooks.get("before_agent_start")({}, f.ctx), undefined);
-  await assert.rejects(f.tools.get("update_todo").execute("", { outcome: { objective: "Blocked capture" } }, undefined, undefined, f.ctx), /off/);
   await f.commands.get("todo").handler("hide", f.ctx);
   assert.deepEqual(f.render(), []);
   await f.commands.get("todo").handler("", f.ctx);
@@ -93,36 +89,26 @@ test("an empty session stays invisible without placeholders, state writes, or im
   assert.equal(request.display, false);
 });
 
-test("all display and hooks combinations keep visual ownership independent of capture", async t => {
+test("legacy display and tool flags cannot prevent saving or displaying a Goal", async t => {
   for (const display of [false, true]) for (const enabled of [false, true]) {
     await t.test(`display ${display}, hooks ${enabled}`, async t => {
       const f = await fixture(t, { display, enabled });
       const request: any = { action: "inspect", goalId: f.goal.goalId, width: 80 };
       f.events.emit("pi-better-harness:task-context", request);
-      assert.equal(request.enabled, enabled);
-      assert.equal(request.display, display);
-      assert.equal(f.active().includes("update_todo"), enabled);
-      assert.equal(f.render().length > 0, display);
-      if (enabled) {
-        await f.tools.get("update_todo").execute("", { outcome: { objective: "Updated accepted outcome" } }, undefined, undefined, f.ctx);
-        const update = f.hooks.get("before_agent_start")({}, f.ctx);
-        assert.match(update.message.content, /Updated accepted outcome/);
-      }
+      assert.equal(request.enabled, true);
+      assert.equal(request.display, true);
+      assert.equal(f.active().includes("update_todo"), true);
+      assert.equal(f.render().length > 0, true);
+      await f.tools.get("update_todo").execute("", { outcome: { objective: "Updated accepted outcome" } }, undefined, undefined, f.ctx);
+      const update = f.hooks.get("before_agent_start")({}, f.ctx);
+      assert.match(update.message.content, /Updated accepted outcome/);
     });
   }
 });
 
 test("display changes preserve hooks and unrelated preferences, and hidden Todo releases Goal ownership", async t => {
   const f = await fixture(t, { display: true, enabled: true });
-  await f.settings.get("outcome-todo-display").change("Off", f.ctx);
-  assert.deepEqual(JSON.parse(readFileSync(f.settingsPath, "utf8")), {
-    quietStartup: true,
-    piBetterHarness: { keep: 7, outcomeTodo: { version: 1, enabled: true, display: false, ledger: false } },
-  });
-  assert.ok(f.active().includes("update_todo"));
-  await f.settings.get("outcome-todo-display").change("On", f.ctx);
-  await f.settings.get("outcome-todo").change("Off", f.ctx);
-  assert.ok(f.render().length > 0);
+  const originalSettings = readFileSync(f.settingsPath, "utf8");
   const inspect = (goalId = f.goal.goalId) => {
     const request: any = { action: "inspect", goalId, width: 80 };
     f.events.emit("pi-better-harness:task-context", request);
@@ -135,6 +121,7 @@ test("display changes preserve hooks and unrelated preferences, and hidden Todo 
   assert.equal(inspect().display, false);
   await f.commands.get("todo").handler("show", f.ctx);
   assert.equal(inspect().display, true);
+  assert.equal(readFileSync(f.settingsPath, "utf8"), originalSettings);
 });
 
 test("both real extensions hand the clock back across narrow resize boundaries", async t => {

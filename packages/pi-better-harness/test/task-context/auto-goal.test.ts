@@ -21,7 +21,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ piBetterHarness: {
-    outcomeTodo: { version: 1, enabled: true, ledger: options.ledger ?? false },
+    outcomeTodo: { version: 1, enabled: false, display: false, ledger: options.ledger ?? false },
     goal: { version: 1, autoStartFromOutcome: options.autoStart ?? true },
   } }));
   const entries: any[] = [];
@@ -135,17 +135,16 @@ test("manual controls preserve a checklist without an objective and ignore an em
   assert.equal(h.messages.length, 1);
 });
 
-test("explicit Todo controls work with agent tools off and do not auto-enable them", async t => {
+test("manual controls work with legacy disabled flags and auto-run off", async t => {
   const h = await fixture(t, { autoStart: false });
   await h.update({ goal: accepted });
-  const tools = h.settings.controls().find(control => control.id === "outcome-todo")!;
-  await tools.change("Off", h.ctx);
+  assert.equal(h.goal(), null);
   await h.command("pause");
   assert.equal(h.outcome()?.status, "paused");
   await h.emit("session_tree");
   await h.command("resume");
   assert.equal(h.outcome()?.status, "active");
-  assert.equal(tools.get(), "Off");
+  assert.equal(h.settings.controls().find(control => control.id === "goal-auto-start")?.get(), "Off");
   assert.equal(h.messages.length, 1);
 });
 
@@ -249,7 +248,7 @@ test("auto-start defaults off, enabling does not replay existing state, and disa
   assert.equal(h.goal(), null);
   const before = h.entries.length;
   const control = h.settings.controls().find(item => item.id === "goal-auto-start")!;
-  assert.equal(control.label, "Auto-run saved Goals");
+  assert.equal(control.label, "Auto-start Goals");
   assert.equal(control.get(), "Off");
   await control.change("On", h.ctx);
   assert.equal(control.get(), "On");
@@ -351,6 +350,10 @@ test("explicitly reopening work after a completed Goal continues its Todo with a
   await h.command("complete");
   const objective = "Verify deployment and close the issue";
   await h.update({ outcome: { objective, status: "active" }, todo: [{ step: "Verify deployment", status: "in_progress" }] });
+  assert.equal(h.goal()?.status, "complete");
+  assert.equal(h.outcome()?.goalId, undefined);
+  await h.emit("session_tree");
+  await h.command("resume");
   assert.notEqual(h.goal()?.goalId, first);
   assert.equal(h.goal()?.status, "active");
   assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
@@ -398,6 +401,15 @@ test("reopening the original slash-command Outcome restores its binding without 
   }
   const sent = h.messages.length;
   await h.update({ outcome: { objective, status: "active" } });
+  assert.equal(h.goal()?.status, "complete");
+  await h.emit("session_tree");
+  await assert.rejects(h.update({ todo: [] }), /rush-issues owns the task plan/);
+  assert.deepEqual(workflowBinding(h.entries), plan);
+  await h.command("pause");
+  assert.equal(h.goal()?.status, "paused");
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(h.messages.length, sent);
+  await h.command("resume");
   const reopened = h.goal()!;
   assert.equal(reopened.status, "active");
   assert.notEqual(reopened.goalId, original.goalId);
@@ -406,12 +418,12 @@ test("reopening the original slash-command Outcome restores its binding without 
   assert.deepEqual(workflowBinding(h.entries), plan);
   assert.equal(boundPlanPath(h.entries, currentWorkflowOwner(h.entries)!), plan.path);
   assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
-  assert.equal(h.messages.length, sent);
+  assert.equal(h.messages.length, sent + 1);
 
   await h.command("complete");
   await h.update({ outcome: { objective: "/skill:rush-issues release deployment", status: "active" } });
   assert.equal(h.goal()?.status, "complete");
-  assert.equal(h.messages.length, sent);
+  assert.equal(h.messages.length, sent + 1);
 });
 
 test("Goal completion checks the associated work ledger in a headless session", async t => {

@@ -13,7 +13,7 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-ssh` for short remote commands over reusable SSH connections.
 - `pi-better-goal` for explicit triggers, pause/resume, and background-aware continuation.
-- Harness-owned Goal & Todo for session context and checklist progress. Saved state displays by default; its hooks start off.
+- Harness-owned Goal & Todo for session context and checklist progress. Saved work appears in the panel. Automatic Goal execution defaults to Off.
 
 `pi-better-read-aloud` is intentionally not included yet.
 
@@ -26,13 +26,11 @@ saved Goal starts running with `/goal resume`. Use `/goal pause` to interrupt
 foreground work and hold continuation. Both commands use the current Todo,
 including checklists saved before a Goal was attached.
 
-| Setting in `/harness-settings` | Default | Effect |
-| --- | --- | --- |
-| Goal and Todo tools | Off | Lets the agent save the Goal, acceptance criteria, boundaries and Todo steps. |
-| Goal and Todo panel | On | Shows saved work even when the tools are off. |
-| Auto-run saved Goals | Off | Starts execution after an explicit save of a new Goal with nonempty acceptance criteria, if the tools are on and no unfinished Goal owns execution. |
-| Goal execution settings | Open | Controls automatic continuation, conversational resume and pause on Escape. |
-| Project work ledger | Off | Lets the session attach a durable project checklist. |
+`/harness-settings` has one Goal setting, **Auto-start Goals** (default **Off**).
+Turn it on to start a newly saved Goal with acceptance criteria, restart explicitly
+reopened work, or bind a Goal when invoking `/skill:rush-issues` or
+`/skill:resolve-issues`. Changing the switch takes effect on the next such action.
+With it off, use `/goal resume` to start saved work manually.
 
 The panel shows `goal saved` before execution starts and `goal active` with a
 clock while it runs. Use `/todo` to reveal the panel and `/todo expand` to see
@@ -50,8 +48,7 @@ It shows tasks on the left and the workflow diagram on the right. Below 36 termi
 columns, the diagram follows the task list.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
-revision checks stay unchanged; skills continue using their own records when the
-optional interface is off. See the [usage guide](docs/usage.md#goal--todo).
+revision checks continue to govern workflow-owned plans. See the [usage guide](docs/usage.md#goal--todo).
 
 ### Dynamic workflows
 
@@ -128,8 +125,7 @@ Cloud provider and requires Pi's `registerVirtualModel` API.
 
 After a normal bundle install or `pi update`, Harness masks any separately loaded
 `pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
-or prompt hooks. This applies in either load order, including when Goal & Todo
-hooks are off. The old registration and cached files may remain, but are inactive while
+or prompt hooks. This applies in either load order. The old registration and cached files may remain, but are inactive while
 Harness is loaded. Settings and session history are not rewritten. The explicit
 installer above removes the old registration in its selected scope instead.
 
@@ -218,7 +214,7 @@ pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 The bundled harness provides `/harness-settings`, using Pi's native settings
 list. Work planning comes first, followed by delegation and sandbox access,
 background waits and completion delivery, then display settings. It opens
-the settings screens of loaded Sandbox, Subagents, and Goal
+the settings screens of loaded Sandbox and Subagents
 packages without duplicating their configuration, plus the **Agent catalog** shortcut
 to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.

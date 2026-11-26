@@ -475,6 +475,11 @@ test("release_workflow lets a quiet unit through and fails open when the schedul
 test("invoking rush-issues or resolve-issues with no goal binds one without re-running the skill", async (t) => {
   const h = setup(t);
   await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+  await h.commands.get("goal")!.handler("settings auto-run off", h.ctx);
+  await h.handlers.get("input")?.({ source: "interactive", text: "/skill:rush-issues #300" }, h.ctx);
+  assert.equal(currentGoalSnapshot(h.ctx), null);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  await h.commands.get("goal")!.handler("settings auto-run on", h.ctx);
   await h.handlers.get("input")?.({ source: "interactive", text: "  /skill:rush-issues #312 --fast  " }, h.ctx);
   const goal = currentGoalSnapshot(h.ctx);
   assert.equal(goal?.status, "active");
@@ -501,6 +506,7 @@ test("auto-bind skips other skills, synthetic input, and completed goals are rep
 
   const h = setup(t);
   await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+  await h.commands.get("goal")!.handler("settings auto-run on", h.ctx);
   await h.handlers.get("input")?.({ source: "extension", text: "/skill:rush-issues #1" }, h.ctx);
   assert.equal(currentGoalSnapshot(h.ctx), null);
   await h.handlers.get("input")?.({ source: "interactive", text: "/skill:rush-issues #1" }, h.ctx);

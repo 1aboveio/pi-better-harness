@@ -11,8 +11,8 @@ export const controlCopy = new Map<string, SettingCopy>([
     description: "When the session is waiting for a local task with callbacks on, Pi asks the main agent to review it after this long without progress. Each review shows elapsed time and the last check or output.",
   }],
   ["goal-auto-start", {
-    label: "Auto-run saved Goals",
-    description: "With Goal and Todo tools on, start work when Pi saves a new Goal with acceptance criteria. Use /goal resume to start manually.",
+    label: "Auto-start Goals",
+    description: "Start a Goal when Pi saves acceptance criteria, reopens completed work, or runs an issue workflow. When off, use /goal resume to start saved work.",
   }],
   ["tool-call-guard", {
     label: "Foreground wait guard",

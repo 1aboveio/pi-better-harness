@@ -364,10 +364,8 @@ async function extensionFixture(t: TestContext) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
   let activeTools = ["read"];
-  let setting: SettingControl | undefined;
   let ledgerSetting: SettingControl | undefined;
   events.on("harness-settings:register", (control: SettingControl) => {
-    if (control?.id === "outcome-todo") setting = control;
     if (control?.id === "outcome-todo-ledger") ledgerSetting = control;
   });
   const ctx = {
@@ -407,7 +405,6 @@ async function extensionFixture(t: TestContext) {
     ctx,
     start,
     reload,
-    setting: () => setting,
     ledgerSetting: () => ledgerSetting,
     active: () => activeTools,
   };
@@ -415,15 +412,6 @@ async function extensionFixture(t: TestContext) {
 
 test("the unified update_todo ledger payload preserves items and history across reload without adopting session work", async (t) => {
   const f = await extensionFixture(t);
-  assert.deepEqual(f.active(), ["read"], "the project work ledger stays inactive while hooks are off");
-  await assert.rejects(
-    f.tools.get("update_todo")!.execute("create-disabled", {
-      ledger: { action: "create", outcome: "Should not persist" },
-    }, undefined, undefined, f.ctx),
-    /Goal and Todo tools are off/,
-  );
-
-  await f.setting()!.change("On", f.ctx);
   assert.deepEqual(f.active(), ["read", "update_todo", "get_todo"]);
   const updateTodo = f.tools.get("update_todo")!;
   const getTodo = f.tools.get("get_todo")!;

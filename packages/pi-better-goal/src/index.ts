@@ -294,7 +294,7 @@ function formatPreferences(preferences: GoalPreferences): string {
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
     `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
-    `Auto-run saved Goals setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
+    `Auto-start Goals setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -1002,28 +1002,44 @@ export default function (pi: ExtensionAPI): void {
     if (latestSnapshot) collectIfPossible();
   });
 
+  // Both auto-start and manual resume must recover the same command and workflow checks.
+  const prepareSavedGoal = (ctx: ExtensionContext, objective: string, previous?: GoalSnapshot, handoffOwner?: string) => {
+    const invalid = validateObjective(objective);
+    if (invalid) return invalid;
+    const owner = getWorkflow(ctx);
+    if (owner && !workflowAvailable(owner)) return `Restore /skill:${owner.name} before continuing its Todo.`;
+    if (previous) {
+      const blocker = resumeBlocker(previous, ctx);
+      if (blocker) return blocker;
+    }
+    if (objective.startsWith("/") && (!previous?.command || previous.objective.trim() !== objective)) {
+      return "Reinvoke the original command to continue this Goal.";
+    }
+    const command = previous?.command ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
+    const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
+    const restoredOwner = previous?.command ? goalWorkflowOwner(goal) : null;
+    if ((handoffOwner && restoredOwner?.name !== handoffOwner) ||
+        (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path))) {
+      return "Reinvoke the original workflow to continue its Todo.";
+    }
+    return { goal, restore: owner ? null : restoredOwner };
+  };
+
   const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
     const ctx = currentCtx;
     const event = value as Partial<OutcomeAcceptedEvent> | null;
-    if (!ctx || !event ||
+    if (!preferences.autoStartFromOutcome || !ctx || !event ||
         typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId()) return;
     const current = getGoal(ctx);
     if (current && current.status !== "complete") return;
     const reopenedGoal = current?.status === "complete" && current.goalId === event.reopenedGoalId ? current : undefined;
-    if ((!reopenedGoal && !preferences.autoStartFromOutcome) || !canStartGoalFromOutcome(event.outcome, reopenedGoal)) return;
-    const objective = event.outcome.objective.trim();
-    if (validateObjective(objective)) return;
-    const owner = getWorkflow(ctx);
-    if (owner && !workflowAvailable(owner)) return;
-    const retainedCommand = reopenedGoal?.command;
-    if (retainedCommand && !commandAvailable(pi, retainedCommand)) return;
-    const command = retainedCommand ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
-    const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
-    const restoredOwner = retainedCommand ? goalWorkflowOwner(goal) : null;
-    if (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path)) return;
-    setGoal(goal, ctx, "runtime", "bind");
-    if (restoredOwner && !owner) recordWorkflow(restoredOwner, true);
-    resetContinuationState(goal);
+    if (event.reopenedGoalId && !reopenedGoal) return;
+    if (!canStartGoalFromOutcome(event.outcome, reopenedGoal)) return;
+    const prepared = prepareSavedGoal(ctx, event.outcome.objective.trim(), reopenedGoal);
+    if (typeof prepared === "string") return;
+    setGoal(prepared.goal, ctx, "runtime", "bind");
+    if (prepared.restore) recordWorkflow(prepared.restore, true);
+    resetContinuationState(prepared.goal);
   });
 
   const inspectGoal = (ctx: ExtensionContext) => {
@@ -1059,20 +1075,16 @@ export default function (pi: ExtensionAPI): void {
         warn(`This Goal is ${savedGoal.status}.`);
         return;
       }
-      if (savedGoal.goalId || handoffOwner || savedGoal.objective.startsWith("/")) {
+      const previous = current?.status === "complete" && current.goalId === savedGoal.reopenedGoalId ? current : undefined;
+      if (savedGoal.goalId || (savedGoal.reopenedGoalId && !previous)) {
         warn("This task has a previous execution or workflow binding. Reinvoke its original Goal or workflow to continue.");
         return;
       }
-      const invalid = validateObjective(savedGoal.objective);
-      if (invalid) { warn(invalid); return; }
-      const owner = getWorkflow(ctx);
-      if (owner && !workflowAvailable(owner)) {
-        warn(`Restore /skill:${owner.name} before continuing its Todo.`);
-        return;
-      }
-      const command = owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
-      const goal = createGoalSnapshot(savedGoal.objective, null, undefined, command ?? undefined);
+      const prepared = prepareSavedGoal(ctx, savedGoal.objective, previous, handoffOwner);
+      if (typeof prepared === "string") { warn(prepared); return; }
+      const { goal } = prepared;
       setGoal(action === "pause" ? goalWithStatus(goal, "paused") : goal, ctx, "command", "adopt");
+      if (prepared.restore) recordWorkflow(prepared.restore, true);
       if (action === "resume") queueGoalContinuation(goal, ctx);
     } else if (action === "resume") {
       if (!current) { warn("No saved Goal or unfinished Todo to resume."); return; }
@@ -1112,21 +1124,17 @@ export default function (pi: ExtensionAPI): void {
       ctx.ui.notify(`${formatPreferences(preferences)}\nPreferences: ${goalPreferencesPath()}`, "info");
     }
   };
-  const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
   const autoStartControl = {
     id: "goal-auto-start",
-    label: "Auto-run saved Goals",
+    label: "Auto-start Goals",
     values: ["Off", "On"],
     get: () => preferences.autoStartFromOutcome ? "On" : "Off",
     async change(value: string, ctx: ExtensionCommandContext) {
-      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-run saved Goals mode.");
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-start Goals mode.");
       await changePreference(ctx, "autoStartFromOutcome", value === "On");
     },
   };
-  const registerSettings = () => {
-    pi.events.emit("harness-settings:register", contribution);
-    pi.events.emit("harness-settings:register", autoStartControl);
-  };
+  const registerSettings = () => pi.events.emit("harness-settings:register", autoStartControl);
   const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
 
@@ -1503,10 +1511,9 @@ export default function (pi: ExtensionAPI): void {
         try {
           const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path, registeredSkillPath);
           if (owner) {
-            // Without a goal nothing re-prompts the coordinator when it stops early, so bind one now
-            // exactly as `/goal <this invocation>` would. The user's message already runs the skill.
+            // The input already runs the skill. Opt-in supervision must not send it twice.
             const existing = getGoal(ctx);
-            if (AUTO_BIND_SKILLS.has(skillName) && (!existing || existing.status === "complete")) {
+            if (preferences.autoStartFromOutcome && AUTO_BIND_SKILLS.has(skillName) && (!existing || existing.status === "complete")) {
               try {
                 startOrReplaceGoal(event.text.trim(), null, ctx, "command", false);
               } catch (error) {

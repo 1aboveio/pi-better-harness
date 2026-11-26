@@ -15,9 +15,7 @@ async function fixture(t: TestContext) {
   const hooks = new Map<string, any>();
   const events = new EventEmitter();
   let active = ["read"];
-  let setting: any;
   let turns = 0;
-  events.on("harness-settings:register", value => { if (value.id === "outcome-todo") setting = value; });
   const ctx: any = { cwd: dir, mode: "print", hasUI: false, sessionManager: { getBranch: () => entries }, ui: { setWidget() {}, setStatus() {}, notify() {} } };
   extension({
     events,
@@ -36,17 +34,16 @@ async function fixture(t: TestContext) {
     rmSync(dir, { recursive: true, force: true });
   });
   await hooks.get("session_start")({}, ctx);
-  await setting.change("On", ctx);
   const update = (input: unknown) => tools.get("update_todo").execute("update", input, undefined, undefined, ctx);
   const get = async () => (await tools.get("get_todo").execute("get", {}, undefined, undefined, ctx)).details;
   const trigger = (action: string, status: string) => {
     entries.push({ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: "goal-one", objective: "Original user invocation", status } } });
     events.emit("pi-better-harness:task-context", { action, goalId: "goal-one", objective: "Original user invocation" });
   };
-  return { entries, ctx, hooks, update, get, trigger, setting, turns: () => turns };
+  return { entries, ctx, hooks, update, get, trigger, turns: () => turns };
 }
 
-test("refining a Goal outcome preserves its binding; re-enable reconciles completion that happened while off", async t => {
+test("refining a Goal outcome preserves its binding; branch restore reconciles completion", async t => {
   const f = await fixture(t);
   f.trigger("start", "active");
   await f.update({ outcome: { objective: "Customers can complete checkout", doneWhen: ["A payment succeeds"] } });
@@ -58,9 +55,8 @@ test("refining a Goal outcome preserves its binding; re-enable reconciles comple
   assert.deepEqual((await f.get()).outcome.doneWhen, ["A payment succeeds"]);
   f.trigger("start", "active");
   assert.equal((await f.get()).outcome.objective, "Customers can complete checkout", "a replayed trigger must not replace the refined outcome");
-  await f.setting.change("Off", f.ctx);
   f.trigger("complete", "complete");
-  await f.setting.change("On", f.ctx);
+  await f.hooks.get("session_tree")({}, f.ctx);
   assert.equal((await f.get()).outcome.status, "complete");
   assert.match(f.hooks.get("before_agent_start")({}, f.ctx).message.content, /Goal \(complete\)/);
   assert.equal(f.turns(), 0, "restoring task memory must not start or resume an agent turn");

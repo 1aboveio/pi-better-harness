@@ -14,10 +14,11 @@ export interface OutcomeInput {
 export interface Outcome extends OutcomeInput {
   status: "active" | "paused" | "complete" | "cancelled";
   goalId?: string;
+  reopenedGoalId?: string;
 }
 
 export function prepareOutcome(current: Outcome | null, input: OutcomeInput, newTask = false): Outcome {
-  if (typeof input.objective !== "string" || !input.objective.trim()) throw new Error("Outcome objective must not be empty.");
+  if (typeof input.objective !== "string" || !input.objective.trim()) throw new Error("Goal objective must not be empty.");
   for (const key of ["doneWhen", "boundaries"] as const) {
     if (input[key] !== undefined && (!Array.isArray(input[key]) || !input[key]!.every(value => typeof value === "string"))) {
       throw new Error(`Goal ${key} must be a list of strings.`);
@@ -49,6 +50,7 @@ export function restoreOutcome(
     try {
       const parsed = prepareOutcome(null, data.outcome);
       if (typeof data.outcome.goalId === "string") parsed.goalId = data.outcome.goalId;
+      if (typeof data.outcome.reopenedGoalId === "string") parsed.reopenedGoalId = data.outcome.reopenedGoalId;
       outcome = parsed;
       lastOutcomeIndex = index;
     } catch {
@@ -59,6 +61,7 @@ export function restoreOutcome(
   if (outcome?.status === "active" && goal?.status === "complete" && outcome.goalId === goal.goalId) {
     const previous = reconstructGoalSnapshot(entries.slice(0, lastOutcomeIndex));
     if (previous?.goalId === goal.goalId && previous.status === "complete") {
+      outcome.reopenedGoalId = goal.goalId;
       delete outcome.goalId;
       if (outcome.source === "goal") delete outcome.source;
     }

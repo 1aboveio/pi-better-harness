@@ -14,7 +14,7 @@ import { workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
-import { changeOutcomeTodoPreference, parseOutcomeTodoPreferences } from "./preferences.js";
+import { changeLedgerPreference, parseOutcomeTodoPreferences } from "./preferences.js";
 import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
 import { OUTCOME_ACCEPTED_EVENT, type TaskContextRequest } from "pi-better-goal/src/task-context.ts";
@@ -186,8 +186,6 @@ function reopeningPlanOwner(pi: ExtensionAPI, ctx: ExtensionContext, goal: GoalS
 
 export default function taskContextExtension(pi: ExtensionAPI): void {
   initializeNavigatorPanels(pi);
-  let enabled = false;
-  let display = true;
   let ledgerEnabled = false;
   let sessionContext: ExtensionContext | undefined;
   let outcome: Outcome | null = null;
@@ -195,12 +193,12 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   const syncTools = (): void => {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
     const active = pi.getActiveTools().filter(name => !taskTools.includes(name as typeof taskTools[number]));
-    if (enabled) active.push("update_todo");
-    if (enabled || dynamic.run()) active.push("get_todo");
+    active.push("update_todo", "get_todo");
     if (dynamic.available()) active.push("dynamic_workflow");
     pi.setActiveTools(active);
   };
   const saveOutcome = (next: Outcome): void => {
+    if (next.goalId) delete next.reopenedGoalId;
     outcome = next;
     pi.appendEntry(OUTCOME_ENTRY, { version: 1, outcome: next });
     refresh(true);
@@ -225,7 +223,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   };
   const scheduleCancelledRowsClear = (): void => {
     cancelCancelledRowsTimer();
-    if (!enabled || !rushPlan) return;
+    if (!rushPlan) return;
     const delay = cancelledRowsClearDelay(rushPlan);
     if (delay === null) return;
     const timer = setTimeout(() => {
@@ -238,13 +236,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     timer.unref?.();
   };
   const observeCancellations = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext): void => {
-    if (!enabled) return;
     observeCancelledRows(plan, binding, ctx.sessionManager.getBranch(), (type, data) => pi.appendEntry(type, data));
   };
   const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
     displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
       ? owner.name : null;
-    if (!enabled && !display) return;
     if (displayedWorkflowOwner) {
       cancelCancelledRowsTimer();
       rushBinding = null;
@@ -303,7 +299,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     event?: { willRetry?: boolean },
   ): void => {
-    if (!enabled || !ledgerEnabled || !ledgerId) return;
+    if (!ledgerEnabled || !ledgerId) return;
     try {
       rememberLedger(ctx);
       if (!ledger) return;
@@ -467,14 +463,12 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     const trigger = reconstructGoalSnapshot(entries);
     outcome = restoreOutcome(entries, trigger);
     restoreLedgerState(ctx);
-    if (enabled) {
-      if (!outcome && trigger && trigger.status !== "complete") {
-        outcome = { objective: trigger.objective, source: "goal", goalId: trigger.goalId, status: trigger.status === "active" ? "active" : "paused" };
-      } else if (outcome?.goalId && outcome.status !== "complete" && outcome.status !== "cancelled") {
-        const status = trigger?.goalId !== outcome.goalId ? "paused"
-          : trigger.status === "complete" ? "complete" : trigger.status === "active" ? "active" : "paused";
-        outcome = { ...outcome, status };
-      }
+    if (!outcome && trigger && trigger.status !== "complete") {
+      outcome = { objective: trigger.objective, source: "goal", goalId: trigger.goalId, status: trigger.status === "active" ? "active" : "paused" };
+    } else if (outcome?.goalId && outcome.status !== "complete" && outcome.status !== "cancelled") {
+      const status = trigger?.goalId !== outcome.goalId ? "paused"
+        : trigger.status === "complete" ? "complete" : trigger.status === "active" ? "active" : "paused";
+      outcome = { ...outcome, status };
     }
     cancelCompletedPlanClear();
     cancelCancelledRowsTimer();
@@ -485,11 +479,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     rushBinding = binding && (!displayedWorkflowOwner || binding.owner === displayedWorkflowOwner) ? binding : null;
     rushPlan = null;
     rushError = null;
-    if ((enabled || display) && rushBinding) loadRushPlan(ctx);
+    if (rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     expanded = state.expanded;
     refresh(true);
-    if (enabled) scheduleCompletedPlanClear();
+    scheduleCompletedPlanClear();
   };
 
   const persistPlan = (plan: PlanSnapshot): void => {
@@ -525,7 +519,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         const widget = createPlanWidget(
           (width: number, disclosure?: string): string[] => {
             dynamicFrame = undefined;
-            if (!display || displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
+            if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
             const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
             const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
             const header: CompactTaskHeader = {
@@ -600,7 +594,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Goal and Todo tools are off. Enable them in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
       const raw = params as {
         explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; goal?: OutcomeInput; outcome?: OutcomeInput;
@@ -634,7 +627,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       let todoOwner = owner;
       const nextOutcome = input.goal ? prepareOutcome(outcome, input.goal, input.newTask) : null;
       if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
-      let reopenedGoalId: string | undefined;
       if (nextOutcome?.goalId) {
         const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
         if (goal?.goalId === nextOutcome.goalId) {
@@ -647,13 +639,18 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           }
           if (nextOutcome.status === "active" && goal.status === "complete") {
             if (input.goal?.status === "active") {
-              reopenedGoalId = nextOutcome.goalId;
-              if (input.todo !== undefined && !todoOwner) todoOwner = reopeningPlanOwner(pi, ctx, goal);
+              nextOutcome.reopenedGoalId = nextOutcome.goalId;
             }
             delete nextOutcome.goalId;
             if (nextOutcome.source === "goal") delete nextOutcome.source;
           }
         }
+      }
+      // A reopened workflow keeps its plan while waiting for manual resume.
+      const reopenedGoalId = input.newTask ? undefined : nextOutcome?.reopenedGoalId ?? outcome?.reopenedGoalId;
+      if (input.todo !== undefined && reopenedGoalId && !todoOwner) {
+        const prior = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+        if (prior?.goalId === reopenedGoalId) todoOwner = reopeningPlanOwner(pi, ctx, prior);
       }
       if (input.todo !== undefined && todoOwner) throw new Error(`${todoOwner} owns the task plan. Send workflow instead of todo.`);
       const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
@@ -670,7 +667,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         saveOutcome(nextOutcome);
         const sessionId = ctx.sessionManager.getSessionId?.();
         if (typeof sessionId === "string") {
-          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, reopenedGoalId, outcome: { ...nextOutcome } });
+          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, reopenedGoalId: nextOutcome.reopenedGoalId, outcome: { ...nextOutcome } });
         }
       };
       if (!input.workflow && input.todo === undefined) {
@@ -774,7 +771,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     promptSnippet: "Inspect the common work plan: Goal, Todo or workflow rows, and the associated durable ledger",
     parameters: getTodoParameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled && !dynamic.run()) throw new Error("Goal and Todo tools are off. Enable them in /harness-settings.");
       const input = params as { ledger?: GetTodoLedgerInput };
       if (input.ledger !== undefined && !ledgerEnabled) {
         throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
@@ -933,33 +929,27 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const setting = (key: "enabled" | "display" | "ledger") => ({
-    id: key === "enabled" ? "outcome-todo" : key === "display" ? "outcome-todo-display" : "outcome-todo-ledger",
-    label: key === "enabled" ? "Goal and Todo tools"
-      : key === "display" ? "Goal and Todo panel" : "Long-term work ledger",
+  const ledgerSetting = {
+    id: "outcome-todo-ledger",
+    label: "Long-term work ledger",
     values: ["Off", "On"],
-    get: () => (key === "enabled" ? enabled : key === "display" ? display : ledgerEnabled) ? "On" : "Off",
+    get: () => ledgerEnabled ? "On" : "Off",
     async change(value: string, ctx: ExtensionContext) {
-      if (value !== "On" && value !== "Off") throw new Error("Invalid Goal and Todo mode.");
-      const preferences = updateHarnessSetting("outcomeTodo", current => changeOutcomeTodoPreference(current, key, value === "On"));
-      enabled = preferences.enabled;
-      display = preferences.display;
+      if (value !== "On" && value !== "Off") throw new Error("Invalid work ledger mode.");
+      const preferences = updateHarnessSetting("outcomeTodo", current => changeLedgerPreference(current, value === "On"));
       ledgerEnabled = preferences.ledger;
-      syncTools();
-      if (!enabled) { cancelCompletedPlanClear(); cancelCancelledRowsTimer(); }
-      installWidget(ctx);
-      restore(ctx);
-      if (enabled && ledgerEnabled) sendLedgerReminder(ctx);
+      rememberLedger(ctx);
+      if (ledgerEnabled) sendLedgerReminder(ctx);
     },
-  });
-  const controls = [dynamic.setting, setting("display"), setting("enabled"), setting("ledger")];
+  };
+  const controls = [dynamic.setting, ledgerSetting];
   const registerSettings = () => controls.forEach(control => pi.events.emit("harness-settings:register", control));
   const unsubscribeSettings = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
   const unsubscribeTask = pi.events.on("pi-better-harness:task-context", (event: unknown) => {
     if (!event || typeof event !== "object") return;
     const request = event as TaskContextRequest;
-    request.enabled = enabled;
+    request.enabled = true;
     if (request.action === "saved" || request.action === "adopt") {
       const saved = outcome ?? (currentPlan?.steps.some(step => step.status !== "completed")
         ? { objective: "Complete the current Todo.", status: "active" as const } : null);
@@ -972,7 +962,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       return;
     }
     if (request.action === "audit") {
-      if (enabled && outcome?.goalId && outcome.goalId === request.goalId) {
+      if (outcome?.goalId && outcome.goalId === request.goalId) {
         request.objective = outcome.objective;
         request.doneWhen = outcome.doneWhen?.filter(criterion => criterion.trim());
         if (sessionContext) {
@@ -1002,12 +992,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       const goal = sessionContext ? reconstructGoalSnapshot(sessionContext.sessionManager.getBranch()) : null;
       const run = !displayedWorkflowOwner && !rushBinding ? dynamic.run() : undefined;
       const displayedGoal = run ? run.goalId : outcome?.goalId;
-      request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && display && displayMode !== "hidden" &&
+      request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && displayMode !== "hidden" &&
         request.goalId === displayedGoal && goal?.goalId === request.goalId && typeof request.width === "number" &&
         canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
     }
     if (request.action === "inspect") return;
-    if (!enabled && !(request.manual && (request.action === "pause" || request.action === "resume"))) return;
     if (request.action === "bind") {
       if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
         saveOutcome({ ...outcome, goalId: request.goalId });
@@ -1033,11 +1022,9 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     try {
       dynamic.loadMode();
       const preferences = parseOutcomeTodoPreferences(readHarnessSetting("outcomeTodo"));
-      enabled = preferences.enabled;
-      display = preferences.display;
       ledgerEnabled = preferences.ledger;
     } catch (error) {
-      enabled = false; display = true; ledgerEnabled = false;
+      ledgerEnabled = false;
       if (ctx.hasUI) ctx.ui.notify(String(error), "warning");
     }
     installWidget(ctx);
@@ -1063,7 +1050,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       const message = messages[index] as { role?: string; customType?: string; details?: unknown };
       if (message.role === "custom" && message.customType === WORK_LEDGER_REMINDER_MESSAGE) lastReminder = index;
     }
-    const kept = enabled && ledgerEnabled && ledgerId && lastReminder >= 0 &&
+    const kept = ledgerEnabled && ledgerId && lastReminder >= 0 &&
       ((messages[lastReminder] as { details?: { ledgerId?: unknown } }).details)?.ledgerId === ledgerId
       ? lastReminder : -1;
     const filtered = messages.filter((message, index) => {
@@ -1079,7 +1066,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     const sections = supportsPromptSections(event.systemPromptOptions) ? (event.systemPromptOptions as PromptSectionTarget).sections : undefined;
     if (guide && sections) sections.dynamic_workflow = guide;
     const prompt = guide && !sections ? { systemPrompt: event.systemPrompt + "\n\n" + guide } : undefined;
-    if (!enabled || !outcome) return prompt;
+    if (!outcome) return prompt;
     const content = formatOutcome(outcome);
     // These messages are persisted by Pi. Never rebuild or remove them in context.
     const previous = [...activeSessionEntries(ctx)].reverse().find(entry =>

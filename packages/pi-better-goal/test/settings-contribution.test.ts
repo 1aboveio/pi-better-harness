@@ -6,18 +6,17 @@ import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, Theme } 
 import extension from "./extension-fixture.js";
 import { goalPreferencesPath, readGoalPreferences } from "../src/preferences.js";
 
-type Contribution = { id: string; label: string; command: string; open(ctx: ExtensionCommandContext): Promise<void> };
 type Control = { id: string; label: string; values: string[]; get(): string; change(value: string, ctx: ExtensionCommandContext): Promise<void> };
 const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text,
   bold: (text: string) => text, inverse: (text: string) => text } as Theme;
 
-test("goal settings discovery uses the standalone opener and shared preferences, and stops replying after shutdown", async () => {
+test("Harness exposes only automatic Goal start and shares the standalone command preference, and stops replying after shutdown", async () => {
   const unrelated = { theme: "light", piBetterHarness: { callbacks: { mode: "immediate" } } };
   const rawSettings = JSON.stringify(unrelated);
   writeFileSync(goalPreferencesPath(), rawSettings);
   const events = createEventBus();
-  const registrations: Contribution[] = [];
-  events.on("harness-settings:register", (data) => registrations.push(data as Contribution));
+  const registrations: Control[] = [];
+  events.on("harness-settings:register", (data) => registrations.push(data as Control));
   const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
   const handlers = new Map<string, Function>();
   const entries: unknown[] = [];
@@ -35,17 +34,13 @@ test("goal settings discovery uses the standalone opener and shared preferences,
     sendUserMessage() { assert.fail("settings must not send user messages"); },
   } as unknown as ExtensionAPI;
   extension(pi);
-  const links = registrations.filter(item => item.command);
-  assert.equal(links.length, 1);
-  const contribution = links[0]!;
-  assert.equal(contribution.id, "goal");
-  assert.equal(contribution.label, "Goal");
-  assert.equal(contribution.command, "/goal settings");
-  const later: Contribution[] = [];
-  events.on("harness-settings:register", (data) => later.push(data as Contribution));
+  assert.deepEqual(registrations.filter(item => item.id !== "navigator-sticky").map(item => item.id), ["goal-auto-start"]);
+  const later: Control[] = [];
+  events.on("harness-settings:register", (data) => later.push(data as Control));
   events.emit("harness-settings:request", undefined);
   events.emit("harness-settings:request", undefined);
-  assert.deepEqual(later.filter(item => item.command), [contribution, contribution]);
+  const control = registrations.find(item => item.id === "goal-auto-start")!;
+  assert.deepEqual(later.filter(item => item.id === "goal-auto-start"), [control, control]);
 
   const pages: string[] = [];
   let toggle = false;
@@ -67,23 +62,21 @@ test("goal settings discovery uses the standalone opener and shared preferences,
       },
     },
   } as unknown as ExtensionCommandContext;
-  await contribution.open(ctx);
   await commands.get("goal")!.handler("settings", ctx);
-  assert.equal(pages.length, 2);
-  assert.equal(pages[0], pages[1]);
-  assert.equal(closed, 2);
+  assert.equal(pages.length, 1);
+  assert.equal(closed, 1);
   assert.equal(readFileSync(goalPreferencesPath(), "utf8"), rawSettings, "opening does not persist defaults or modify other settings");
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 
   toggle = true;
-  await contribution.open(ctx);
+  await commands.get("goal")!.handler("settings", ctx);
   assert.equal(readGoalPreferences().autoContinue, false);
   toggle = false;
   await commands.get("goal")!.handler("settings", ctx);
   assert.match(pages.at(-1)!, /Automatic continuation\s+off/i);
   await commands.get("goal")!.handler("settings auto-continue on", ctx);
-  await contribution.open(ctx);
+  await commands.get("goal")!.handler("settings", ctx);
   assert.match(pages.at(-1)!, /Automatic continuation\s+on/i);
   assert.equal(readGoalPreferences().autoContinue, true);
   assert.deepEqual(JSON.parse(readFileSync(goalPreferencesPath(), "utf8")), {
@@ -95,27 +88,25 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 
-  const control = registrations.find(item => item.id === "goal-auto-start") as unknown as Control;
-  assert.equal(control.label, "Auto-run saved Goals");
+  assert.equal(control.label, "Auto-start Goals");
   assert.deepEqual(control.values, ["Off", "On"]);
   assert.equal(control.get(), "Off");
   await control.change("On", ctx);
   assert.equal(readGoalPreferences().autoStartFromOutcome, true);
-  await contribution.open(ctx);
-  assert.match(pages.at(-1)!, /Auto-run saved Goals\s+On/);
+  await commands.get("goal")!.handler("settings", ctx);
+  assert.match(pages.at(-1)!, /Auto-start Goals\s+On/);
   await commands.get("goal")!.handler("settings auto-start-from-outcome off", ctx);
   assert.equal(control.get(), "Off", "the Harness control and Goal command share the live preference");
-  await assert.rejects(control.change("invalid", ctx), /Invalid Auto-run saved Goals mode/);
+  await assert.rejects(control.change("invalid", ctx), /Invalid Auto-start Goals mode/);
   assert.equal(control.get(), "Off");
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 
   ctx.mode = "rpc";
   const opened = pages.length;
-  await contribution.open(ctx);
   await commands.get("goal")!.handler("settings", ctx);
   assert.equal(pages.length, opened);
-  assert.equal(notices.at(-1), notices.at(-2), "RPC retains the command's textual settings fallback");
+  assert.match(notices.at(-1)!, /auto/i);
   await handlers.get("session_shutdown")!({}, ctx);
   const count = registrations.length;
   events.emit("harness-settings:request", undefined);

@@ -38,7 +38,7 @@ export function canStartGoalFromOutcome(value: unknown, reopenedGoal?: Pick<Goal
  */
 export interface TaskContextRequest {
   action: TaskContextAction;
-  savedGoal?: { objective: string; status: string; goalId?: string };
+  savedGoal?: { objective: string; status: string; goalId?: string; reopenedGoalId?: string };
   handoffOwner?: string;
   manual?: boolean;
   status?: GoalSnapshot["status"];

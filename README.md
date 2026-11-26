@@ -6,7 +6,7 @@
 
 ## Quick Answer
 
-Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install the component packages and Harness-owned runtime with `npx pi-better-harness install`, or install only an individual component. Goal & Todo starts **Off**; enable it in `/harness-settings`.
+Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install the component packages and Harness-owned runtime with `npx pi-better-harness install`, or install only an individual component. Goal and Todo are available immediately. Automatic Goal execution defaults to **Off** in `/harness-settings`.
 
 ## Install The Whole Harness
 
@@ -86,7 +86,7 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-ssh`: safe synchronous remote commands over reusable SSH connections.
 - `pi-better-goal`: explicit triggers, pause/resume, and background-aware continuation.
 - [`pi-better-model-router`](packages/pi-better-model-router/README.md): price-based routing between DeepSeek and Ollama Cloud.
-- Harness Goal & Todo: session context and checklist progress, off until enabled in `/harness-settings`.
+- Harness Goal & Todo: session objectives and checklist progress, with optional automatic Goal execution.
 
 To add model routing, install `pi-better-model-router` separately and select `router/deepseek-flash-auto` in `/model`. The router package includes the Ollama Cloud provider and requires Pi's `registerVirtualModel` API.
 
