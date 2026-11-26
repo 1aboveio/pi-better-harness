@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { once } from "node:events";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -117,15 +118,54 @@ describe("owned subagent registry indexes", () => {
     assert.equal(getRegistryIoMetrics().fullDirectoryReads, 0);
   });
 
-  it("uses listed dispositions after volatile park directories are reclaimed", async () => {
+  it("protects and reconciles a live park when its metadata still says consumed", async () => {
+    const run = meta("sa_stale_park_mirror", 4010, "park-owner");
+    const park = { version: 1, waitId: "wait-stale", generation: 1, attemptId: run.id, parkedAt: 1 };
+    run.park = { ...park, phase: "consumed" };
+    writeMeta(run);
+    const live = { ...park, generation: 2, phase: "resuming", resumedBy: "sa_unpublished_attempt" };
+    writeFileSync(parkRecordPath(run.id), JSON.stringify(live));
+
+    assert.deepEqual(listPendingParkedRuns([run]).map(entry => entry.id), [run.id]);
+    const pending = await Array.fromAsync(scanParkRecords([run], record => record.phase === "resuming"));
+    assert.deepEqual(pending.map(entry => entry.record), [live]);
+    await reconcileParkedWaits(undefined, { resume: async () => assert.fail("missing writer proof") });
+    assert.equal(parkedWaitForRun(run.id)?.phase, "held");
+  });
+
+  it("releases a consumed park even if its metadata still says waiting", async () => {
+    const run = meta("sa_stale_waiting_mirror", 4011, "park-owner");
+    run.park = { version: 1, waitId: "wait-ended", generation: 1, attemptId: run.id, parkedAt: 1, phase: "waiting" };
+    writeMeta(run);
+    writeFileSync(parkRecordPath(run.id), JSON.stringify({ ...run.park, phase: "consumed" }));
+    assert.deepEqual(listPendingParkedRuns([run]), []);
+    assert.deepEqual(await Array.fromAsync(scanParkRecords([run], record => record.phase === "waiting")), []);
+  });
+
+  it("uses listed dispositions without probing reclaimed park directories", async t => {
     const runs = ["consumed", "cancelled", "waiting"].map((phase, index) => ({
       ...meta(`sa_archived_park_${index}`, 4100 + index, "park-owner"),
       park: { version: 1, waitId: `wait-${index}`, generation: 1, attemptId: `attempt-${index}`, parkedAt: 1, phase },
     }));
     resetRegistryIoMetrics();
-    const listed = await Array.fromAsync(scanParkRecords(runs));
-    assert.deepEqual(listed.map(entry => entry.record), runs.map(run => run.park));
-    assert.equal(getRegistryIoMetrics().metadataFileReads, 0);
+    const reads = [
+      t.mock.method(fs.promises, "readFile"),
+      t.mock.method(fs, "readFileSync"),
+      t.mock.method(fs, "existsSync"),
+    ];
+    syncBuiltinESMExports();
+    try {
+      const listed = await Array.fromAsync(scanParkRecords(runs));
+      assert.deepEqual(listed.map(entry => entry.record), runs.map(run => run.park));
+      assert.deepEqual(listPendingParkedRuns(runs).map(run => run.park), [runs[2].park]);
+      for (const read of reads) {
+        assert.ok(read.mock.calls.every(call => !String(call.arguments[0]).endsWith("/park.json")));
+      }
+      assert.equal(getRegistryIoMetrics().metadataFileReads, 0);
+    } finally {
+      for (const read of reads) read.mock.restore();
+      syncBuiltinESMExports();
+    }
   });
 
   it("answers a socket request while checking historical park sidecars", { timeout: 5000 }, async () => {

@@ -136,7 +136,7 @@ export function writeParkRecord(id, record, options = {}) {
     }
 }
 /** Read the attempt's park disposition; absent for an ordinary run. */
-export function readParkRecord(id) {
+export function readParkRecord(id, listedMeta) {
     try {
         return parseParkRecord(JSON.parse(readFileSync(parkRecordPath(id), "utf-8")));
     }
@@ -145,7 +145,7 @@ export function readParkRecord(id) {
             return undefined;
         // The volatile run directory may already be reclaimed; the durable
         // completed-attempt record carries the park snapshot taken at finalization.
-        return readMeta(id)?.park;
+        return (listedMeta ?? readMeta(id))?.park;
     }
 }
 /** Merge one phase/reason change into the park disposition. */
@@ -166,22 +166,31 @@ export function isPendingPark(record) {
  * by resume reconciliation; a consumed or cancelled park is not included.
  */
 export function listPendingParkedRuns(metas = listMetas()) {
-    return listParkRecordCandidates(metas).filter((meta) => {
-        const record = meta.park ?? readParkRecord(meta.id);
-        return record !== undefined && isPendingPark(record);
-    });
+    return listParkRecordCandidates(metas, isPendingPark);
 }
-/** Include a park file that was published just before its metadata mirror was lost. */
-export function listParkRecordCandidates(metas = listMetas()) {
+/** Read live sidecars before consulting the listed disposition of a reclaimed run. */
+export function listParkRecordCandidates(metas = listMetas(), include) {
+    const runs = join(baseDir(), "runs");
     let volatileIds;
     try {
-        volatileIds = new Set(readdirSync(join(baseDir(), "runs")));
+        volatileIds = new Set(readdirSync(runs));
     }
-    catch {
-        volatileIds = new Set();
+    catch (error) {
+        if (error.code === "ENOENT")
+            volatileIds = new Set();
     }
-    return metas.filter((meta) => meta.park !== undefined
-        || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
+    const parked = [];
+    for (const meta of metas) {
+        let record = meta.park;
+        if (!volatileIds || volatileIds.has(meta.id)) {
+            if (!record && !existsSync(join(runs, meta.id, "park.json")))
+                continue;
+            record = readParkRecord(meta.id, meta);
+        }
+        if (record && (!include || include(record)))
+            parked.push({ ...meta, park: record });
+    }
+    return parked;
 }
 /** Read recovery sidecars in batches so a large registry does not block socket replies. */
 export async function* scanParkRecords(metas = listMetas(), include) {
@@ -190,22 +199,18 @@ export async function* scanParkRecords(metas = listMetas(), include) {
     const batchSize = 32;
     for (let offset = 0; offset < metas.length; offset += batchSize) {
         const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
-            if (meta.park && include && !include(meta.park))
-                return;
-            if (volatileIds && !volatileIds.has(meta.id))
-                return meta.park ? { meta, record: meta.park } : undefined;
-            if (!volatileIds && !meta.park)
-                return;
-            try {
-                const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
-                if (record && (!include || include(record)))
-                    return { meta, record };
-            }
-            catch (error) {
-                if (error.code === "ENOENT" && meta.park) {
-                    return { meta, record: meta.park };
+            let record = meta.park;
+            if (!volatileIds || volatileIds.has(meta.id)) {
+                try {
+                    record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
+                }
+                catch (error) {
+                    if (error.code !== "ENOENT")
+                        return;
                 }
             }
+            if (record && (!include || include(record)))
+                return { meta, record };
         }));
         for (const entry of batch)
             if (entry)

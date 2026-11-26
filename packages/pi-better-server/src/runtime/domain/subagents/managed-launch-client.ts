@@ -32,6 +32,7 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
     const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"], { signal });
     const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
     let unsubscribe: unknown;
+    let dispatched = false;
     const cancel = () => {
         try { rmSync(path, { force: true }); } catch { /* Finally retries cleanup. */ }
         client.close();
@@ -63,9 +64,22 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
             } catch { rmSync(path, { force: true }); }
             finally { checking = false; }
         });
+        signal?.throwIfAborted();
+        dispatched = true;
         return await client.request("runtime_launch_subagent", { authority: { id, secret } });
     } catch (error) {
-        signal?.throwIfAborted();
+        if (!dispatched) signal?.throwIfAborted();
+        // Revoking the grant can stop later batch admissions after a worker has already started.
+        if (dispatched && error instanceof Error && (
+            (signal?.aborted && error.message === "runtime-unavailable: client closed")
+            || error.message === "runtime-unhealthy: runtime_launch_subagent timed out"
+        )) {
+            return {
+                isError: true,
+                details: { status: "outcome_unknown" },
+                content: [{ type: "text", text: "The launch receipt is unknown. Check subagent_list in this session before retrying. A worker may already be running." }],
+            };
+        }
         throw error;
     } finally {
         signal?.removeEventListener("abort", cancel);

@@ -1196,14 +1196,7 @@ function parkedEntry(meta, record) {
 }
 /** Parked runs whose wait can still resume (including held ones). */
 export function parkedWaits() {
-    const parked = [];
-    for (const meta of listPendingParkedRuns()) {
-        const record = readParkRecord(meta.id);
-        if (!record || !isPendingPark(record))
-            continue;
-        parked.push(parkedEntry(meta, record));
-    }
-    return parked;
+    return listPendingParkedRuns().map(meta => parkedEntry(meta, meta.park));
 }
 export function parkedWaitForRun(runId) {
     const meta = readMeta(runId);
@@ -1839,14 +1832,8 @@ export async function recoverStagedPark(park, service, options = {}) {
 }
 /** Every park record (any phase) that published `attemptId` as its resume. */
 export function parkedWaitsForResumedAttempt(attemptId) {
-    const found = [];
-    for (const meta of listParkRecordCandidates()) {
-        const record = readParkRecord(meta.id);
-        if (!record || record.resumedBy !== attemptId)
-            continue;
-        found.push(parkedEntry(meta, record));
-    }
-    return found;
+    return listParkRecordCandidates(undefined, record => record.resumedBy === attemptId)
+        .map(meta => parkedEntry(meta, meta.park));
 }
 /** Terminal for the purposes of "this attempt will never interpret the wait again". */
 export function isTerminalAttempt(meta) {
