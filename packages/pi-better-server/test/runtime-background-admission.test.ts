@@ -49,6 +49,29 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
             const restored = await invoke('__background_poll', { knownActiveIds: [pointer.id] }, 'restore-poll', onBranch);
             assert.deepEqual(restored.tasks, [child, completed]);
         });
+        const assignmentStore = acquireMutationStore(root);
+        try {
+            for (const count of [1, 16]) {
+                const assignmentId = `quiet-${count}`;
+                const owner = { kind: 'worker-conversation', sessionId: assignmentId, workspace: root };
+                const recipient = { kind: 'parent-session', sessionId: 'recipient', workspace: root };
+                assignmentStore.store.registerAssignment({ assignmentId, attemptId: assignmentId, owner, recipient });
+                assignmentStore.store.registerOperation({ operationId: assignmentId, taskId: assignmentId, launchToken: assignmentId,
+                    owner, assignmentAttemptId: assignmentId, observer: { kind: 'fixture', version: '1' },
+                    supervision: { hostId: 'local-fixture' } });
+                const poll = async () => {
+                    for (let i = 0; i < count; i++) {
+                        await invoke('__background_poll', {}, randomUUID(), record => { record.owner.sessionId = `quiet-view-${i}`; });
+                    }
+                };
+                await poll();
+                const before: number = service.metrics().reconciles;
+                assignmentStore.store.recordAssignmentOutcome({ assignmentId, owner, recipient, revision: 1, outcome: 'succeeded',
+                    reason: 'Done', evidence: [], waits: [], processUncertain: false });
+                await poll();
+                assert.equal(service.metrics().reconciles - before, 0, `ending an assignment with ${count} unrelated warm views`);
+            }
+        } finally { assignmentStore.release(); }
         const childLogResult = await invoke('__background_log', {id:child.id,lines:1}, 'child-log', r => r.branchIds=['branch']);
         assert.equal(childLogResult.stdout,'child-log-proof');
         await assert.rejects(invoke('__background_log', {id:child.id}, 'wrong-branch'), /outside the captured scope/);
@@ -94,7 +117,7 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     }
     finally {
         await service?.close();
-        supervision.close();
+        await supervision.close();
         ports.delete(root);
         if (previous === undefined)
             delete process.env.PI_CODING_AGENT_DIR;

@@ -29,7 +29,7 @@ const theme = { fg: (_key, text) => text, bold: text => text, inverse: text => t
 test("settings discovery supports both load orders, deduplicates and removes conflicts", async () => {
   const pi = eventApi();
   let opened = 0;
-  const link = { id: "goal", label: "Goal", command: "/goal settings", open: async () => { opened++; } };
+  const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open: async () => { opened++; } };
   pi.bus.emit("harness-settings:register", link);
   pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
   const registry = createSettingsRegistry(pi);
@@ -62,11 +62,11 @@ test("native settings list selects package links without opening or changing the
   let page;
   let opened = false;
   const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
-  const selected = chooseHarnessSetting(ctx, [{ id: "goal", label: "Goal", command: "/goal settings", open() { opened = true; } }], "link:goal");
-  assert.match(page.render(80).join("\n"), /Goal settings\s+Open/);
-  assert.match(page.render(80).join("\n"), /You can also run \/goal settings/);
+  const selected = chooseHarnessSetting(ctx, [{ id: "sandbox", label: "Sandbox", command: "/sandbox", open() { opened = true; } }], "link:sandbox");
+  assert.match(page.render(80).join("\n"), /Sandbox settings\s+Open/);
+  assert.match(page.render(80).join("\n"), /You can also run \/sandbox/);
   page.handleInput("\r");
-  assert.equal(await selected, "link:goal");
+  assert.equal(await selected, "link:sandbox");
   assert.equal(opened, false);
 });
 
@@ -120,10 +120,10 @@ test("the selected setting explains its effect at narrow and wide terminal width
 });
 
 test("keyboard order groups controls with their package pages and keeps third-party contributions reachable", async () => {
-  const controls = ["tool-animation", "extra-control", "outcome-todo-display", "background-review-interval",
-    "goal-auto-start", "tool-output", "navigator-sticky", "outcome-todo-ledger", "tool-call-guard", "outcome-todo", "navigator-view"]
+  const controls = ["tool-animation", "extra-control", "background-review-interval",
+    "goal-auto-start", "tool-output", "navigator-sticky", "outcome-todo-ledger", "tool-call-guard", "navigator-view"]
     .map(id => ({ id, label: id, values: ["Off", "On"], get: () => "Off", change() {} }));
-  const links = ["agents", "extra-page", "goal", "sandbox", "subagents"]
+  const links = ["agents", "extra-page", "sandbox", "subagents"]
     .map(id => ({ id, label: id, command: `/${id}`, open() {} }));
   const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
   let page;
@@ -131,10 +131,10 @@ test("keyboard order groups controls with their package pages and keeps third-pa
     page = build({}, theme, {}, resolve);
   }) } }, links, undefined, callbacks, controls);
   const expected = [
-    "Outcome and Todo tools", "goal-auto-start", "Goal settings", "Project work ledger",
+    "Auto-start Goals", "Project work ledger",
     "Subagent settings", "Agent catalog", "Sandbox settings",
     "Foreground wait guard", "Background wait reviews", "Completion delivery",
-    "Navigator layout", "Pin work panels", "Outcome and Todo panel", "tool-output", "Tool progress animation",
+    "Navigator layout", "Pin work panels", "tool-output", "Tool progress animation",
     "extra-control", "extra-page",
   ];
   for (const label of expected) {
@@ -152,12 +152,12 @@ test("selection restoration preserves ordering and rebound native navigation", a
   try {
     let page;
     const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
-    const links = ["goal", "sandbox", "subagents"].map(id => ({ id, label: id, command: `/${id} settings`, open() {} }));
+    const links = ["sandbox", "subagents"].map(id => ({ id, label: id, command: `/${id} settings`, open() {} }));
     const chosen = chooseHarnessSetting(ctx, links, "link:subagents");
     assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
     const lines = page.render(80).join("\n");
     assert.match(lines, /> Subagent settings/);
-    assert.ok(lines.indexOf("Goal settings") < lines.indexOf("Subagent settings") && lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
+    assert.ok(lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
     page.handleInput("j");
     assert.match(page.render(80).join("\n"), /> Sandbox settings/);
     page.handleInput("k");
@@ -178,11 +178,11 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
+      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Sandbox settings/); page.handleInput("\r"); }
       else page.handleInput("\x1b");
     });
   } } };
-  const link = { id: "goal", label: "Goal", command: "/goal settings", open(current) { assert.equal(current, ctx); opened++; throw new Error("Synthetic opener failure"); } };
+  const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open(current) { assert.equal(current, ctx); opened++; throw new Error("Synthetic opener failure"); } };
   pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
   harnessSettings(pi);
   handlers.get("session_start")({}, ctx);
@@ -298,7 +298,7 @@ test("an invalid callback default reports once, leaves package settings usable, 
     let pages = 0;
     pi.on = () => {};
     pi.registerCommand = (_name, options) => { command = options.handler; };
-    const link = { id: "goal", label: "Goal", command: "/goal settings", open() { opened++; } };
+    const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open() { opened++; } };
     pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
     harnessSettings(pi);
     const notifications = [];
@@ -307,7 +307,7 @@ test("an invalid callback default reports once, leaves package settings usable, 
         return new Promise(resolve => {
           const page = build({}, theme, {}, resolve);
           assert.match(page.render(80).join("\n"), /^[ >]+Completion delivery\s+When idle/m);
-          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
+          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Sandbox settings/); page.handleInput("\r"); }
           else {
             if (pages === 2) {
               page.handleInput("\x13");

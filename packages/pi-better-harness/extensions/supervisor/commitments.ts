@@ -86,7 +86,7 @@ export function registerCommitments(pi: ExtensionAPI, onFailure: (ctx: Extension
       if (!enabled()) return reply("Commitment follow-up is disabled.");
       const branch = ctx.sessionManager.getBranch();
       const outcome = outcomeId(branch);
-      if (!outcome) return reply("No active Outcome.");
+      if (!outcome) return reply("No active Goal.");
       const items = records(branch);
       if (p.action === "status" && !p.id) return reply([...items.values()].map(describe).join("\n\n") || "No recorded commitments.");
       if (p.action === "accept") {
@@ -99,7 +99,7 @@ export function registerCommitments(pi: ExtensionAPI, onFailure: (ctx: Extension
         return reply(describe(c));
       }
       const c = items.get(p.id ?? "");
-      if (!c) throw new Error("Unknown commitment in this Outcome.");
+      if (!c) throw new Error("Unknown commitment in this Goal.");
       if (p.action === "status") return reply(describe(c));
 
       const latest = branch.map(e => e.type === "custom" && e.customType === ENTRY && (e.data as Commitment)?.id === c.id).lastIndexOf(true);

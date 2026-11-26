@@ -9,14 +9,6 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension from "../../extensions/task-context/index.js";
 import { readRushPlan, workflowBinding } from "../../extensions/task-context/workflow-plan.js";
 
-interface SettingControl {
-  id: string;
-  get(): string;
-  change(value: string, ctx: ExtensionContext): Promise<void>;
-}
-
-// Enabling Outcome & Todo goes through its real settings control, and every
-// write goes to a private agent directory rather than the developer's own.
 const agentDir = mkdtempSync(join(tmpdir(), "task-context-agent-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -25,14 +17,6 @@ process.on("exit", () => {
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   rmSync(agentDir, { recursive: true, force: true });
 });
-
-function captureSettings(events: EventEmitter): { current(): SettingControl | undefined } {
-  let control: SettingControl | undefined;
-  events.on("harness-settings:register", (candidate: SettingControl) => {
-    if (candidate?.id === "outcome-todo") control = candidate;
-  });
-  return { current: () => control };
-}
 
 for (const owner of ["rush-issues", "resolve-issues", "fixture-workflow"])
 test(`${owner} plan projects revisions and restores its owner-bound session`, async () => {
@@ -62,7 +46,6 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     },
   } as unknown as ExtensionContext;
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const pi = {
     events,
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
@@ -75,7 +58,6 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     file(1, "in-flight");
     extension(pi);
     await handlers.get("session_start")?.({}, ctx);
-    await settings.current()!.change("On", ctx);
     const update = tools.get("update_todo")!;
     await update.execute("generic", { todo: [{ step: "Old generic step", status: "in_progress" }] }, undefined, undefined, ctx);
     entries.push({ type: "custom", customType: "pi-better-workflow", data: {
@@ -165,7 +147,6 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
   const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> | void }>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   let widgetFactory: any;
   let redraws = 0;
   const tui = { requestRender() { redraws++; } };
@@ -190,7 +171,6 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
     entries: () => entries,
     start: async () => {
       await handlers.get("session_start")!({}, ctx);
-      await settings.current()!.change("On", ctx);
     },
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
     redraws: () => redraws,

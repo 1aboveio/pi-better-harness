@@ -1460,7 +1460,7 @@ test("real runner timeout and canonical result supervision progress during stall
       socketMs: { p50: sockets[Math.floor(sockets.length*.5)], p95: sockets[Math.floor(sockets.length*.95)], p99: sockets.at(-1) } }));
   } finally {
     await supervisor.stop(taskId).catch(() => undefined);
-    host?.close(); lease.release(); await f.close();
+    await host?.close(); lease.release(); await f.close();
   }
 });
 

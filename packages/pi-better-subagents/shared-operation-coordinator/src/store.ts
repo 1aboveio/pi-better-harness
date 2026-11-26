@@ -207,7 +207,7 @@ export interface Store {
      * Read up to 256 unfinished cleanup obligations in operation id order.
      * The cursor is exclusive. Start each new sweep without a cursor.
      */
-    listAssignmentCleanupOperations(limit: number, afterOperationId?: string): OperationRecord[];
+    listAssignmentCleanupOperations(limit: number, afterOperationId?: string, hostId?: string): OperationRecord[];
     verifyAssignmentCleanup(operationId: string, launchToken: string, terminalRevision: number): boolean;
     /** Running operations currently assigned to this supervising host. */
     listRunningSupervisedBy(hostId: string): OperationRecord[];
@@ -217,7 +217,7 @@ export interface Store {
 
     /** The shared discovery leader for this store/supervisor scope, if recorded. */
     readDiscoveryClaim(scope: string): DiscoveryClaimRecord | null;
-    readDiscoveryState(scope: string): ReturnType<typeof readDiscoveryState>;
+    readDiscoveryState(scope: string, hostId?: string): ReturnType<typeof readDiscoveryState>;
     /**
      * Compare-and-swap a discovery claim. The caller must name the exact claim it
      * observed, or null for none; a stale contender receives null and must not
@@ -427,9 +427,9 @@ export function openStore(options: StoreOptions): Store {
             alive();
             return readOperationRecords(ctx, filter);
         },
-        listAssignmentCleanupOperations(limit, afterOperationId) {
+        listAssignmentCleanupOperations(limit, afterOperationId, hostId) {
             alive();
-            return readAssignmentCleanupOperations(ctx, limit, afterOperationId);
+            return readAssignmentCleanupOperations(ctx, limit, afterOperationId, hostId);
         },
         verifyAssignmentCleanup(operationId, launchToken, terminalRevision) {
             alive();
@@ -453,7 +453,7 @@ export function openStore(options: StoreOptions): Store {
                 terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision),
             );
         },
-        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
+        readDiscoveryState(scope, hostId) { alive(); return readDiscoveryState(ctx, scope, hostId); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

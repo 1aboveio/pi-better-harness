@@ -11,6 +11,7 @@ import {
     otherWorkerOwner,
     parentOwner,
     registerOperation,
+    removeAssignmentOperationBinding,
     settleOperation,
     workerOwner,
 } from "./support.ts";
@@ -459,6 +460,7 @@ describe("store guards", () => {
         harness.closeStore();
 
         const raw = new DatabaseSync(harness.path);
+        removeAssignmentOperationBinding(raw);
         raw.exec("DROP INDEX operations_running_supervisor");
         raw.exec("ALTER TABLE operations DROP COLUMN supervision_host_id");
         raw.exec("DROP TABLE discovery_claims");

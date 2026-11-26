@@ -23,14 +23,6 @@ interface CommandDefinition {
   handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
 
-interface SettingControl {
-  id: string;
-  get(): string;
-  change(value: string, ctx: ExtensionContext): Promise<void>;
-}
-
-// Outcome & Todo is enabled through its real settings control, and every write
-// goes to a private agent directory rather than the developer's own settings.
 const agentDir = mkdtempSync(join(tmpdir(), "task-context-agent-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -40,17 +32,9 @@ process.on("exit", () => {
   rmSync(agentDir, { recursive: true, force: true });
 });
 
-function captureSettings(events: EventEmitter): { current(): SettingControl | undefined } {
-  let control: SettingControl | undefined;
-  events.on("harness-settings:register", (candidate: SettingControl) => {
-    if (candidate?.id === "outcome-todo") control = candidate;
-  });
-  return { current: () => control };
-}
-
 test("Todo action completions expose valid commands with context", () => {
   assert.deepEqual(planArgumentCompletions(""), [
-    { value: "clear", label: "clear", description: "Remove the current Todo without changing its outcome" },
+    { value: "clear", label: "clear", description: "Remove the current Todo and keep its Goal" },
     { value: "hide", label: "hide", description: "Hide the Todo widget" },
     { value: "show", label: "show", description: "Restore automatic Todo display" },
     { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
@@ -109,7 +93,6 @@ test("todo tools persist progress without taking over editor navigation", async 
   } as unknown as ExtensionContext;
 
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const pi = {
     events,
     appendEntry(customType: string, data: unknown) {
@@ -124,9 +107,6 @@ test("todo tools persist progress without taking over editor navigation", async 
 
   extension(pi);
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-  assert.deepEqual(activeTools, ["read"], "Outcome & Todo starts off with no session tools");
-  assert.equal(settings.current()?.get(), "Off");
-  await settings.current()!.change("On", ctx);
   assert.deepEqual(activeTools, ["read", "update_todo", "get_todo"]);
   const updateTodo = tools.get("update_todo");
   assert.ok(updateTodo);
@@ -174,7 +154,6 @@ test("todo progress is independent of the subagents delegation mode", async () =
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   let mode: string = "manual";
   events.on("pi-better-subagents:delegation-mode-request", (request: { mode?: string }) => { request.mode = mode; });
   const ctx = {
@@ -191,7 +170,6 @@ test("todo progress is independent of the subagents delegation mode", async () =
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")?.({}, ctx);
-  await settings.current()!.change("On", ctx);
   await tools.get("update_todo")!.execute("plan", { todo: [{ id: "build", step: "Build", status: "in_progress" }] }, undefined, undefined, ctx);
   const snapshot = async () => (await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx)).details as any;
   const manual = structuredClone((await snapshot()).plan);
@@ -207,7 +185,6 @@ test("outcome updates persist once and preserve request prefixes across tool cal
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const ctx = {
     mode: "print", hasUI: false,
     sessionManager: { getBranch: () => entries },
@@ -222,7 +199,6 @@ test("outcome updates persist once and preserve request prefixes across tool cal
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")!({}, ctx);
-  await settings.current()!.change("On", ctx);
   await tools.get("update_todo")!.execute("todo", { outcome: { objective: "Deliver the integration", doneWhen: ["Both services work together"] }, todo: [
     { id: "api", step: "Build API", status: "in_progress" },
     { id: "worker", step: "Build worker", status: "pending" },
@@ -262,13 +238,11 @@ test("outcome updates persist once and preserve request prefixes across tool cal
   const branch = entries.slice();
   await tools.get("update_todo")!.execute("done", { outcome: { objective: "Deliver the integration", status: "complete" } }, undefined, undefined, ctx);
   const completed = await start();
-  assert.match(completed!.message!.content, /Outcome \(complete\)/);
+  assert.match(completed!.message!.content, /Goal \(complete\)/);
   assert.equal(await start(), undefined);
   entries.splice(0, entries.length, ...branch);
   await handlers.get("session_tree")!({}, ctx);
   assert.equal(await start(), undefined, "a sibling branch must retain its own active outcome snapshot");
-  await settings.current()!.change("Off", ctx);
-  assert.equal(await start(), undefined);
   await handlers.get("session_shutdown")?.({}, ctx);
 });
 
@@ -277,7 +251,6 @@ test("concurrent todo updates persist and invalid updates leave the plan unchang
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const ctx = {
     mode: "print",
     hasUI: false,
@@ -294,7 +267,6 @@ test("concurrent todo updates persist and invalid updates leave the plan unchang
 
   extension(pi);
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-  await settings.current()!.change("On", ctx);
   const updateTodo = tools.get("update_todo");
   assert.ok(updateTodo);
   const concurrent = await updateTodo.execute("valid", { todo: [
@@ -322,7 +294,6 @@ test("todo tool reports ready DAG steps and rejects premature transitions", asyn
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const ctx = {
     mode: "print",
     hasUI: false,
@@ -338,7 +309,6 @@ test("todo tool reports ready DAG steps and rejects premature transitions", asyn
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-  await settings.current()!.change("On", ctx);
   const updateTodo = tools.get("update_todo")!;
   const getTodo = tools.get("get_todo")!;
   const steps = [
@@ -366,7 +336,6 @@ test("skill-owned workflow suppresses the generic todo and its update tool", asy
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const ctx = {
     mode: "print", hasUI: false,
     sessionManager: { getBranch: () => entries },
@@ -381,7 +350,6 @@ test("skill-owned workflow suppresses the generic todo and its update tool", asy
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")?.({}, ctx);
-  await settings.current()!.change("On", ctx);
   const update = tools.get("update_todo")!;
   await update.execute("ordinary", { todo: [{ step: "Generic", status: "in_progress" }] }, undefined, undefined, ctx);
   entries.push({ type: "custom", customType: "pi-better-workflow", data: {
@@ -410,7 +378,6 @@ test("released handoff suppresses stale generic guidance until a generic replace
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const ctx = {
     cwd: "/missing", mode: "print", hasUI: false,
     sessionManager: { getBranch: () => entries },
@@ -424,7 +391,6 @@ test("released handoff suppresses stale generic guidance until a generic replace
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
   } as unknown as ExtensionAPI);
   await handlers.get("session_start")!({}, ctx);
-  await settings.current()!.change("On", ctx);
   const handoff = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
   const handoffText = (handoff.content[0] as { text: string }).text;
   assert.doesNotMatch(handoffText, /Stale generic/,
@@ -460,7 +426,6 @@ test("a completed todo clears durably after 30 seconds and replacement cancels t
       ui: { setWidget: () => undefined, setStatus: () => undefined },
     } as unknown as ExtensionContext;
     const events = new EventEmitter();
-    const settings = captureSettings(events);
     const pi = {
       events,
       appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
@@ -470,8 +435,6 @@ test("a completed todo clears durably after 30 seconds and replacement cancels t
     } as unknown as ExtensionAPI;
 
     extension(pi);
-    // Enable before faking timers: the settings writer relies on real ones.
-    await settings.current()!.change("On", ctx);
     globalThis.setTimeout = ((callback: () => void, delay: number) => {
       const id = nextTimer++;
       timers.set(id, { callback: () => {

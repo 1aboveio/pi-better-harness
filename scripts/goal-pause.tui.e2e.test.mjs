@@ -43,7 +43,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => screen.includes("/goal settings"));
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings") && screen.includes("Conversational resume"));
+  waitForScreen((screen) => screen.includes("Goal execution settings") && screen.includes("Conversational resume"));
   sendKey("Space");
   waitForScreen((screen) => screen.includes("Saved.") && /Automatic continuation\s+Off/.test(screen));
   sendKey("Down");
@@ -65,7 +65,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendKey("Space");
   waitForScreen((screen) => /Automatic continuation\s+On/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings"));
   assert.equal(modelCalls().length, 0, "settings changes must not start a model turn");
 
   sendLiteral("/goal ship the pause widget");
@@ -105,9 +105,9 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForFile(join(fixtures, "idle-settled"));
 
   sendLiteral("/goal ");
-  waitForScreen((screen) => screen.includes("Pause the active goal"));
+  waitForScreen((screen) => screen.includes("Pause work on the current Goal and Todo"));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Pause the active goal") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Pause work on the current Goal and Todo") && screen.includes("goal active"));
   sendKey("C-u");
 
   sendLiteral("/settings");
@@ -119,9 +119,9 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
 
   sendLiteral("/goal-dialog");
   sendKey("Tab");
@@ -137,13 +137,13 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Down");
   sendKey("Down");
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
   sendKey("Escape");
   assertScreenStays((screen) => screen.includes("goal active") && !screen.includes("goal paused"), 1_000);
   assert.equal(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal.pauseOnEscape, false);
@@ -151,13 +151,13 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Down");
   sendKey("Down");
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
   const beforeIdlePause = modelCalls().length;
   sendKey("Escape");
   waitForScreen((screen) => screen.includes("goal paused"));

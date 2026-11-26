@@ -91,13 +91,11 @@ function harness(t: TestContext, f: Fixture, options: {
   const notices: Array<{ text: string; level: string }> = [];
   const sent: Array<{ message: any; options: any }> = [];
   const widgets = new Map<string, any>();
-  let settings: SettingControl | undefined;
   const settingControls = new Map<string, SettingControl>();
   let active = ["read"];
   let userMessages = 0;
   events.on("harness-settings:register", (control: SettingControl) => {
     if (control?.id) settingControls.set(control.id, control);
-    if (control?.id === "outcome-todo") settings = control;
   });
   const append = (entry: any): void => {
     session.branch.push(entry);
@@ -161,20 +159,16 @@ function harness(t: TestContext, f: Fixture, options: {
     tools.get("update_todo")!.execute("ledger", { ledger }, undefined, undefined, ctx) as Promise<ToolResult>;
   const queryLedger = async (ledger: any): Promise<ToolResult> =>
     tools.get("get_todo")!.execute("ledger-query", { ledger }, undefined, undefined, ctx) as Promise<ToolResult>;
-  const enable = async () => {
-    if (settings?.get() !== "On") await settings!.change("On", ctx);
-  };
   const enableLedger = async () => {
     const control = settingControls.get("outcome-todo-ledger");
     if (control?.get() !== "On") await control!.change("On", ctx);
   };
   return {
     f, session, tools, commands, handlers, events, notices, sent, widgets, ctx, pi,
-    settings: () => settings,
     control: (id: string) => settingControls.get(id),
     active: () => active,
     userMessages: () => userMessages,
-    start, shutdown, reload, command, get, update, mutateLedger, queryLedger, enable, enableLedger,
+    start, shutdown, reload, command, get, update, mutateLedger, queryLedger, enableLedger,
     append,
     render: (width = 100) => {
       const factory = widgets.get("background-work-list");
@@ -212,7 +206,6 @@ test("explicit attach restores the same durable record on resume while a fresh s
   const f = fixture(t);
   const ledger = createLedger(f);
   const first = harness(t, f);
-  await first.enable();
   await first.enableLedger();
   await first.command(`attach ${ledger.id}`);
   const restored = await first.get();
@@ -245,6 +238,7 @@ test("explicit attach restores the same durable record on resume while a fresh s
   await fresh.command("list");
   assert.match(fresh.notices.at(-1)!.text, new RegExp(ledger.id));
   const discovered = await fresh.queryLedger({ action: "list" });
+  assert.equal(discovered.details.ledgerQuery.ledgers[0].goal, ledger.outcome);
   assert.deepEqual(discovered.details.ledgerQuery.ledgers.map((item: { id: string }) => item.id), [ledger.id],
     "get_todo ledger list discovers the project record without associating it");
   await fresh.command(`attach ${ledger.id}`);
@@ -317,12 +311,12 @@ test("compaction rebuilds bounded reminders from durable state and context remov
 
   await h.update({ outcome: { objective: "Deliver checkout" }, todo: [{ step: "Ship", status: "in_progress" }] });
   const outcomeMessage = await h.handlers.get("before_agent_start")!({}, h.ctx) as { message: any };
-  assert.match(outcomeMessage.message.content, /Outcome \(active\)/);
+  assert.match(outcomeMessage.message.content, /Goal \(saved\)/);
   h.append({ type: "custom_message", ...outcomeMessage.message });
   assert.equal(await h.handlers.get("before_agent_start")!({}, h.ctx), undefined);
   h.session.context = [{ type: "compaction", summary: "Conversation summary only" }];
   const afterCompaction = await h.handlers.get("before_agent_start")!({}, h.ctx) as { message: any };
-  assert.match(afterCompaction.message.content, /Outcome \(active\)/,
+  assert.match(afterCompaction.message.content, /Goal \(saved\)/,
     "the durable outcome is reconstructed after compaction instead of trusting the summary");
 });
 
@@ -430,21 +424,15 @@ test("association does not start work, change a paused Goal, or alter hooks/disp
   const preferencesBefore = readFileSync(join(f.agentDir, "settings.json"), "utf8");
   await h.command(`attach ${ledger.id}`);
   assert.match(h.notices.at(-1)!.text, new RegExp(ledger.id));
-  assert.equal(h.sent.length, 0, "hooks off must not inject ledger context");
+  assert.equal(h.sent.length, 1);
   assert.equal(h.userMessages(), 0, "association never starts an agent turn");
   assert.equal(readFileSync(join(f.agentDir, "settings.json"), "utf8"), preferencesBefore,
     "association must not rewrite independent hooks/display preferences");
-  const update = await h.handlers.get("before_agent_start")!({}, h.ctx);
-  assert.equal(update, undefined, "hooks off also suppresses the outcome reminder");
-
-  await h.enable();
-  assert.equal(h.sent.length, 1, "enabling hooks publishes the current ledger reference once");
   assert.equal(h.sent[0]!.options.triggerTurn, false);
   assert.equal(h.userMessages(), 0);
-  assert.equal(h.settings()!.get(), "On");
   assert.ok(h.session.branch.some((entry) => entry.customType === "pi-better-goal"), "Goal entries are untouched");
   const pausedOutcome = h.handlers.get("before_agent_start")!({}, h.ctx) as { message: { content: string } };
-  assert.match(pausedOutcome.message.content, /Outcome \(paused\)/, "a paused Goal keeps its lifecycle state");
+  assert.match(pausedOutcome.message.content, /Goal \(paused\)/, "a paused Goal keeps its lifecycle state");
 });
 
 test("update_todo ledger attach and detach are explicit actions and get_todo list marks the session reference", async (t) => {
@@ -529,7 +517,7 @@ test("ordinary Todo rows gain no engineering stage model", async (t) => {
   assert.doesNotMatch(todo.content[0]!.text, /\b(?:stage|delivery)\b/i);
 });
 
-test("association survives independent display and hooks controls", async (t) => {
+test("hiding the Todo preserves the ledger association and reminder", async (t) => {
   const f = fixture(t);
   const ledger = createLedger(f);
   const h = harness(t, f, { hasUI: true, preferences: { enabled: false, display: true } });
@@ -537,28 +525,16 @@ test("association survives independent display and hooks controls", async (t) =>
   assert.equal(h.control("outcome-todo-ledger")!.get(), "Off", "long-term ledger defaults off");
   await h.enableLedger();
   await h.command(`attach ${ledger.id}`);
-  assert.equal(h.sent.length, 0, "hooks off does not inject a reminder");
+  assert.equal(h.sent.length, 1);
   assert.match(h.render().join("\n"), /ledger 0\/2 complete · 2 open/);
-  await h.control("outcome-todo-display")!.change("Off", h.ctx);
+  await h.commands.get("todo")!.handler("hide", h.ctx);
   assert.deepEqual(h.render(), [], "display off hides the existing Todo surface");
   await h.command("show");
   assert.match(h.notices.at(-1)!.text, new RegExp(ledger.id), "the association remains inspectable while hidden");
-  await h.control("outcome-todo-display")!.change("On", h.ctx);
+  assert.equal((await h.get()).details.ledger.id, ledger.id);
+  await h.commands.get("todo")!.handler("show", h.ctx);
   assert.match(h.render().join("\n"), /ledger 0\/2 complete/);
-  assert.equal(h.sent.length, 0, "toggling display does not enable hooks");
-  await h.enable();
-  assert.equal(h.sent.length, 1, "hooks on injects the durable reminder");
-  await h.control("outcome-todo-display")!.change("Off", h.ctx);
-  assert.deepEqual(h.render(), []);
-  assert.equal((await h.get()).details.ledger.id, ledger.id, "display off does not clear the association");
-  await h.control("outcome-todo")!.change("Off", h.ctx);
-  await h.control("outcome-todo-display")!.change("On", h.ctx);
-  assert.match(h.render().join("\n"), /ledger 0\/2 complete/, "display can remain on while hooks are off");
-  assert.deepEqual(h.handlers.get("context")!({ messages: [
-    { role: "custom", customType: WORK_LEDGER_REMINDER_MESSAGE, content: "old", details: { ledgerId: ledger.id } },
-    { role: "user", content: "continue" },
-  ] }, h.ctx), { messages: [{ role: "user", content: "continue" }] },
-  "hooks off removes ledger reminders from the next model request without changing display");
+  assert.equal(h.sent.length, 1, "changing visibility does not send another reminder");
 });
 
 test("the ledger toggle stops and restores integration without deleting data or changing association", async (t) => {
@@ -603,7 +579,6 @@ test("the ledger toggle stops and restores integration without deleting data or 
   assert.equal((await h.get()).details.ledger.id, ledger.id, "re-enabling restores the same session association");
   assert.equal(h.sent.length, beforeOff + 1, "re-enabling restores the recovery hint");
   assert.match(h.sent.at(-1)!.message.content, /rev 2/, "the restored hint is rebuilt from the current durable revision");
-  assert.equal(h.settings()!.get(), "On", "the ledger toggle does not change hooks");
 });
 
 test("ledger Off suppresses the manual list and show views without losing the record or reference", async (t) => {

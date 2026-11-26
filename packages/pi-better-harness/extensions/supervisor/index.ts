@@ -162,7 +162,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       }
     }
   }
-  const scopeChange = "The owner revised the Outcome or Todo.";
+  const scopeChange = "The owner revised the Goal or Todo.";
   function reviewPlan(ctx: ExtensionContext) {
     if (enabledScenarios().includes("scope-review") && planShape(ctx) !== reviewedShape)
       void review(ctx, "scope-review", scopeChange);
@@ -170,7 +170,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   // User instructions can revise scope without updating Todo in the same turn.
   pi.on("agent_end", (_event, ctx) => { reviewPlan(ctx); });
   pi.registerTool({
-    name: "supervisor_review", label: "Review Outcome",
+    name: "supervisor_review", label: "Review Goal",
     description: "Consult Supervisor about scope or a possible progress stall. Shares the proactive review and returns prior advice without another push.",
     parameters: Type.Object({ scenario: StringEnum(["scope-review", "stall-diagnosis"] as const) }),
     async execute(_id, { scenario }, _signal, _update, ctx) {
@@ -186,7 +186,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     if (event.toolName === "update_todo" && !event.isError) {
       reset();
       recordProgress(ctx);
-      if (event.input.todo || event.input.outcome) reviewPlan(ctx);
+      if (event.input.todo || event.input.goal || event.input.outcome) reviewPlan(ctx);
       return;
     }
     if (!enabledScenarios().includes("stall-diagnosis")) { repeats.reset(); return; }

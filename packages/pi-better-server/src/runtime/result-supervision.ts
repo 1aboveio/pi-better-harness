@@ -8,7 +8,7 @@ import { createLocalSupervisor } from "./domain/background/supervisor/supervisor
 // @ts-expect-error Generated canonical durable stop records.
 import { readStopRequest } from "./domain/background/supervisor/store.mjs";
 // @ts-expect-error Generated canonical process identity checks.
-import { processGroupAlive } from "./domain/background/supervisor/identity.mjs";
+import { processGroupExitVerified } from "./domain/background/supervisor/identity.mjs";
 // @ts-expect-error Generated canonical terminal evidence rules.
 import { supervisorTerminalPublication } from "./domain/background/terminal-publication.mjs";
 
@@ -39,6 +39,8 @@ export class RuntimeResultSupervision {
   readonly epoch: string;
   private observationReason?: string;
   private assignmentCleanup?: Promise<void>;
+  private closing?: Promise<void>;
+  get busy() { return this.assignmentCleanup !== undefined; }
   private assignmentCleanupCursor?: string;
   private assignmentCleanupReason?: string;
   get reason() { return this.assignmentCleanupReason ?? this.observationReason; }
@@ -193,10 +195,11 @@ export class RuntimeResultSupervision {
   }
   private reconcileAssignmentCleanup() {
     if (this.assignmentCleanup) return;
-    const [operation] = this.store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+    const cursor = this.assignmentCleanupCursor;
+    const [operation] = this.store.listAssignmentCleanupOperations(1, cursor);
     this.assignmentCleanupCursor = operation?.operationId;
     if (!operation) {
-      if (!this.store.listAssignmentCleanupOperations(1).length) this.assignmentCleanupReason = undefined;
+      if (cursor === undefined) this.assignmentCleanupReason = undefined;
       return;
     }
     const grant = this.store.resultSupervision(operation.operationId);
@@ -216,7 +219,7 @@ export class RuntimeResultSupervision {
     if (inspection.terminal) {
       if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven") return;
       const pgid = inspection.command?.pgid ?? inspection.command?.pid;
-      if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+      if (processGroupExitVerified(pgid, inspection.cleanup?.groupEmpty)) {
         this.store.verifyAssignmentCleanup(operation.operationId, operation.launchToken, operation.terminalRevision);
         return;
       }
@@ -228,8 +231,16 @@ export class RuntimeResultSupervision {
       .finally(() => { this.assignmentCleanup = undefined; });
   }
   close() {
+    if (this.closing) return this.closing;
     this.closed = true; if (this.timer) clearTimeout(this.timer); this.watcher?.close();
     for (const watcher of this.taskWatchers.values()) watcher.close();
-    this.taskWatchers.clear(); this.releaseStore();
+    this.taskWatchers.clear();
+    if (this.assignmentCleanup) {
+      this.closing = this.assignmentCleanup.then(() => this.releaseStore());
+    } else {
+      this.releaseStore();
+      this.closing = Promise.resolve();
+    }
+    return this.closing;
   }
 }

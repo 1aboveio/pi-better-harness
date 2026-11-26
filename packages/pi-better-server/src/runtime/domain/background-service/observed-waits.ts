@@ -77,7 +77,7 @@ import {
   type SupervisorStartOptions,
   type SupervisorTaskStatus,
 } from "./supervisor/index.js";
-import { processGroupAlive } from "./supervisor/identity.js";
+import { processGroupExitVerified } from "./supervisor/identity.js";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.js";
 import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.js";
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
@@ -1299,10 +1299,13 @@ export class ObservedWaitHost {
     if (!this.store || this.closed) return;
     this.authorityPassCache = new Map();
     try {
-      const discovery = this.options.serverOwnedResults ? undefined : this.store.readDiscoveryState(this.discoveryScope);
+      const discovery = this.options.serverOwnedResults ? undefined : this.store.readDiscoveryState(this.discoveryScope, this.hostId);
       if (this.options.serverOwnedResults || discovery?.managed) {
         this.releaseDiscoveryAuthority();
-        if (!this.options.serverOwnedResults) this.reconcileFollowerRunning();
+        if (!this.options.serverOwnedResults) {
+          this.reconcileFollowerRunning();
+          if (discovery?.cleanupPending) await this.reconcileAssignmentCleanup();
+        }
         this.reconcileOwnerChanges();
         this.retryPendingTerminalCallbacks();
         await this.dispatchOutbox();
@@ -1313,11 +1316,11 @@ export class ObservedWaitHost {
       if (role === "holder") {
         this.discoverObservedTasks();
         this.reconcileGlobalRunning();
-        if (discovery!.hasAssignmentTasks) await this.reconcileAssignmentCleanup();
       } else {
         this.reconcileFollowerRunning();
         this.reconcileOwnerChanges();
       }
+      if (discovery?.cleanupPending) await this.reconcileAssignmentCleanup();
       this.retryPendingTerminalCallbacks();
       await this.dispatchOutbox();
     } finally {
@@ -1327,7 +1330,7 @@ export class ObservedWaitHost {
 
   private async reconcileAssignmentCleanup(): Promise<void> {
     const store = this.requireStore();
-    const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+    const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor, this.hostId);
     this.assignmentCleanupCursor = candidate?.operationId;
     if (!candidate || candidate.resultManaged || this.supervisionAuthority(candidate) !== "self") return;
     const { taskId, launchToken } = candidate;
@@ -1338,7 +1341,7 @@ export class ObservedWaitHost {
       if (inspection.terminal) {
         if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven") return;
         const pgid = inspection.command?.pgid ?? inspection.command?.pid;
-        if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+        if (processGroupExitVerified(pgid, inspection.cleanup?.groupEmpty)) {
           store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
           return;
         }

@@ -202,13 +202,6 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { goalHandlers.set(event, handler); },
   } as unknown as ExtensionAPI);
 
-  // The standalone Plan package is retired; the Harness Outcome & Todo runtime
-  // owns the workflow plan bridge. Its hooks control starts Off and is switched on
-  // through the real setting, so this test never touches personal settings.
-  let todoControl: { get(): string; change(value: string, ctx: ExtensionContext): Promise<void> } | undefined;
-  shared.events.on("harness-settings:register", (candidate: { id?: string }) => {
-    if (candidate?.id === "outcome-todo") todoControl = candidate as typeof todoControl;
-  });
   const harnessHandlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const harnessTools = new Map<string, ToolDefinition>();
   let harnessActiveTools = ["read"];
@@ -221,15 +214,10 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
     setActiveTools: (next: string[]) => { harnessActiveTools = next; },
   } as unknown as ExtensionAPI);
   await harnessHandlers.get("session_start")?.({ reason: "startup" }, ctx);
-  assert.equal(todoControl?.get(), "Off", "Outcome & Todo hooks default off");
-  await assert.rejects(
-    harnessTools.get("update_todo")!.execute("off", { outcome: { objective: "x" } }, undefined, undefined, toolContext(ctx)),
-    /Outcome and Todo tools are off/,
-  );
-  await todoControl!.change("On", ctx);
   assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo"]);
 
   await goalHandlers.get("session_start")?.({ reason: "startup" }, ctx);
+  await goalCommands.get("goal")!.handler("settings auto-run on", ctx);
   await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
   const prompt = await invokeBeforeAgentStart(goalHandlers, ctx, "base");

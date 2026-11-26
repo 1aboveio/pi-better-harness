@@ -42,7 +42,7 @@ test("settings rows toggle independently, serialize saves, and Escape closes wit
   page.handleInput!(" ");
   await flush();
   assert.equal(preferences.autoStartFromOutcome, true);
-  assert.match(page.render(80).join("\n"), /Auto-start Goal\s+On/);
+  assert.match(page.render(80).join("\n"), /Auto-start Goals\s+On/);
   page.handleInput!("\x1b");
   assert.equal(closes, 1);
   assert.deepEqual(changes, ["autoContinue", "conversationalResume", "pauseOnEscape", "autoStartFromOutcome"]);

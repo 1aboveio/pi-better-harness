@@ -1,27 +1,21 @@
-export interface OutcomeTodoPreferences {
+interface OutcomeTodoPreferences {
   version: 1;
-  enabled: boolean;
-  display: boolean;
-  /** Long-term durable work ledger integration. */
   ledger: boolean;
 }
 
 export function parseOutcomeTodoPreferences(value: unknown): OutcomeTodoPreferences {
-  if (value === undefined) return { version: 1, enabled: false, display: true, ledger: false };
+  if (value === undefined) return { version: 1, ledger: false };
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid outcomeTodo setting.");
   const record = value as Record<string, unknown>;
   if (record.version !== 1) throw new Error("Invalid outcomeTodo setting.");
-  for (const key of ["enabled", "display", "ledger"] as const) {
-    if (record[key] !== undefined && typeof record[key] !== "boolean") throw new Error(`Invalid outcomeTodo setting: ${key} must be boolean.`);
+  if (record.ledger !== undefined && typeof record.ledger !== "boolean") {
+    throw new Error("Invalid outcomeTodo setting: ledger must be boolean.");
   }
-  return { version: 1, enabled: record.enabled === undefined ? false : record.enabled as boolean,
-    display: record.display === undefined ? true : record.display as boolean,
-    ledger: record.ledger === undefined ? false : record.ledger as boolean };
+  return { version: 1, ledger: record.ledger === true };
 }
 
-export function changeOutcomeTodoPreference(current: unknown, key: "enabled" | "display" | "ledger", value: boolean): OutcomeTodoPreferences {
+export function changeLedgerPreference(current: unknown, ledger: boolean): OutcomeTodoPreferences {
   const preferences = parseOutcomeTodoPreferences(current);
-  if (key !== "enabled" && key !== "display" && key !== "ledger") throw new Error("Invalid outcomeTodo preference.");
-  if (typeof value !== "boolean") throw new Error("Invalid outcomeTodo preference value.");
-  return { ...preferences, [key]: value };
+  // Preserve fields written by earlier versions when updating their shared settings file.
+  return { ...current as Record<string, unknown>, ...preferences, ledger };
 }

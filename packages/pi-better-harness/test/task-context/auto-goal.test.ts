@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import goalExtension from "../../../pi-better-goal/src/index.js";
 import { reconstructGoalSnapshot, goalSetEntry, goalWithStatus } from "../../../pi-better-goal/src/goal-state.js";
-import { OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
+import { GOAL_PANEL_START_EVENT, OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
 import { EXTENSION_NAME } from "../../../pi-better-goal/src/types.js";
 import { currentWorkflowOwner, workflowEntry, WORKFLOW_ENTRY_TYPE } from "../../../pi-better-goal/src/workflow.js";
 import { boundPlanPath } from "../../../pi-better-goal/src/workflow-gates.js";
@@ -21,7 +21,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ piBetterHarness: {
-    outcomeTodo: { version: 1, enabled: true, ledger: options.ledger ?? false },
+    outcomeTodo: { version: 1, enabled: false, display: false, ledger: options.ledger ?? false },
     goal: { version: 1, autoStartFromOutcome: options.autoStart ?? true },
   } }));
   const entries: any[] = [];
@@ -81,6 +81,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
     goal: () => reconstructGoalSnapshot(entries),
     outcome: () => restoreOutcome(entries),
     update: (input: unknown) => tools.get("update_todo").execute("update", input, undefined, undefined, ctx),
+    getGoal: async () => (await tools.get("get_goal").execute("get", {}, undefined, undefined, ctx)).details,
     getTodo: async () => (await tools.get("get_todo").execute("get", {}, undefined, undefined, ctx)).details,
     complete: (evidence?: { criterion: string; result: string }[]) => tools.get("update_goal").execute("complete", { status: "complete", evidence }, undefined, undefined, ctx),
     command: (args: string) => commands.get("goal").handler(args, ctx),
@@ -88,6 +89,96 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
 }
 
 const accepted = { objective: "Ship checkout", doneWhen: ["Checkout succeeds"], boundaries: ["No production writes"] };
+
+for (const first of ["pause", "resume"] as const) {
+  test(`/goal ${first} controls a restored Todo with no execution record or doneWhen`, async t => {
+    const h = await fixture(t, { autoStart: false });
+    const objective = "Deliver checkout";
+    await h.update({ outcome: { objective, boundaries: ["Staging only"] }, todo: [{ step: "Verify checkout", status: "pending" }] });
+    await h.emit("session_tree");
+    const before = await h.getTodo();
+    assert.equal(h.goal(), null);
+    assert.equal((await h.getGoal()).goal.objective, objective);
+    await h.command(first);
+    const id = h.goal()?.goalId;
+    assert.ok(id);
+    assert.equal(h.goal()?.status, first === "pause" ? "paused" : "active");
+    assert.equal(h.messages.length, first === "pause" ? 0 : 1);
+    await h.emit("session_tree");
+    if (first === "pause") {
+      await assert.rejects(h.update({ goal: { objective, status: "active" } }), /goal resume/);
+      await h.command("resume");
+    }
+    assert.equal(h.messages.length, 1);
+    assert.equal(h.goal()?.goalId, id);
+    assert.equal(h.goal()?.status, "active");
+    const after = await h.getTodo();
+    assert.deepEqual(after.plan, before.plan);
+    assert.deepEqual(after.goal, { ...before.outcome, goalId: id, status: "active" });
+    await h.update({ goal: { objective: "Deliver checkout and receipts" } });
+    assert.equal(h.outcome()?.objective, "Deliver checkout and receipts");
+    assert.equal((await h.getGoal()).goal.objective, h.outcome()?.objective);
+    assert.equal(h.goal()?.goalId, id);
+  });
+}
+
+test("the panel starts only its current saved objective and ignores repeat clicks", async t => {
+  const h = await fixture(t, { autoStart: false });
+  h.ctx.hasUI = true;
+  const sessionId = h.ctx.sessionManager.getSessionId();
+  await h.update({ goal: accepted, todo: [{ step: "Check payments", status: "pending" }] });
+  const before = await h.getTodo();
+  const click = { action: "start", sessionId, objective: accepted.objective };
+  h.events.emit(GOAL_PANEL_START_EVENT, { ...click, sessionId: "another-session" });
+  h.events.emit(GOAL_PANEL_START_EVENT, { ...click, objective: "Earlier task" });
+  assert.equal(h.goal(), null);
+  h.events.emit(GOAL_PANEL_START_EVENT, click);
+  h.events.emit(GOAL_PANEL_START_EVENT, click);
+  assert.equal(h.goal()?.objective, accepted.objective);
+  assert.deepEqual((await h.getTodo()).plan, before.plan);
+  assert.equal(h.messages.length, 1);
+});
+
+test("manual controls preserve a checklist without an objective and ignore an empty session", async t => {
+  const h = await fixture(t);
+  await h.command("resume");
+  assert.equal(h.goal(), null);
+  await h.update({ todo: [{ step: "Ship the patch", status: "in_progress" }] });
+  const before = await h.getTodo();
+  await h.command("pause");
+  assert.equal(h.goal()?.status, "paused");
+  await h.command("resume");
+  assert.deepEqual((await h.getTodo()).plan, before.plan);
+  assert.equal(h.messages.length, 1);
+});
+
+test("manual controls work with legacy disabled flags and auto-run off", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.update({ goal: accepted });
+  assert.equal(h.goal(), null);
+  await h.command("pause");
+  assert.equal(h.outcome()?.status, "paused");
+  await h.emit("session_tree");
+  await h.command("resume");
+  assert.equal(h.outcome()?.status, "active");
+  assert.equal(h.settings.controls().find(control => control.id === "goal-auto-start")?.get(), "Off");
+  assert.equal(h.messages.length, 1);
+});
+
+test("manual controls never replace another unfinished Goal or restart a finished task", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.command("Ship checkout");
+  const first = h.goal()!.goalId;
+  await h.update({ newTask: true, goal: { objective: "Publish a guide" } });
+  const before = h.entries.length;
+  for (const control of ["pause", "resume"]) await h.command(control);
+  assert.equal(h.entries.length, before);
+  assert.equal(h.goal()?.goalId, first);
+  await h.command("clear");
+  await h.update({ goal: { objective: "Publish a guide", status: "complete" } });
+  await h.command("resume");
+  assert.equal(h.goal(), null);
+});
 
 test("automatic Goals retain the workflow's completion gates on creation and reopen", async t => {
   const h = await fixture(t, { workflow: "available" });
@@ -117,6 +208,37 @@ test("automatic Goals retain the workflow's completion gates on creation and reo
   await h.update({ newTask: true, outcome: accepted });
   assert.equal(h.goal()?.status, "active");
   assert.equal(h.goal()?.command, undefined, "a new task with the same objective has its own binding");
+});
+
+test("a failed workflow reopen keeps its binding across edits and reload", async t => {
+  const h = await fixture(t, { workflow: "available" });
+  await h.update({ outcome: accepted });
+  const original = h.goal()!;
+  await h.command("complete");
+  const skill = original.command!.path;
+  const contents = readFileSync(skill);
+  rmSync(skill);
+  await h.update({ outcome: { ...accepted, status: "active" } });
+  await h.emit("session_tree");
+  const refinement = { objective: "Verify deployment", doneWhen: ["Deployment checked"] };
+  await h.update({ outcome: refinement });
+  assert.equal(h.outcome()?.reopenedGoalId, original.goalId);
+  assert.equal(h.goal()?.goalId, original.goalId);
+  assert.equal(h.goal()?.status, "complete");
+
+  await assert.rejects(h.update({ todo: [] }), /Restore \/skill:rush-issues/);
+  writeFileSync(skill, "# Skill without workflow metadata");
+  await h.update({ outcome: refinement });
+  assert.equal(h.goal()?.status, "complete");
+  writeFileSync(skill, contents);
+  await h.update({ outcome: refinement });
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(h.outcome()?.reopenedGoalId, undefined);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  const result = await h.complete([{ criterion: refinement.doneWhen[0]!, result: "Verified" }]);
+  assert.equal(result.details.ok, false);
+  assert.match(result.content[0].text, /plan|scheduler/i);
 });
 
 for (const workflow of ["missing", "invalid"] as const) {
@@ -174,7 +296,7 @@ test("auto-start defaults off, enabling does not replay existing state, and disa
   assert.equal(h.goal(), null);
   const before = h.entries.length;
   const control = h.settings.controls().find(item => item.id === "goal-auto-start")!;
-  assert.equal(control.label, "Auto-start Goal");
+  assert.equal(control.label, "Auto-start Goals");
   assert.equal(control.get(), "Off");
   await control.change("On", h.ctx);
   assert.equal(control.get(), "On");
@@ -276,6 +398,10 @@ test("explicitly reopening work after a completed Goal continues its Todo with a
   await h.command("complete");
   const objective = "Verify deployment and close the issue";
   await h.update({ outcome: { objective, status: "active" }, todo: [{ step: "Verify deployment", status: "in_progress" }] });
+  assert.equal(h.goal()?.status, "complete");
+  assert.equal(h.outcome()?.goalId, undefined);
+  await h.emit("session_tree");
+  await h.command("resume");
   assert.notEqual(h.goal()?.goalId, first);
   assert.equal(h.goal()?.status, "active");
   assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
@@ -323,6 +449,15 @@ test("reopening the original slash-command Outcome restores its binding without 
   }
   const sent = h.messages.length;
   await h.update({ outcome: { objective, status: "active" } });
+  assert.equal(h.goal()?.status, "complete");
+  await h.emit("session_tree");
+  await assert.rejects(h.update({ todo: [] }), /rush-issues owns the task plan/);
+  assert.deepEqual(workflowBinding(h.entries), plan);
+  await h.command("pause");
+  assert.equal(h.goal()?.status, "paused");
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(h.messages.length, sent);
+  await h.command("resume");
   const reopened = h.goal()!;
   assert.equal(reopened.status, "active");
   assert.notEqual(reopened.goalId, original.goalId);
@@ -331,12 +466,12 @@ test("reopening the original slash-command Outcome restores its binding without 
   assert.deepEqual(workflowBinding(h.entries), plan);
   assert.equal(boundPlanPath(h.entries, currentWorkflowOwner(h.entries)!), plan.path);
   assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
-  assert.equal(h.messages.length, sent);
+  assert.equal(h.messages.length, sent + 1);
 
   await h.command("complete");
   await h.update({ outcome: { objective: "/skill:rush-issues release deployment", status: "active" } });
   assert.equal(h.goal()?.status, "complete");
-  assert.equal(h.messages.length, sent);
+  assert.equal(h.messages.length, sent + 1);
 });
 
 test("Goal completion checks the associated work ledger in a headless session", async t => {

@@ -118,9 +118,9 @@ export function openStore(options) {
             alive();
             return readOperationRecords(ctx, filter);
         },
-        listAssignmentCleanupOperations(limit, afterOperationId) {
+        listAssignmentCleanupOperations(limit, afterOperationId, hostId) {
             alive();
-            return readAssignmentCleanupOperations(ctx, limit, afterOperationId);
+            return readAssignmentCleanupOperations(ctx, limit, afterOperationId, hostId);
         },
         verifyAssignmentCleanup(operationId, launchToken, terminalRevision) {
             alive();
@@ -140,7 +140,7 @@ export function openStore(options) {
             alive();
             return readOperationEvidence(ctx, requireId("operationId", operationId), terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision));
         },
-        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
+        readDiscoveryState(scope, hostId) { alive(); return readDiscoveryState(ctx, scope, hostId); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

@@ -2157,10 +2157,9 @@ export async function reconcileParkedWaits(service, outerOptions) {
     // Consumed waits cannot resume, but a missed exit observer may have left
     // their published writer claim behind. Reconcile that exact claim once.
     const candidates = [];
-    for await (const { meta, record } of scanParkRecords()) {
-        if (!isPendingPark(record) && !(record.phase === "consumed" && record.resumedBy
-            && record.resumeClaimId && record.resumeExitReconciledClaimId !== record.resumeClaimId))
-            continue;
+    const needsReconciliation = (record) => isPendingPark(record) || (record.phase === "consumed"
+        && !!record.resumedBy && !!record.resumeClaimId && record.resumeExitReconciledClaimId !== record.resumeClaimId);
+    for await (const { meta, record } of scanParkRecords(undefined, needsReconciliation)) {
         candidates.push(parkedEntry(meta, record));
     }
     // Release earlier writers before admitting later waits in the conversation.

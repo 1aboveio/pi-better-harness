@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extension from "../../extensions/task-context/index.js";
 
-test("default off, settings toggle, outcome, goal binding, and branch restore", async () => {
+test("Todo tools work on startup and restore the bound Goal after branch navigation", async () => {
   const dir = mkdtempSync(join(tmpdir(), "task-context-"));
   const old = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -16,16 +16,11 @@ test("default off, settings toggle, outcome, goal binding, and branch restore", 
     const tools = new Map<string, any>();
     const hooks = new Map<string, any>();
     let active = ["read"];
-    let setting: any;
-    events.on("harness-settings:register", value => { if (value.id === "outcome-todo") setting = value; });
     const ctx: any = { cwd: dir, mode: "print", hasUI: false, sessionManager: { getBranch: () => entries }, ui: { setWidget() {}, setStatus() {}, notify() {} } };
     const pi: any = { events, registerTool(t: any) { tools.set(t.name, t); active.push(t.name); }, registerCommand() {}, on(n: string, h: any) { hooks.set(n, h); }, appendEntry(customType: string, data: any) { entries.push({ type: "custom", customType, data }); }, getActiveTools: () => active, setActiveTools: (next: string[]) => { active = next; } };
     extension(pi);
     await hooks.get("session_start")({}, ctx);
-    assert.deepEqual(active, ["read"]);
     assert.equal(existsSync(join(dir, "settings.json")), false);
-    await assert.rejects(tools.get("update_todo").execute("", { outcome: { objective: "x" } }, undefined, undefined, ctx), /off/);
-    await setting.change("On", ctx);
     assert.deepEqual(active, ["read", "update_todo", "get_todo"]);
     const update = (input: any) => tools.get("update_todo").execute("", input, undefined, undefined, ctx);
     const get = async () => (await tools.get("get_todo").execute("", {}, undefined, undefined, ctx)).details;
@@ -44,10 +39,6 @@ test("default off, settings toggle, outcome, goal binding, and branch restore", 
     assert.equal((await get()).outcome.status, "paused");
     entries = branch;
     await hooks.get("session_tree")({}, ctx);
-    assert.equal((await get()).outcome.objective, "Ship");
-    await setting.change("Off", ctx);
-    assert.deepEqual(active, ["read"]);
-    await setting.change("On", ctx);
     assert.equal((await get()).outcome.objective, "Ship");
     await hooks.get("session_shutdown")({}, ctx);
   } finally { if (old === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = old; rmSync(dir, { recursive: true, force: true }); }

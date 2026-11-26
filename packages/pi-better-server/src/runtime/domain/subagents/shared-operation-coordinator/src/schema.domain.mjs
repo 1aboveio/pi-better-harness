@@ -68,6 +68,42 @@ const EXPIRY_INDEXES = [
 const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX IF NOT EXISTS operations_assignment_cleanup
     ON operations (operation_id, assignment_attempt_id)
     WHERE assignment_attempt_id IS NOT NULL`;
+// Terminal evidence is written before the operation's terminal revision in the same transaction.
+function needsAssignmentCleanup(row) {
+    return `(${row}.terminal_revision = 0 OR ${row}.terminal_outcome = 'lost' OR EXISTS (
+        SELECT 1 FROM operation_evidence e WHERE e.operation_id = ${row}.operation_id
+          AND e.terminal_revision = ${row}.terminal_revision AND e.kind = 'terminal-record'
+          AND e.summary LIKE '%groupCleanup=unproven%'))`;
+}
+const CLEANUP_FOR_ASSIGNMENT = `SELECT op.operation_id, op.supervision_host_id
+    FROM assignment_attempts a JOIN operations op ON op.assignment_attempt_id = a.attempt_id
+    WHERE a.assignment_id = NEW.assignment_id AND ${needsAssignmentCleanup("op")}`;
+// Triggers also cover older processes that still have an open coordinator connection.
+const PENDING_CLEANUP_DDL = [
+    `CREATE TABLE IF NOT EXISTS assignment_cleanup_pending (
+        operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+        supervision_host_id TEXT
+    ) WITHOUT ROWID`,
+    `CREATE INDEX assignment_cleanup_host ON assignment_cleanup_pending(supervision_host_id, operation_id)`,
+    `CREATE INDEX assignment_attempts_by_assignment ON assignment_attempts(assignment_id, attempt_id)`,
+    `CREATE INDEX operations_by_assignment_attempt ON operations(assignment_attempt_id)
+        WHERE assignment_attempt_id IS NOT NULL`,
+    `CREATE TRIGGER assignment_cleanup_enqueue AFTER INSERT ON assignment_outcomes BEGIN
+        INSERT INTO assignment_cleanup_pending ${CLEANUP_FOR_ASSIGNMENT};
+    END`,
+    `CREATE TRIGGER assignment_cleanup_terminal AFTER UPDATE OF terminal_revision ON operations
+        WHEN NEW.assignment_attempt_id IS NOT NULL AND NEW.terminal_revision > 0 AND NOT ${needsAssignmentCleanup("NEW")} BEGIN
+        DELETE FROM assignment_cleanup_pending WHERE operation_id = NEW.operation_id;
+    END`,
+    `CREATE TRIGGER assignment_cleanup_transfer AFTER UPDATE OF supervision_host_id ON operations
+        WHEN NEW.assignment_attempt_id IS NOT NULL AND NEW.supervision_host_id IS NOT OLD.supervision_host_id BEGIN
+        UPDATE assignment_cleanup_pending SET supervision_host_id = NEW.supervision_host_id WHERE operation_id = NEW.operation_id;
+    END`,
+    `CREATE TRIGGER assignment_cleanup_verified AFTER INSERT ON coordinator_state
+        WHEN NEW.key GLOB 'assignment-cleanup-verified:*' BEGIN
+        DELETE FROM assignment_cleanup_pending WHERE operation_id = substr(NEW.key, length('assignment-cleanup-verified:') + 1);
+    END`,
+];
 const DDL = [
     `CREATE TABLE task_cancellation_authorities (
         credential_hash TEXT PRIMARY KEY,
@@ -289,6 +325,7 @@ const DDL = [
         PRIMARY KEY (wait_id, generation)
     )`,
     RESULT_ADMISSION_FENCE,
+    ...PENDING_CLEANUP_DDL,
 ];
 const SCHEMA_VERSION_KEY = "schema_version";
 function existingTables(ctx) {
@@ -359,14 +396,29 @@ function ensureAssignmentCleanupSchema(ctx) {
     for (const statement of EXPIRY_INDEXES)
         ctx.db.exec(statement);
     const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
-    if (hasColumn() && getRow(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'operations_assignment_cleanup'"))
+    const hasPending = () => !!getRow(ctx, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'assignment_cleanup_pending'");
+    if (hasPending())
         return;
     ctx.transaction(() => {
+        if (hasPending())
+            return;
         ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
         // Legacy writers leave the nullable provenance unset.
         if (!hasColumn())
             ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
         ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+        for (const statement of PENDING_CLEANUP_DDL)
+            ctx.db.exec(statement);
+        if (process.platform === "win32") {
+            // Earlier Windows writers mistook an unsupported group probe for proof of exit.
+            ctx.db.exec("DELETE FROM coordinator_state WHERE key GLOB 'assignment-cleanup-verified:*'");
+        }
+        ctx.db.exec(`INSERT INTO assignment_cleanup_pending
+            SELECT op.operation_id, op.supervision_host_id FROM operations op
+            JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
+            JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+            WHERE ${needsAssignmentCleanup("op")} AND NOT EXISTS (SELECT 1 FROM coordinator_state
+                WHERE key = 'assignment-cleanup-verified:' || op.operation_id)`);
     });
 }
 /**

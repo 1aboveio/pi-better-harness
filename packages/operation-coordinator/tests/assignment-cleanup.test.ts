@@ -4,7 +4,7 @@ import { afterEach, test } from "node:test";
 import { openStore, type AssignmentOutcomeInput, type Store } from "../index.ts";
 import {
     cleanupHarnesses, createHarness, expectStoreError, parentOwner, parkIntent, parkProof,
-    registerOperation, removeAssignmentOperationBinding, settleOperation, workerOwner,
+    registerOperation, removeAssignmentOperationBinding, removePendingCleanupIndex, settleOperation, workerOwner,
 } from "./support.ts";
 
 afterEach(cleanupHarnesses);
@@ -43,7 +43,7 @@ for (const outcome of ["succeeded", "failed", "cancelled"] as const) {
         const { operation } = registerOperation(h.store, { assignmentAttemptId: attemptId });
         const priorRevision = h.store.getChangeRevision();
         h.store.recordAssignmentOutcome({ ...outcomeInput, outcome });
-        assert.equal(h.store.getChangeRevision(), priorRevision + 1);
+        assert.equal(h.store.getChangeRevision(), priorRevision, "ending an assignment does not invalidate unrelated Background callback views");
         const request = { assignmentId: assignment.assignmentId, recipient: parentOwner, revision: 1 };
         h.store.receiptAssignmentOutcome({ ...request, entryId: "delivery-1" });
         h.store.inspectAssignmentOutcome(request);
@@ -166,6 +166,35 @@ test("cleanup pages cap the row count and validate limits and cursors", () => {
     expectStoreError(() => cleanupIds(store, -1), "validation", /limit/);
     expectStoreError(() => cleanupIds(store, 1, ""), "validation", /afterOperationId/);
 });
+
+for (const platform of new Set([process.platform, "win32"])) {
+    test(`upgrading the cleanup index recovers outstanding work and routes it to the current host (${platform})`, () => {
+        const h = createHarness();
+        h.store.registerAssignment({ ...assignment, attemptId });
+        for (const operationId of ["running", "lost", "settled", "verified"]) {
+            registerOperation(h.store, { operationId, assignmentAttemptId: attemptId });
+        }
+        h.store.recordAssignmentOutcome(outcomeInput);
+        settleOperation(h.store, "settled");
+        for (const operationId of ["lost", "verified"]) settleOperation(h.store, operationId, "lost");
+        const verified = h.store.getOperation("verified")!;
+        assert.equal(h.store.verifyAssignmentCleanup(verified.operationId, verified.launchToken, 1), true);
+        h.closeStore();
+        const db = new DatabaseSync(h.path);
+        try { removePendingCleanupIndex(db); } finally { db.close(); }
+        const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+        try {
+            Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+            h.reopen();
+        } finally { Object.defineProperty(process, "platform", descriptor); }
+        const historicalVerifications = platform === "win32" ? ["verified"] : [];
+        assert.deepEqual(cleanupIds(h.store), ["lost", "running", ...historicalVerifications]);
+        h.store.recordSupervision({ operationId: "running", owner: workerOwner, expectedHostId: "host-1",
+            supervision: { hostId: "peer" }, health: "active" });
+        assert.deepEqual(h.store.listAssignmentCleanupOperations(10, undefined, "host-1").map(op => op.operationId), ["lost", ...historicalVerifications]);
+        assert.deepEqual(h.store.listAssignmentCleanupOperations(10, undefined, "peer").map(op => op.operationId), ["running"]);
+    });
+}
 
 test("v4 migration keeps legacy operations unbound even when their owner has a committed outcome", () => {
     const h = createHarness();

@@ -319,7 +319,7 @@ test("stage headers aggregate every applicable issue, even when fleet entries di
     disclosure: "▸", runtime: { status: "active", clock: "2:14" },
   })[0]!;
   for (const width of [40, 100]) {
-    assert.match(widgetHeader(width), /^todo ▸  0\/7 complete · ●\s+active  2:14$/);
+    assert.match(widgetHeader(width), /^todo ▸  0\/7 complete(?: · ●)?\s+goal active  2:14$/);
   }
 
   workflow.issues[0] = unit("1", { status: "pending", stage: "pending", headSha: undefined, reviewedHead: undefined, delivery: undefined });

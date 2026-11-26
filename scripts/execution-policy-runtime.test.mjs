@@ -75,8 +75,6 @@ async function harness(extensions, options = {}) {
     sessionManager: { getBranch: () => entries },
     ui: { notify() {}, setWidget() {}, setStatus() {} },
   };
-  const todoControl = controls.get("outcome-todo");
-  if (options.enableTodo !== false && todoControl) await todoControl.change("On", ctx);
   let lastSections = new Map();
   return {
     tools, commands, entries, ctx, controls, forced,
@@ -133,12 +131,12 @@ test("each standalone execution surface delivers the shared policy without creat
   }
 });
 
-test("the Harness execution policy still applies while Outcome & Todo defaults off", async () => {
+test("the Harness execution policy still applies with legacy disabled Todo settings", async () => {
   const h = await harness([subagents, backgroundTasks, taskContext], { enableTodo: false });
-  assert.equal(h.controls.get("outcome-todo")?.get(), "Off");
+  assert.equal(h.controls.has("outcome-todo"), false);
   const prompt = await h.prompt();
   assert.equal(prompt.split(heading).length - 1, 1, "another Harness publisher still delivers the policy");
-  assert.equal(h.entries.length, 0, "a disabled feature must not write session state to deliver the policy");
+  assert.equal(h.entries.length, 0, "delivering policy must not write session state");
 });
 
 test("combined extensions inject once in every load order and again in fresh turns and runtimes", async () => {

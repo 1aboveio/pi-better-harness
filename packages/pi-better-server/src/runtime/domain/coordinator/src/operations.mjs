@@ -312,24 +312,17 @@ export function listOperations(ctx, filter = {}) {
     return getRows(ctx, `SELECT *, EXISTS(SELECT 1 FROM coordinator_state s WHERE s.key = 'result-supervision-v1:' || operations.operation_id) AS result_managed FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
         .map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
-export function listAssignmentCleanupOperations(ctx, limit, afterOperationId) {
+export function listAssignmentCleanupOperations(ctx, limit, afterOperationId, hostId) {
     const requested = requireCounter("limit", limit);
     if (requested === 0)
         throw new StoreError("validation", "Invalid limit: must be at least 1");
     const cursor = afterOperationId === undefined ? "" : requireId("afterOperationId", afterOperationId);
-    // Seek the partial index in cursor order rather than sorting all running operations.
+    const params = hostId === undefined ? [] : [requireId("hostId", hostId)];
     return getRows(ctx, `SELECT op.*, EXISTS(SELECT 1 FROM coordinator_state s
             WHERE s.key = 'result-supervision-v1:' || op.operation_id) AS result_managed
-        FROM operations op INDEXED BY operations_assignment_cleanup
-        JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
-        JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
-        WHERE op.assignment_attempt_id IS NOT NULL AND op.operation_id > ?
-            AND (op.terminal_revision = 0 OR op.terminal_outcome = 'lost'
-                OR EXISTS (SELECT 1 FROM operation_evidence e WHERE e.operation_id = op.operation_id
-                    AND e.terminal_revision = op.terminal_revision AND e.kind = 'terminal-record'
-                    AND e.summary LIKE '%groupCleanup=unproven%'))
-            AND NOT EXISTS (SELECT 1 FROM coordinator_state s WHERE s.key = 'assignment-cleanup-verified:' || op.operation_id)
-        ORDER BY op.operation_id LIMIT ?`, cursor, Math.min(requested, ASSIGNMENT_CLEANUP_PAGE_MAX))
+        FROM assignment_cleanup_pending p CROSS JOIN operations op ON op.operation_id = p.operation_id
+        WHERE ${hostId === undefined ? "" : "p.supervision_host_id = ? AND "}p.operation_id > ?
+        ORDER BY p.operation_id LIMIT ?`, ...params, cursor, Math.min(requested, ASSIGNMENT_CLEANUP_PAGE_MAX))
         .map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
 /** Running operations assigned to one supervising host, using the phase/host index. */

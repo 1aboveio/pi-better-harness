@@ -11,7 +11,8 @@ export const controlCopy = new Map<string, SettingCopy>([
     description: "When the session is waiting for a local task with callbacks on, Pi asks the main agent to review it after this long without progress. Each review shows elapsed time and the last check or output.",
   }],
   ["goal-auto-start", {
-    description: "Start a Goal automatically when Pi accepts an Outcome with work to do and there is no unfinished Goal.",
+    label: "Auto-start Goals",
+    description: "Start a Goal when Pi saves acceptance criteria, reopens completed work, or runs an issue workflow. When off, use /goal resume to start saved work.",
   }],
   ["tool-call-guard", {
     label: "Foreground wait guard",
@@ -21,7 +22,7 @@ export const controlCopy = new Map<string, SettingCopy>([
     description: "Choose when Pi can plan a workflow automatically. Adaptive uses workflows for dependencies, handoffs or review. /dynamic-workflow starts one run in every mode.",
   }],
   ["outcome-todo", {
-    label: "Outcome and Todo tools",
+    label: "Goal and Todo tools",
     description: "Lets Pi record what the session should deliver and track its progress as a checklist.",
   }],
   ["outcome-todo-ledger", {
@@ -29,8 +30,8 @@ export const controlCopy = new Map<string, SettingCopy>([
     description: "Lets sessions attach a saved project checklist and carry its progress across sessions. Use /ledger to list or attach a ledger.",
   }],
   ["outcome-todo-display", {
-    label: "Outcome and Todo panel",
-    description: "Shows the session objective and checklist in the TUI when Outcome and Todo tools are on.",
+    label: "Goal and Todo panel",
+    description: "Shows the saved Goal, its execution status, and Todo steps. The panel also works with the tools off.",
   }],
   ["navigator-sticky", {
     label: "Pin work panels",
@@ -58,7 +59,7 @@ export const linkCopy = new Map<string, SettingCopy>([
     description: "Browse the agents Pi can delegate to and manage their profiles.",
   }],
   ["goal", {
-    label: "Goal settings",
+    label: "Goal execution settings",
     description: "Choose when Goals continue automatically, resume from conversation, or pause on Escape.",
   }],
   ["sandbox", {

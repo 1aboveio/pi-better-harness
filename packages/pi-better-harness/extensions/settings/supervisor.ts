@@ -6,8 +6,8 @@ import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from ".
 const key = "supervisorMode";
 const options = new Map([
   ["ci-observation", "CI observation recovery"],
-  ["stall-diagnosis", "Diagnose stalled Outcomes"],
-  ["scope-review", "Review Outcome scope"],
+  ["stall-diagnosis", "Diagnose stalled Goals"],
+  ["scope-review", "Review Goal scope"],
   ["shared-fault", "Shared daemon fault diagnosis"],
   ["shared-decisions", "Consolidate authorization requests"],
   ["commitment-followup", "Follow up on recovery commitments"],

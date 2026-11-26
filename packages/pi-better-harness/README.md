@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` is a Pi meta package for an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and Outcome & Todo.
+`pi-better-harness` is a Pi meta package for an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and Goal & Todo.
 
 ## Quick Answer
 
@@ -13,61 +13,43 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-ssh` for short remote commands over reusable SSH connections.
 - `pi-better-goal` for explicit triggers, pause/resume, and background-aware continuation.
-- Harness-owned Outcome & Todo for session context and checklist progress. Saved state displays by default; its hooks start off.
+- Harness-owned Goal & Todo for session context and checklist progress. Saved work appears in the panel. Automatic Goal execution defaults to Off.
 
 `pi-better-read-aloud` is intentionally not included yet.
 
-## Outcome & Todo
+<a id="outcome--todo"></a>
+## Goal & Todo
 
-In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
-defaults to **On**, and **Outcome and Todo tools** (`outcome-todo`) defaults to
-**Off**. **Project work ledger** (`outcome-todo-ledger`) is a third independent
-control and defaults to **Off**. Saved outcomes and checklists display even when
-hooks are off; missing state creates no placeholder, state, or settings. Turning
-display off does not disable hooks. Saved v1 `enabled` remains the hooks
-authority; the optional display and ledger preferences default to their existing
-or conservative values.
+The Goal records what the user wants to achieve. Its Todo lists the steps. The
+panel shows checklist progress on the left and Goal status on the right. A
+saved Goal has a **Start Goal** button. Click it or press **Alt+G** to start work
+with the existing checklist. Use `/goal pause` to interrupt
+foreground work and hold continuation. Both commands use the current Todo,
+including checklists saved before a Goal was attached.
 
-The compact widget has one Todo heading, with a caret after Todo and the completion
-count on the left. A matching Goal's status and existing active-time clock appear
-on the right. The outcome is one muted, truncated subtitle. The collapsed view
-shows up to five relevant rows; the expanded view shows all rows. Click to toggle.
-`/todo` reveals the compact Overview (when display is on) and returns it to automatic display;
-`/todo expand` and `/todo collapse` control which rows it shows. The full
-objective, acceptance criteria, boundaries, and plan remain available through
-`get_todo` when hooks are enabled. Todo commands remain available with hooks off
-for explicit user control.
+`/harness-settings` has one Goal setting, **Auto-start Goals** (default **Off**).
+Turn it on to start a newly saved Goal with acceptance criteria, restart explicitly
+reopened work, or bind a Goal when invoking `/skill:rush-issues` or
+`/skill:resolve-issues`. Changing the switch takes effect on the next such action.
+With it off, use `/goal resume` to start saved work manually.
 
-An accepted outcome can be saved without a checklist. Completing or clearing its
-Todo does not complete or remove the outcome. Write labels as short, plain actions,
-usually 3-7 words: "Add Todo toggle", "Keep session state", or "Test keyboard controls".
-Keep methods, file paths, and acceptance criteria in the outcome or supporting
-records. This is writing guidance, not a hard limit or automatic truncation;
-existing saved labels remain unchanged until deliberately updated.
+The panel shows `goal saved` before execution starts and `goal active` with a
+clock while it runs. Use `/todo` to reveal the panel and `/todo expand` to see
+all steps. `get_todo` returns the full Goal and Todo, including acceptance criteria
+and boundaries. Completing a step updates checklist progress. The Goal stays
+open until its completion is recorded.
 
-Use `newTask: true` with a new
-outcome for unrelated work; a correction to the current task keeps its binding.
-Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
-writes, outcome updates, and automated cleanup. With hooks enabled, Harness records
-a hidden, persistent outcome update at the next agent start only when its content
-changes. It does not rebuild reminders before each model call. Turning hooks off stops those
-hooks without deleting saved state or starting a turn. `/goal` and skills never
-enable them.
-
-In `/harness-settings`, **Auto-start Goal** optionally starts
-a Goal after a successful explicit outcome save with an objective and nonempty
-`doneWhen` criteria. It defaults Off; `/goal settings auto-start-from-outcome on`
-enables it. Existing active, paused or budget-limited Goals stay unchanged, and
-restoring state or toggling settings never starts work. The outcome and Todo are
-preserved; subsequent continuation follows the existing Goal controls.
+Use `update_todo({ goal: { objective, doneWhen, boundaries }, todo })` to save
+work. Any of `doneWhen`, `boundaries` and `todo` may be omitted. Set
+`newTask: true` for an unrelated task. Existing session records, settings and
+clients using the legacy `outcome` field remain supported.
 
 Todo uses the same workflow view for a bound task plan and a dynamic workflow.
 It shows tasks on the left and the workflow diagram on the right. Below 36 terminal
 columns, the diagram follows the task list.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
-revision checks stay unchanged; skills continue using their own records when the
-optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
+revision checks continue to govern workflow-owned plans. See the [usage guide](docs/usage.md#goal--todo).
 
 ### Dynamic workflows
 
@@ -130,7 +112,7 @@ For project-local Pi settings:
 npx pi-better-harness install --local
 ```
 
-The installer also registers Harness with filters for its own settings, minimal output, and Outcome & Todo extensions. It removes an old `pi-better-plan` registration in the selected scope. The component packages keep their separate identities. Pi's normal installation prompts and errors still apply.
+The installer also registers Harness with filters for its own settings, minimal output, and Goal & Todo extensions. It removes an old `pi-better-plan` registration in the selected scope. The component packages keep their separate identities. Pi's normal installation prompts and errors still apply.
 
 The single-bundle installation remains available:
 
@@ -144,8 +126,7 @@ Cloud provider and requires Pi's `registerVirtualModel` API.
 
 After a normal bundle install or `pi update`, Harness masks any separately loaded
 `pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
-or prompt hooks. This applies in either load order, including when Outcome & Todo
-hooks are off. The old registration and cached files may remain, but are inactive while
+or prompt hooks. This applies in either load order. The old registration and cached files may remain, but are inactive while
 Harness is loaded. Settings and session history are not rewritten. The explicit
 installer above removes the old registration in its selected scope instead.
 
@@ -234,7 +215,7 @@ pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 The bundled harness provides `/harness-settings`, using Pi's native settings
 list. Work planning comes first, followed by delegation and sandbox access,
 background waits and completion delivery, then display settings. It opens
-the settings screens of loaded Sandbox, Subagents, and Goal
+the settings screens of loaded Sandbox and Subagents
 packages without duplicating their configuration, plus the **Agent catalog** shortcut
 to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
@@ -248,7 +229,7 @@ Worker-owned tasks expose status and logs; their execution remains managed by th
 owning agent. Older worker tasks appear when a retained assignment wait proves
 their parent, so unrelated sessions are never inferred from a reused conversation.
 
-**Pin work panels** controls the shared navigator used by Goal, Outcome & Todo,
+**Pin work panels** controls the shared navigator used by Goal & Todo,
 Subagents, and Background Tasks. **On** (the default) keeps it above the input;
 **Off** places it in the conversation so it scrolls with chat. Changes apply
 immediately and save under `piBetterHarness.navigator` for future sessions.
@@ -353,15 +334,15 @@ Open **Supervisor mode** in `/harness-settings`. Turn it on and select the scena
 | Scenario | What the owner receives |
 | --- | --- |
 | CI observation recovery | A suggestion to resume observation of the original GitHub run when its local watcher exits and a fresh check confirms the run is active. Use `supervisor_consult` for the managed observer. |
-| Diagnose stalled Outcomes | A diagnostic review after repeated identical successful repository reads return the same evidence throughout the stall interval. |
-| Review Outcome scope | A review of changed Todo steps against the latest user instruction and Outcome. The owner chooses which steps to keep or prune. Use `supervisor_review` for an on-demand review. |
+| Diagnose stalled Goals | A diagnostic review after repeated identical successful repository reads return the same evidence throughout the stall interval. |
+| Review Goal scope | A review of changed Todo steps against the latest user instruction and Goal. The owner chooses which steps to keep or prune. Use `supervisor_review` for an on-demand review. |
 | Shared daemon fault diagnosis | A shared read-plane diagnosis with an owner-specific verification step when a runtime read fails and the daemon confirms degraded or rebuilding inventory. |
 | Consolidate authorization requests | Owners in a trusted workspace can use `supervisor_request_decision` for the same proposal. The dialog shows the reference, operation, host, resource, side effect, workspace and validity period. Execution still needs the permissions normally required by the tool. |
 | Follow up on recovery commitments | Use `supervisor_followup` to record the action, expected verification and actual tool results. Read progress with `/supervisor-followup`. Request one reminder with `/supervisor-followup remind <id> <minutes>`. |
 
 ## When To Use
 
-Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or model routing. Outcome & Todo is available through Harness.
+Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or model routing. Goal & Todo is available through Harness.
 
 ## Compatibility
 

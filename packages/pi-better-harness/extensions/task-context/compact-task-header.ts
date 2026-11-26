@@ -4,14 +4,19 @@ import type { PlanRenderTheme } from "./plan-presentation.js";
 export interface CompactTaskHeader {
   subtitle?: string;
   disclosure?: string;
-  runtime?: { status: string; clock?: string };
+  onStartButton?: (row: number, left: number, right: number) => void;
+  runtime?: { status: string; clock?: string; subject?: "workflow" };
   /** Preformatted high-level ledger counts shown in the existing Todo surface. */
   ledger?: string;
 }
 
+function runtimeLabel(runtime: NonNullable<CompactTaskHeader["runtime"]>): string {
+  return `${runtime.subject ?? "goal"} ${runtime.status}`;
+}
+
 export function canRenderTaskRuntime(width: number, runtime: CompactTaskHeader["runtime"]): boolean {
   if (!runtime || !Number.isFinite(width)) return false;
-  return visibleWidth(runtime.status + (runtime.clock ? `  ${runtime.clock}` : "")) + 6 <= Math.floor(width);
+  return visibleWidth(runtimeLabel(runtime) + (runtime.clock ? `  ${runtime.clock}` : "")) + 6 <= Math.floor(width);
 }
 
 export function renderCompactTaskHeader(summary: string | undefined, width: number, theme: PlanRenderTheme, header: CompactTaskHeader, inProgress = false): string[] {
@@ -20,7 +25,7 @@ export function renderCompactTaskHeader(summary: string | undefined, width: numb
     (summary ? theme.fg("dim", `  ${summary}`) : "");
   const runtime = header.runtime;
   const tone = runtime?.status === "complete" ? "success" : runtime?.status === "active" ? "accent" : "warning";
-  const right = runtime ? theme.fg(tone, runtime.status) + (runtime.clock ? theme.fg("dim", `  ${runtime.clock}`) : "") : "";
+  const right = runtime ? theme.fg(tone, runtimeLabel(runtime)) + (runtime.clock ? theme.fg("dim", `  ${runtime.clock}`) : "") : "";
   const rightWidth = visibleWidth(right);
   const showRuntime = right && canRenderTaskRuntime(size, runtime);
   const leftWidth = showRuntime ? Math.max(4, size - rightWidth - 2) : size;
@@ -43,6 +48,16 @@ export function renderCompactTaskHeader(summary: string | undefined, width: numb
     const text = header.ledger.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
     details.push(" ".repeat(indent) + theme.fg("dim", truncateToWidth(text, size - indent)));
   }
-  if (details.length > 0) lines.push(...details, "");
+  if (details.length > 0) {
+    lines.push(...details);
+    const fullLabel = "[Start Goal · Alt+G]";
+    const label = indent + fullLabel.length <= size ? fullLabel : "[Start]";
+    if (header.onStartButton && size >= indent + label.length) {
+      header.onStartButton(lines.length, indent, indent + label.length);
+      lines.push(" ".repeat(indent) + theme.fg("accent", label));
+    } else {
+      lines.push("");
+    }
+  }
   return lines;
 }

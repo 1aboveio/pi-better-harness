@@ -13,7 +13,7 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
+| Harness Goal & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
 
 Install `pi-better-model-router` separately to route between DeepSeek and Ollama
 Cloud by estimated price. The router package includes the Ollama Cloud provider
@@ -111,16 +111,14 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
 
-### Outcome & Todo release contract
+### Goal & Todo release contract
 
-In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
-defaults to On. **Outcome and Todo tools** (legacy id `outcome-todo`) defaults to Off.
-Saved v1 `enabled` remains the hooks authority, and the new optional display
-preference defaults to true. Saved state renders with hooks off; missing state
-creates no placeholder, state, or settings. Display off leaves hooks active.
-Hooks control the Todo tools, capture, matching Goal lifecycle bridge writes,
-reminders, and automated cleanup; `/todo` commands remain available for explicit
-user control with hooks off.
+**Auto-start Goals** is the only Goal control in `/harness-settings` and defaults
+to Off. Harness makes the Todo tools available and displays saved work on startup,
+including for legacy settings with `enabled: false` or `display: false`. Empty
+sessions render no placeholder and write no task state. Test manual pause and
+resume with auto-start off, including after reload. Use `/todo hide` and
+`/todo show` to control the panel for the current session branch.
 
 The compact widget has one Todo heading with the caret after Todo, the completion
 count on the left, and matching Goal status and its existing active-time clock on
@@ -128,7 +126,7 @@ the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
 to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
 reveals the compact Overview when display is on and returns it to automatic
 display; the full objective, acceptance criteria, boundaries, and plan remain
-available through `get_todo` when hooks are enabled. Subagent and background-task rows open their
+available through `get_todo`. Subagent and background-task rows open their
 existing navigator details on click; Enter and keyboard controls remain, and
 editor input stays passive.
 Harness packages do not write to Pi's status bar, including Goal holds, SSH
@@ -137,8 +135,7 @@ their state displays; permission checks and pause/resume rules are unchanged.
 
 Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
 `display: true` means Harness actually displays the requested `goalId`; only then
-is the standalone Goal clock suppressed. `enabled` remains the hook and prompt
-authority. Standalone Goal and hidden or unmatched fallback remain available. See
+is the standalone Goal clock suppressed. `enabled` indicates that Harness owns the task context. Standalone Goal and hidden or unmatched fallback remain available. See
 [ADR 0018](adr/0018-harness-outcome-todo.md) for the contract and history.
 
 ### Harness settings verification

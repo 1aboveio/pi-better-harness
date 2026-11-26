@@ -48,7 +48,7 @@ export function renderDynamicFrame(run: WorkflowRun, width: number, theme: Workf
   const completed = rows.filter(row => row.state === "complete").length;
   const total = rows.filter(row => row.state !== "standby").length;
   const heading = renderCompactTaskHeader(completed + "/" + total, size, theme, {
-    ...header, subtitle: run.objective, runtime: header.runtime ?? { status: run.evidence ? "complete" : "active" },
+    ...header, subtitle: run.objective, runtime: header.runtime ?? { subject: "workflow", status: run.evidence ? "complete" : "active" },
   });
 
   const frame = renderWorkflowFrame(rows, diagramNodes(run, selected), heading, size, theme, expanded);

@@ -4,9 +4,15 @@ import type { GoalSnapshot } from "./types.js";
 /** Synchronous request bus shared with an installed `pi-better-harness` runtime. */
 export const TASK_CONTEXT_EVENT = "pi-better-harness:task-context";
 
-export type TaskContextAction = "inspect" | "audit" | "start" | "bind" | "pause" | "resume" | "complete";
+export type TaskContextAction = "saved" | "adopt" | "inspect" | "audit" | "start" | "bind" | "pause" | "resume" | "complete";
 
 export const OUTCOME_ACCEPTED_EVENT = "pi-better-harness:outcome-accepted";
+
+/** The Todo panel probes once on installation and requests a start only on a user click. */
+export const GOAL_PANEL_START_EVENT = "pi-better-goal:panel-start";
+export type GoalPanelStartRequest =
+  | { action: "probe"; available?: boolean }
+  | { action: "start"; sessionId: string; objective: string };
 
 export interface OutcomeAcceptedEvent {
   sessionId: string;
@@ -38,6 +44,10 @@ export function canStartGoalFromOutcome(value: unknown, reopenedGoal?: Pick<Goal
  */
 export interface TaskContextRequest {
   action: TaskContextAction;
+  savedGoal?: { objective: string; status: string; goalId?: string; reopenedGoalId?: string };
+  handoffOwner?: string;
+  manual?: boolean;
+  status?: GoalSnapshot["status"];
   doneWhen?: readonly string[];
   openSteps?: readonly string[];
   /** Evidence retained by a finished workflow bound to this Goal. */
@@ -68,12 +78,15 @@ export function requestTaskContext(
   action: TaskContextAction,
   goal?: GoalSnapshot | null,
   width?: number,
+  manual = false,
 ): TaskContextRequest {
   const request: TaskContextRequest = { action };
+  if (manual) request.manual = true;
   if (width !== undefined) request.width = width;
   if (goal) {
     request.goalId = goal.goalId;
-    if (action === "start" || action === "bind") request.objective = goal.objective;
+    if (action === "adopt") request.status = goal.status;
+    if (action === "start" || action === "bind" || action === "adopt") request.objective = goal.objective;
   }
   pi.events.emit(TASK_CONTEXT_EVENT, request);
   return request;

@@ -9,14 +9,6 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import extension from "../../extensions/task-context/index.js";
 
-interface SettingControl {
-  id: string;
-  get(): string;
-  change(value: string, ctx: ExtensionContext): Promise<void>;
-}
-
-// Enabling Outcome & Todo goes through its real settings control, and every
-// write goes to a private agent directory rather than the developer's own.
 const agentDir = mkdtempSync(join(tmpdir(), "task-context-agent-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -25,14 +17,6 @@ process.on("exit", () => {
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   rmSync(agentDir, { recursive: true, force: true });
 });
-
-function captureSettings(events: EventEmitter): { current(): SettingControl | undefined } {
-  let control: SettingControl | undefined;
-  events.on("harness-settings:register", (candidate: SettingControl) => {
-    if (candidate?.id === "outcome-todo") control = candidate;
-  });
-  return { current: () => control };
-}
 
 interface Harness {
   cwd: string;
@@ -88,7 +72,6 @@ async function harness(options: { plan?: Record<string, unknown>; indent?: numbe
     ui: { setStatus() {}, setWidget(_name: string, factory: unknown) { widgetFactory = factory; }, notify() {} },
   } as unknown as ExtensionContext;
   const events = new EventEmitter();
-  const settings = captureSettings(events);
   const pi = {
     events,
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
@@ -98,7 +81,6 @@ async function harness(options: { plan?: Record<string, unknown>; indent?: numbe
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")?.({}, ctx);
-  await settings.current()!.change("On", ctx);
   return {
     cwd, runDir, path, entries, tools, ctx,
     widget: () => widgetFactory({ requestRender() {} }, { fg: (_c: string, v: string) => v }).render(160).join("\n"),
@@ -565,7 +547,7 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     const original = readFileSync(h.path, "utf8");
     const change = { workflow: { event: "x", changes: [{ id: "1201", set: { status: "succeeded" } }] } };
     await assert.rejects(h.update(change), /No workflow owns the task plan; send plan instead of workflow/);
-    await assert.rejects(h.update({}), /Send outcome, todo, or workflow/);
+    await assert.rejects(h.update({}), /Send goal, todo, or workflow/);
     const generic = await h.update({ todo: [{ step: "Generic", status: "in_progress" }] });
     assert.equal((generic.details as any).plan.steps[0].step, "Generic");
 

@@ -3,7 +3,7 @@ import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCompactTaskHeader } from "../../extensions/task-context/compact-task-header.js";
-import { changeOutcomeTodoPreference, parseOutcomeTodoPreferences } from "../../extensions/task-context/preferences.js";
+import { changeLedgerPreference, parseOutcomeTodoPreferences } from "../../extensions/task-context/preferences.js";
 
 const theme = { fg: (_color: string, value: string) => value };
 
@@ -14,7 +14,7 @@ test("the task header groups its subtitle with progress and runtime without chan
     assert.equal(lines.length, 3);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `fits ${width} terminal cells`);
     if (width >= 40) {
-      assert.match(lines[0]!, /^todo ▸  2\/8 complete\s+active  2:14$/);
+      assert.match(lines[0]!, /^todo ▸  2\/8 complete\s+goal active  2:14$/);
       assert.equal(lines[2], "");
     }
     if (width >= 80) assert.equal(lines[1], "  Deliver checkout with a working 支付 flow");
@@ -44,18 +44,12 @@ test("the existing Todo header adds one bounded ledger count line without a seco
   }
 });
 
-test("display, hooks, and ledger defaults and independent changes are validated without mutation", () => {
-  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true, ledger: false });
-  for (const enabled of [false, true]) {
-    const legacy = Object.freeze({ version: 1, enabled });
-    assert.deepEqual(parseOutcomeTodoPreferences(legacy), { ...legacy, display: true, ledger: false });
-    const hidden = changeOutcomeTodoPreference(legacy, "display", false);
-    assert.deepEqual(hidden, { ...legacy, display: false, ledger: false });
-    assert.deepEqual(changeOutcomeTodoPreference(hidden, "enabled", !enabled), { version: 1, enabled: !enabled, display: false, ledger: false });
-    assert.deepEqual(changeOutcomeTodoPreference(hidden, "ledger", true), { version: 1, enabled, display: false, ledger: true });
-    assert.deepEqual(legacy, { version: 1, enabled });
-  }
-  for (const invalid of [null, [], false, { version: 2 }, { version: 1, enabled: "false" }, { version: 1, display: 0 }, { version: 1, ledger: "On" }]) {
-    assert.throws(() => changeOutcomeTodoPreference(invalid, "display", true), /Invalid outcomeTodo/);
+test("changing ledger settings preserves legacy fields without requiring them", () => {
+  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, ledger: false });
+  const legacy = Object.freeze({ version: 1, enabled: false, display: false, custom: 7 });
+  assert.deepEqual(parseOutcomeTodoPreferences(legacy), { version: 1, ledger: false });
+  assert.deepEqual(changeLedgerPreference(legacy, true), { ...legacy, ledger: true });
+  for (const invalid of [null, [], false, { version: 2 }, { version: 1, ledger: "On" }]) {
+    assert.throws(() => changeLedgerPreference(invalid, true), /Invalid outcomeTodo/);
   }
 });

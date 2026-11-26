@@ -1052,6 +1052,34 @@ describe("worker operation service", () => {
     };
   }
 
+  it("stops assignment work on its live supervisor while another host holds discovery", async () => {
+    const root = workspace("assignment-owner-follower");
+    const holder = startHost({ root }).host;
+    await holder.reconcileNow();
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    cleanups.push(() => store.close());
+    const run = { ...runScope(root), assignmentAttemptId: "ending-attempt" };
+    const owner = { kind: "worker-conversation" as const, sessionId: run.conversationId, workspace: root, branchId: run.branchId };
+    const recipient = { kind: "parent-session" as const, sessionId: "parent", workspace: root };
+    store.registerAssignment({ assignmentId: "ending", attemptId: run.assignmentAttemptId, owner, recipient });
+    const follower = startHost({ root }).host;
+    await follower.reconcileNow();
+    const launch = await follower.service.launchForWorker(run, {
+      kind: "process", params: { argv: nodeCommand("setInterval(() => {}, 1000)"), shell: false, callback: false },
+    });
+    const supervisor = createLocalSupervisor({ directory: join(root, "supervisor") });
+    try {
+      store.recordAssignmentOutcome({ assignmentId: "ending", owner, recipient, revision: 1, outcome: "succeeded",
+        reason: "Done", processUncertain: false, waits: [], evidence: [] });
+      await holder.reconcileNow();
+      expect(supervisor.snapshot(launch.id)?.terminal).toBe(false);
+      await until(follower, () => store.listAssignmentCleanupOperations(1).length === 0);
+      expect(supervisor.snapshot(launch.id)?.status).toBe("cancelled");
+    } finally {
+      await supervisor.stop(launch.id);
+    }
+  });
+
   it("publishes a versioned service on the event bus", () => {
     const root = workspace("service");
     const harness = createHarness();

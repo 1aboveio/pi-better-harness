@@ -4,12 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { createLocalSupervisor, supervisorTaskIdForToken } from "../../pi-better-background-tasks/src/supervisor/index.ts";
-import { writeLostRecord, writeStopRequest } from "../../pi-better-background-tasks/src/supervisor/store.ts";
-import { processGroupAlive } from "../../pi-better-background-tasks/src/supervisor/identity.ts";
-import { DEFAULT_STOP_WAIT_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_TERMINATION_GRACE_MS } from "../../pi-better-background-tasks/src/supervisor/types.ts";
+// @ts-expect-error Generated Background supervisor module.
+import { createLocalSupervisor, supervisorTaskIdForToken } from "../src/runtime/domain/background-service/supervisor/index.domain.mjs";
+// @ts-expect-error Generated Background supervisor module.
+import { writeLostRecord, writeStopRequest } from "../src/runtime/domain/background-service/supervisor/store.domain.mjs";
+// @ts-expect-error Generated Background supervisor module.
+import { processGroupAlive, processGroupExitVerified } from "../src/runtime/domain/background-service/supervisor/identity.domain.mjs";
+// @ts-expect-error Generated Background supervisor module.
+import { DEFAULT_STOP_WAIT_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_TERMINATION_GRACE_MS } from "../src/runtime/domain/background-service/supervisor/types.domain.mjs";
 import { acquireMutationStore } from "../src/runtime/mutation-store.ts";
 import { RuntimeResultSupervision } from "../src/runtime/result-supervision.ts";
+
+test("Windows PID and legacy group-empty records cannot verify a process tree", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    assert.equal(processGroupExitVerified(process.pid), false);
+    assert.equal(processGroupExitVerified(process.pid, true), false);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
 
 for (const scenario of ["fresh", "stop-requested", "lost"] as const) test(`restarted supervision cleans up exact assignment work (${scenario})`, { timeout: 30000, skip: process.platform === "win32" }, async () => {
   const root = mkdtempSync(join(tmpdir(), "assignment-cleanup-"));
@@ -54,6 +69,19 @@ for (const scenario of ["fresh", "stop-requested", "lost"] as const) test(`resta
     lease.store.recordAssignmentOutcome({ assignmentId: "ending", revision: 1, owner, recipient, outcome: "succeeded",
       reason: "Done", processUncertain: false, evidence: [], waits: [] });
     host = new RuntimeResultSupervision(root, "replacement");
+    if (scenario === "lost") {
+      // The first pass adopted the old grant. Wrap the cleanup cursor and start the stop.
+      host.reconcile();
+      host.reconcile();
+      assert.equal(host.busy, true);
+      assert.equal(lease.store.getOperation("ending").terminalOutcome, "lost");
+      const closed = host.close();
+      assert.equal(host.close(), closed);
+      await closed;
+      assert.equal(host.busy, false);
+      assert.equal(processGroupAlive(pgid), false);
+      host = new RuntimeResultSupervision(root, "after-drain");
+    }
     if (pausedRunner !== undefined) {
       const stopDeadline = Date.now() + DEFAULT_STOP_WAIT_MS + SUPERVISOR_TERMINATION_GRACE_MS + SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS + 4000;
       while (!supervisor.snapshot(target.taskId)?.cleanup && Date.now() < stopDeadline) await delay(25);
@@ -69,7 +97,7 @@ for (const scenario of ["fresh", "stop-requested", "lost"] as const) test(`resta
     assert.equal(lease.store.getOperation("independent").terminalRevision, 0);
     assert.deepEqual(lease.store.listAssignmentCleanupOperations(10), []);
   } finally {
-    host?.close();
+    await host?.close();
     if (pausedRunner !== undefined) {
       try { process.kill(pausedRunner, "SIGCONT"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }

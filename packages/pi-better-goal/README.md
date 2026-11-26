@@ -31,7 +31,7 @@ never falls back to a global scanner. Elapsed-clock rendering reads only session
 memory and does not collect activity.
 
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
-- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Automatic continuation, conversational resume, and **Pause on Esc** default to `on`. **Auto-start Goal** defaults to `off` and is also available directly on the `/harness-settings` main page. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; Pause on Esc controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, `/goal settings pause-on-escape on|off`, or `/goal settings auto-start-from-outcome on|off`; bare `/goal settings` prints the saved values outside the TUI.
+- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Automatic continuation, conversational resume, and **Pause on Esc** default to `on`. **Auto-start Goals** defaults to `off` and is also available directly on the `/harness-settings` main page. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; Pause on Esc controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, `/goal settings pause-on-escape on|off`, or `/goal settings auto-run on|off`; bare `/goal settings` prints the saved values outside the TUI.
 - `escape` pauses the active goal by default, and it stays paused while you talk to the agent. With **Pause on Esc** off, observed editor Escape leaves the goal active while preserving native streaming interruption and menu/dialog cancellation. Automatic continuation remains independent. Hosts without terminal/focus inspection and unknown custom editors retain generic abort-to-pause behavior because they cannot identify Escape reliably. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. Paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
@@ -40,21 +40,25 @@ memory and does not collect activity.
 - Permission failure reports remain available to the agent as diagnostic evidence. They do not pause Goal or require a one-turn `/goal resume` release. The agent can retry, wait, or continue other authorized work; tool and sandbox permissions remain enforced independently. Repeated unchanged work still reaches the ordinary no-progress hold. Legacy permission-paused goals resume normally with `/goal resume` or `alt+g`.
 - An observable-progress stall state for active goals.
 
-## Optional Harness-Owned Outcome & Todo
+## Goal & Todo in Harness
 
-When `pi-better-harness` is installed, its optional **Outcome & Todo** runtime owns the session's structured outcome and checklist. Goal keeps its own objective, clocks, pauses, workflow gates, background wake behavior, and continuation policy; it also sends lifecycle requests to the Harness runtime so a bound outcome starts, pauses, resumes, and completes with the Goal. When the runtime is present, Goal stops adding its own active-objective text to avoid duplicating the Harness-owned outcome, whether Outcome & Todo is enabled or off.
+Harness saves the Goal objective, its acceptance criteria, boundaries and Todo steps.
+The Goal extension manages execution, including timing, pause, resume and completion
+checks. `/goal` shows the current Goal and its execution status. Use `/goal pause`
+or `/goal resume` on a saved Goal or unfinished Todo, including older checklists.
+Explicit resume starts work once. Pausing stores the hold before interrupting the
+foreground turn. Already delegated tasks keep their execution owners.
 
-`/goal` does not install, enable, or configure Outcome & Todo. Install Harness and enable **Outcome & Todo** in `/harness-settings` if you want that shared outcome and checklist. Without Harness, this package keeps its standalone prompts and behavior unchanged. The stored Goal objective remains the raw original trigger (for example, a bound command invocation) so `/goal resume` can re-enter the work; it is not the authoritative business outcome when Harness owns one.
+In `/harness-settings`, **Auto-start Goals** defaults to Off. Turn it on to start a newly
+saved Goal with acceptance criteria, explicitly reopened work, or an issue workflow
+invoked with `/skill:rush-issues` or `/skill:resolve-issues`. Saving a checklist, opening a session and changing a setting do not
+start execution. A workflow-owned Goal keeps its coordinator and completion gates.
 
-With **Auto-start Goal** enabled, a successful explicit `update_todo` outcome save can create and bind a Goal. The outcome must be active, unbound, have a nonempty objective and at least one nonempty `doneWhen` acceptance criterion. All criteria must contain text. Slash-shaped command invocations do not qualify; invoke those commands explicitly. Outcome & Todo hooks must also be enabled. The existing outcome, boundaries and Todo stay intact. No kickoff message is queued for the already-running tool turn; subsequent idle/background continuation obeys its existing setting and gates.
-
-Existing active, paused or budget-limited Goals are never replaced or resumed. Refinements of a bound outcome do not create another Goal. A new unbound task can start after the previous Goal completes. Session restore, branch navigation and enabling the preference do not replay saved outcomes; the next explicit qualifying save is the trigger. Completing a checklist or outcome does not complete the Goal.
-
-For an active Goal with a bound Outcome, the agent completes both through `update_goal`. It supplies an `evidence` array with one `{criterion, result}` per `doneWhen` entry, using the Outcome objective if no criteria were recorded. Each result should identify the observed result and its source. Open Todo steps and open items on an associated work ledger block completion. These checks also apply after a workflow scheduler reports `finish`. The user can still complete a Goal manually with `/goal complete`.
-
-Explicitly setting the same bound Outcome back to `active` after Goal completion starts a fresh Goal for its remaining work, including when Auto-start Goal is off. The new Goal preserves the Todo. Restoring an older session that saved active work against an already completed Goal leaves that work active and unbound. Running `/goal <exact Outcome objective>` binds it again with its Todo intact.
-
-When a workflow already owns the session, the new Goal binds its registered coordinator without invoking it again. Its scheduler and completion checks continue to apply. An unavailable or invalid workflow coordinator prevents automatic creation.
+A Goal with recorded acceptance criteria requires completion evidence for each criterion.
+If the criteria are empty, verify the objective. Open Todo steps and open items in an
+associated work ledger block agent-requested completion. The user can mark a running
+Goal complete directly with `/goal complete`. Explicitly reopening completed work
+with `update_todo({ goal: { objective, status: "active" } })` keeps its Todo and original workflow checks. With auto-start off, use `/goal resume` to restart it.
 
 ## Settings Storage
 
@@ -101,7 +105,7 @@ How a gate reports an unverifiable run follows the workflow that owns it. The is
 
 - **Completion.** `update_goal` complete is refused, with each due action (action, unit, first 200 characters of detail), unless the scheduler reports `finish` and nothing else is due (an empty due list means workers are still running, so it is refused too). An unverifiable issue-workflow run is refused as well, with the step that restores it: bind the task plan with `update_todo({workflow:{path,revision}})`, rebind the run with `/skill:<coordinator>`, or fix the scheduler. The Goal stays active.
 - **Pause.** `release_workflow` is refused unless every unfinished unit is quiet (nothing due for it) or blocked `human-decision` with `humanItem` 2-5. A unit blocked `retry-ci` or any other reason the run retries itself, or a `human-decision` item 1, is named in the refusal and the Goal stays active. Execution failures keep the fail-open warning here, so a genuine human hold can always hand the run back.
-- **Auto-bind.** Invoking `/skill:rush-issues` or `/skill:resolve-issues` with no active goal (none, or a completed one) creates and activates a Goal whose objective is the invocation text, exactly as `/goal <invocation>` would, without sending the command a second time. A paused or active Goal is left alone.
+- **Auto-bind.** With **Auto-start Goals** on, invoking `/skill:rush-issues` or `/skill:resolve-issues` with no active goal (none, or a completed one) creates and activates a Goal whose objective is the invocation text, exactly as `/goal <invocation>` would, without sending the command a second time. A paused or active Goal is left alone.
 - **Wait timer.** When the scheduler's only due action is `wait` with a "next automatic attempt is at <ISO time>" detail, the next automatic continuation is scheduled for that time (at most the maximum timer delay, at least 5 seconds) and the wake-up is not counted as a no-progress retry. Other due work, or an unparseable time, uses the ordinary retry schedule. `autoContinue` off disables this timer.
 
 When `pi-better-plan` is installed, it defers its prompt, checklist, and `update_plan` tool to a skill-owned task plan. Skills without this metadata retain normal goal and plan behavior. The skill itself owns its planning format and worker policy; the harness does not enumerate skills or impose a shared workflow schema. The former `pi-better-plan-workflow: coordinator` metadata remains supported for installed skills.
