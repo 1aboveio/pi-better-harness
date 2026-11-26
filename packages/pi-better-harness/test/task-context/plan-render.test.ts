@@ -322,7 +322,7 @@ test("stage headers aggregate every applicable issue, even when fleet entries di
   workflow.fleet.ci = { status: "succeeded" };
   workflow.issues = [unit("1", { status: "blocked" }), ...Array.from({ length: 6 }, (_, index) => unit(String(index + 2)))];
   assert.doesNotMatch(renderRushPlan(workflow, 100).join("\n"), /#1\s+Issue 1/, "the blocked issue is outside the row window");
-  assert.match(diagram(), /Implement 7\/7 .*Review ✓7\/7 .*Ship 0\/7 !1 ●6/);
+  assert.match(diagram(), /Implement 7\/7 .*Review ✓7\/7 .*Ship !1 ●6/);
   const widgetHeader = (width: number) => renderRushPlan(workflow, width, false, undefined, "rush-issues", false, false, {
     disclosure: "▸", runtime: { status: "active", clock: "2:14" },
   })[0]!;
@@ -331,13 +331,13 @@ test("stage headers aggregate every applicable issue, even when fleet entries di
   }
 
   workflow.issues[0] = unit("1", { status: "pending", stage: "pending", headSha: undefined, reviewedHead: undefined, delivery: undefined });
-  assert.match(diagram(), /Implement 6\/7 .*Review ✓6\/7 .*Ship 0\/7 ●6/);
+  assert.match(diagram(), /Implement 6\/7 .*Review ✓6\/7 .*Ship ●6/);
 
   workflow.issues = [unit("1", { headSha: "new" })];
-  assert.match(diagram(), /Implement 1\/1 .*Review ●1 .*Ship 0\/1\n/, "draft CI can run while the new HEAD awaits review");
+  assert.match(diagram(), /Implement 1\/1 .*Review ●1 .*Ship ○\n/, "draft CI can run while the new HEAD awaits review");
 
   workflow.issues = [unit("1", { reviewedHead: undefined, delivery: "review", status: "failed" })];
-  assert.match(diagram(), /Review ×1 .*Ship 0\/1\n/);
+  assert.match(diagram(), /Review ×1 .*Ship ○\n/);
 
   workflow.issues = [unit("1", { status: "succeeded", delivery: "merged" }), unit("2", { status: "cancelled" })];
   assert.match(diagram(), /Implement 1\/1 .*Review ✓1\/1 .*Ship 1\/1\n/);
@@ -355,21 +355,21 @@ test("a review can return to fix and re-review before the unit ships", () => {
     runId: "loop", planRevision: 1, units: [{ ...unit, ...fields }],
   }, "loop"), 160).slice(2, 5).join("\n");
   const open = [{ status: "open" }];
-  assert.match(diagram({ worker: 1, workerKind: "review", fixRound: 1 }), /Review ●1 .*Ship 0\/1\n[^]*Fix —/);
-  assert.match(diagram({ reviewFindings: open }), /Review 1 open finding .*Ship 0\/1\n[^]*Fix ○1/);
+  assert.match(diagram({ worker: 1, workerKind: "review", fixRound: 1 }), /Review ●1 .*Ship ○\n[^]*Fix —/);
+  assert.match(diagram({ reviewFindings: open }), /Review 1 open finding .*Ship ○\n[^]*Fix ○1/);
   assert.match(diagram({ worker: "", workerKind: "fix", reviewFindings: open }), /Fix ○1/);
-  assert.match(diagram({ stage: "validate", worker: 0, workerKind: "fix", delivery: "building" }), /Implement 1\/1 .*Review ○ .*Ship 0\/1\n[^]*Fix ●1/);
+  assert.match(diagram({ stage: "validate", worker: 0, workerKind: "fix", delivery: "building" }), /Implement 1\/1 .*Review ○ .*Ship ○\n[^]*Fix ●1/);
   assert.match(diagram({ stage: "diagnose", reviewedHead: "a", delivery: "building", status: "blocked" }),
-    /Implement 1\/1 .*Review ✓1\/1 .*Ship 0\/1 !1/);
+    /Implement 1\/1 .*Review ✓1\/1 .*Ship !1/);
   assert.match(diagram({ worker: 0, workerKind: "fix", status: "blocked" }), /Fix !1/);
-  assert.match(diagram({ headSha: "b", worker: 2, workerKind: "review", reviewFindings: open }), /Review ●1 .*Ship 0\/1\n[^]*Fix ○1/);
+  assert.match(diagram({ headSha: "b", worker: 2, workerKind: "review", reviewFindings: open }), /Review ●1 .*Ship ○\n[^]*Fix ○1/);
   assert.match(diagram({ headSha: "b", reviewedHead: "b", worker: null, workerKind: "fix", reviewFindings: [{ status: "resolved" }] }),
-    /Review ✓1\/1 .*Ship 0\/1 ●1\n[^]*Fix ✓1/);
-  assert.match(diagram({ headSha: "c", reviewedHead: "b", worker: 3, workerKind: "fix" }), /Review ○ .*Ship 0\/1\n[^]*Fix ●1/);
+    /Review ✓1\/1 .*Ship ●1\n[^]*Fix ✓1/);
+  assert.match(diagram({ headSha: "c", reviewedHead: "b", worker: 3, workerKind: "fix" }), /Review ○ .*Ship ○\n[^]*Fix ●1/);
   assert.match(diagram({ headSha: "c", reviewedHead: "c", status: "succeeded", delivery: "merged", fixRound: 2 }),
     /Review ✓1\/1 .*Ship 1\/1\n[^]*Fix ✓1/);
   assert.match(diagram({ reviewedHead: "a", delivery: "review", fixRound: 1, reviewFindings: [{ status: "deferred" }] }),
-    /Review ✓1\/1 .*Ship 0\/1 ●1\n[^]*Fix —/);
+    /Review ✓1\/1 .*Ship ●1\n[^]*Fix —/);
 });
 
 test("blocked validation uses the explicit delivery phase or the legacy fleet record", () => {
@@ -377,9 +377,9 @@ test("blocked validation uses the explicit delivery phase or the legacy fleet re
     runId: "legacy", planRevision: 1, fleet,
     units: [{ id: "1", title: "Deploy", stage: "validate", status: "blocked", delivery }],
   }, "legacy"), 160)[2]!;
-  assert.match(render({ ci: "blocked", review: "succeeded" }), /Implement 1\/1 .*Review ✓1\/1 .*Ship 0\/1 !1/);
-  assert.match(render({ review: "blocked" }, "ci"), /Implement 1\/1 .*Review ○ .*Ship 0\/1 !1/);
-  assert.match(render({ review: "blocked" }), /Implement 1\/1 .*Review !1 .*Ship 0\/1$/);
+  assert.match(render({ ci: "blocked", review: "succeeded" }), /Implement 1\/1 .*Review ✓1\/1 .*Ship !1/);
+  assert.match(render({ review: "blocked" }, "ci"), /Implement 1\/1 .*Review ○ .*Ship !1/);
+  assert.match(render({ review: "blocked" }), /Implement 1\/1 .*Review !1 .*Ship ○$/);
 });
 
 test("the default diagram connects fixes back to review and counts findings across live units", () => {
@@ -393,7 +393,7 @@ test("the default diagram connects fixes back to review and counts findings acro
     ],
   }, "graph");
   const [top, middle, bottom] = renderRushPlan(plan, 160).slice(2, 5) as [string, string, string];
-  assert.match(top, /#1 Report +│ Implement 2\/2 ─→ Review ●1 · 2 open findings .*┬ ─→ Ship 0\/2$/);
+  assert.match(top, /#1 Report +│ Implement 2\/2 ─→ Review ●1 · 2 open findings .*┬ ─→ Ship ○$/);
   assert.match(middle, /#2 Dashboard +│/);
   assert.match(bottom, /Fix ●1/);
   assert.equal(top.indexOf("Review"), middle.indexOf("↑"));
@@ -438,7 +438,7 @@ test("the workflow metadata shows the canary only when a unit carries warehouse 
   });
   const header = (data: unknown) => renderRushPlan(projectRushPlan(data, "canary"), 120, false).join("\n");
   const data = header(raw({ reason: "changes the settlement job", result: null }));
-  assert.match(data, /rev 3  ·  canary ○\n[^\n]*│ Implement 0\/2 ●1/);
+  assert.match(data, /rev 3  ·  canary ○\n[^\n]*│ Implement ●1/);
   assert.doesNotMatch(header(raw()), /canary/);
   assert.doesNotMatch(header(raw(false)), /canary/);
   assert.doesNotMatch(header(raw({ required: false, reason: "does not change warehouse work" })), /canary/);

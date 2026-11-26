@@ -271,16 +271,20 @@ function issueStageLabel(name: keyof IssueStages, units: IssueStages[], openFind
   const detail = (text: string, color: string) => {
     node.push({ color: "dim", text: node.length === 1 ? " " : " · " }, { text, color });
   };
-  if (name === "implement" || name === "ship") {
-    detail(`${done}/${eligible}`, eligible > 0 && done === eligible ? "success" : "muted");
+  if (done > 0 && (name === "implement" || name === "ship")) {
+    detail(`${done}/${eligible}`, done === eligible ? "success" : "muted");
   }
   const states: DisplayStatus[] = ["failed", "blocked", "unknown", "in_progress"];
   if (name === "fix") states.push("pending", "completed");
   node.push(...diagramCounts(states.map(state => ({ ...statusStyle(state), count: counts.get(state) ?? 0 }))));
-  if (name === "fix" && node.length === 1) detail("—", "dim");
+
   if (name === "review") {
     if (openFindings) detail(`${openFindings} open finding${openFindings === 1 ? "" : "s"}`, "muted");
-    if (node.length === 1) detail(done ? `✓${done}/${eligible}` : "○", done && done === eligible ? "success" : "muted");
+    if (done && node.length === 1) detail(`✓${done}/${eligible}`, done === eligible ? "success" : "muted");
+  }
+  if (node.length === 1) {
+    const style = statusStyle(name === "fix" ? "skipped" : "pending");
+    detail(style.glyph, style.color);
   }
   return node;
 }

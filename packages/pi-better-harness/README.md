@@ -48,7 +48,7 @@ Todo uses the same workflow view for a bound task plan and a dynamic workflow.
 The task list and diagram start at equal widths. Drag their divider in fullscreen Pi
 or enter `/todo split 3:2` to give the task list three fifths of the available width.
 The session remembers the ratio across reloads. Use `/todo split 1:1` to restore equal columns.
-Below 36 terminal columns, the diagram follows the task list. Stage counts use the task symbols, so `Implement 0/2 ●2` shows two tasks in progress and zero completed. In a mixed stage, `!1 ●2` shows one blocked task and two running.
+Below 36 terminal columns, the diagram follows the task list. Stage counts use the task symbols, so `Implement ●2` shows two tasks in progress. A pending stage shows `○`. In a mixed stage, `!1 ●2` shows one blocked task and two running.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks continue to govern workflow-owned plans. See the [usage guide](docs/usage.md#goal--todo).
