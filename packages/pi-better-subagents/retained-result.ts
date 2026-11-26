@@ -1,6 +1,5 @@
 import {
     copyFileSync,
-    cpSync,
     existsSync,
     mkdirSync,
     mkdtempSync,
@@ -10,7 +9,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { snapshotTree, verifyTree } from "./workspace-files.ts";
+import { copyTree, snapshotTree, verifyTree } from "./workspace-files.ts";
 import type { RunMeta } from "./registry.ts";
 import { resultDir } from "./session-store.ts";
 
@@ -35,7 +34,7 @@ export function retainResult(meta: RunMeta, logPath: string, scratch?: string): 
         if (scratch && existsSync(scratch)) {
             const files = snapshotTree(scratch);
             if (files.some((entry) => entry.name !== ".sandbox-anchor")) {
-                cpSync(scratch, join(temp, "scratch"), { recursive: true, verbatimSymlinks: true });
+                copyTree(scratch, join(temp, "scratch"), files);
                 verifyTree(join(temp, "scratch"), files);
                 verifyTree(scratch, files);
                 savedScratch = join(dir, "scratch");

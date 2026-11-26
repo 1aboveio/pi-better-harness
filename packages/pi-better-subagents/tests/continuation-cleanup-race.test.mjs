@@ -353,6 +353,7 @@ describe("a sweep cannot delete a conversation admitted after its snapshot", () 
         try {
             assert.deepEqual(result.errors, [], "the sweep reports no errors");
             assert.ok(!result.removed.includes(root), "the newly occupied root is not removed");
+            assert.equal(result.reclaimedBytes, 0, "a run retained during the recheck earns no reclaimed bytes");
             assert.equal(result.overBudget, true, "the shortfall is reported instead of deleting live work");
             assert.ok(existsSync(runDir(root)), "the root's artifacts survive the admission");
             assert.ok(existsSync(join(workspace, "uncommitted.txt")), "the workspace survives the admission");

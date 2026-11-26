@@ -2,7 +2,7 @@
 // A private content store lets retained checkouts share identical Git objects and files.
 // Source files are never hardlinked into storage. Restoring a file makes an independent copy.
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, cpSync, existsSync, lchmodSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, } from "node:fs";
 import { dirname, join } from "node:path";
 function fileHash(path, buffer) {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -71,7 +71,7 @@ export function snapshotTree(root, store, omit = new Set()) {
     walk("");
     return entries;
 }
-export function restoreTree(root, store, entries) {
+function materializeTree(root, entries, copyRegularFile) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const directories = new Set(["."]);
     for (const entry of entries) {
@@ -84,17 +84,31 @@ export function restoreTree(root, store, entries) {
             mkdirSync(dest);
             directories.add(entry.name);
         }
-        else if (entry.type === "symlink")
+        else if (entry.type === "symlink") {
             symlinkSync(entry.target, dest);
+            lchmodSync?.(dest, entry.mode);
+        }
         else {
-            copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
-            chmodSync(dest, entry.mode);
+            copyRegularFile(entry, dest);
         }
     }
     for (const entry of entries.slice().reverse()) {
         if (entry.type === "directory")
             chmodSync(join(root, entry.name), entry.mode);
     }
+}
+export function restoreTree(root, store, entries) {
+    materializeTree(root, entries, (entry, dest) => {
+        copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+        chmodSync(dest, entry.mode);
+    });
+}
+export function copyTree(source, dest, entries) {
+    const rootMode = lstatSync(source).mode & 0o7777;
+    materializeTree(dest, entries, (entry, target) => {
+        cpSync(join(source, entry.name), target, { verbatimSymlinks: true, force: false, errorOnExist: true });
+    });
+    chmodSync(dest, rootMode);
 }
 export function verifyTree(root, entries, omit) {
     if (JSON.stringify(snapshotTree(root, undefined, omit)) !== JSON.stringify(entries)) {
