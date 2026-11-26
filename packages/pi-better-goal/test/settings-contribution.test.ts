@@ -96,16 +96,16 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   assert.deepEqual(messages, []);
 
   const control = registrations.find(item => item.id === "goal-auto-start") as unknown as Control;
-  assert.equal(control.label, "Auto-start Goal");
+  assert.equal(control.label, "Auto-run saved Goals");
   assert.deepEqual(control.values, ["Off", "On"]);
   assert.equal(control.get(), "Off");
   await control.change("On", ctx);
   assert.equal(readGoalPreferences().autoStartFromOutcome, true);
   await contribution.open(ctx);
-  assert.match(pages.at(-1)!, /Auto-start Goal\s+On/);
+  assert.match(pages.at(-1)!, /Auto-run saved Goals\s+On/);
   await commands.get("goal")!.handler("settings auto-start-from-outcome off", ctx);
   assert.equal(control.get(), "Off", "the Harness control and Goal command share the live preference");
-  await assert.rejects(control.change("invalid", ctx), /Invalid Auto-start Goal mode/);
+  await assert.rejects(control.change("invalid", ctx), /Invalid Auto-run saved Goals mode/);
   assert.equal(control.get(), "Off");
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);

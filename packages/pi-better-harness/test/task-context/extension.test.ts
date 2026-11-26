@@ -50,7 +50,7 @@ function captureSettings(events: EventEmitter): { current(): SettingControl | un
 
 test("Todo action completions expose valid commands with context", () => {
   assert.deepEqual(planArgumentCompletions(""), [
-    { value: "clear", label: "clear", description: "Remove the current Todo without changing its outcome" },
+    { value: "clear", label: "clear", description: "Remove the current Todo and keep its Goal" },
     { value: "hide", label: "hide", description: "Hide the Todo widget" },
     { value: "show", label: "show", description: "Restore automatic Todo display" },
     { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
@@ -262,7 +262,7 @@ test("outcome updates persist once and preserve request prefixes across tool cal
   const branch = entries.slice();
   await tools.get("update_todo")!.execute("done", { outcome: { objective: "Deliver the integration", status: "complete" } }, undefined, undefined, ctx);
   const completed = await start();
-  assert.match(completed!.message!.content, /Outcome \(complete\)/);
+  assert.match(completed!.message!.content, /Goal \(complete\)/);
   assert.equal(await start(), undefined);
   entries.splice(0, entries.length, ...branch);
   await handlers.get("session_tree")!({}, ctx);

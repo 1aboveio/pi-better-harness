@@ -245,6 +245,7 @@ test("explicit attach restores the same durable record on resume while a fresh s
   await fresh.command("list");
   assert.match(fresh.notices.at(-1)!.text, new RegExp(ledger.id));
   const discovered = await fresh.queryLedger({ action: "list" });
+  assert.equal(discovered.details.ledgerQuery.ledgers[0].goal, ledger.outcome);
   assert.deepEqual(discovered.details.ledgerQuery.ledgers.map((item: { id: string }) => item.id), [ledger.id],
     "get_todo ledger list discovers the project record without associating it");
   await fresh.command(`attach ${ledger.id}`);
@@ -317,12 +318,12 @@ test("compaction rebuilds bounded reminders from durable state and context remov
 
   await h.update({ outcome: { objective: "Deliver checkout" }, todo: [{ step: "Ship", status: "in_progress" }] });
   const outcomeMessage = await h.handlers.get("before_agent_start")!({}, h.ctx) as { message: any };
-  assert.match(outcomeMessage.message.content, /Outcome \(active\)/);
+  assert.match(outcomeMessage.message.content, /Goal \(saved\)/);
   h.append({ type: "custom_message", ...outcomeMessage.message });
   assert.equal(await h.handlers.get("before_agent_start")!({}, h.ctx), undefined);
   h.session.context = [{ type: "compaction", summary: "Conversation summary only" }];
   const afterCompaction = await h.handlers.get("before_agent_start")!({}, h.ctx) as { message: any };
-  assert.match(afterCompaction.message.content, /Outcome \(active\)/,
+  assert.match(afterCompaction.message.content, /Goal \(saved\)/,
     "the durable outcome is reconstructed after compaction instead of trusting the summary");
 });
 
@@ -444,7 +445,7 @@ test("association does not start work, change a paused Goal, or alter hooks/disp
   assert.equal(h.settings()!.get(), "On");
   assert.ok(h.session.branch.some((entry) => entry.customType === "pi-better-goal"), "Goal entries are untouched");
   const pausedOutcome = h.handlers.get("before_agent_start")!({}, h.ctx) as { message: { content: string } };
-  assert.match(pausedOutcome.message.content, /Outcome \(paused\)/, "a paused Goal keeps its lifecycle state");
+  assert.match(pausedOutcome.message.content, /Goal \(paused\)/, "a paused Goal keeps its lifecycle state");
 });
 
 test("update_todo ledger attach and detach are explicit actions and get_todo list marks the session reference", async (t) => {

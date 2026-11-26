@@ -13,7 +13,7 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
+| Harness Goal & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
 
 Install `pi-better-model-router` separately to route between DeepSeek and Ollama
 Cloud by estimated price. The router package includes the Ollama Cloud provider
@@ -111,10 +111,10 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
 
-### Outcome & Todo release contract
+### Goal & Todo release contract
 
-In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
-defaults to On. **Outcome and Todo tools** (legacy id `outcome-todo`) defaults to Off.
+In `/harness-settings`, **Goal and Todo panel** (`outcome-todo-display`)
+defaults to On. **Goal and Todo tools** (legacy id `outcome-todo`) defaults to Off.
 Saved v1 `enabled` remains the hooks authority, and the new optional display
 preference defaults to true. Saved state renders with hooks off; missing state
 creates no placeholder, state, or settings. Display off leaves hooks active.

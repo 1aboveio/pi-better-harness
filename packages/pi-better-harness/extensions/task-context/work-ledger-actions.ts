@@ -53,9 +53,8 @@ export const updateTodoLedgerParameters = Type.Object({
     description: "The ledger revision last read. Required for update; stale revisions are refused.",
   })),
   event: Type.Optional(Type.String({ description: "Short history label for this change, e.g. item-progress." })),
-  outcome: Type.Optional(Type.String({
-    description: "Overall high-level outcome. Required for create; optional replacement on update.",
-  })),
+  goal: Type.Optional(Type.String({ description: "Project Goal. Required for create and editable on update." })),
+  outcome: Type.Optional(Type.String({ description: "Legacy alias for goal." })),
   boundaries: Type.Optional(Type.Array(Type.String(), {
     description: "Scope boundaries and exclusions. Ignored when omitted.",
   })),
@@ -92,7 +91,7 @@ export interface LedgerActionResult {
   details: {
     ok: true;
     action: UpdateTodoLedgerInput["action"];
-    ledger?: WorkLedger;
+    ledger?: WorkLedger & { goal?: string };
     totals?: WorkLedgerTotals;
     /** Ledger explicitly associated with the current session, if any. */
     associatedLedgerId?: string | null;
@@ -104,8 +103,8 @@ export interface LedgerQueryResult {
   details: {
     ok: true;
     action: GetTodoLedgerInput["action"];
-    ledger?: WorkLedger;
-    ledgers?: WorkLedgerSummary[];
+    ledger?: WorkLedger & { goal?: string };
+    ledgers?: (WorkLedgerSummary & { goal?: string })[];
     totals?: WorkLedgerTotals;
     associatedLedgerId?: string | null;
   };
@@ -119,7 +118,7 @@ export interface WorkLedgerSessionBinding {
 }
 
 export const WORK_LEDGER_PROMPT_GUIDELINES = [
-  "When Project work ledger is on, use update_todo with ledger for a durable high-level outcome and stable items. It is the same interface as Todo, not a separate execution plan or public tool.",
+  "When Project work ledger is on, use update_todo with ledger for a durable project goal and stable items. It is the same interface as Todo, not a separate execution plan or public tool.",
   "Only use update_todo ledger attach when the user explicitly names an existing ledger or asks to continue it. Never infer association from the working directory, project files, or a similar outcome, and never attach while starting unrelated work.",
   "Read the ledger with get_todo {ledger:{action:'read'}} before updating it, then send its current revision. Never silently retry a stale revision or overwrite newer progress. Use get_todo {ledger:{action:'list'}} to discover records.",
   "In an update_todo ledger update, send only the items that changed. Omitted items and fields keep their stored progress.",
@@ -134,16 +133,18 @@ export function executeLedgerMutation(
   cwd: string,
   session?: WorkLedgerSessionBinding,
 ): LedgerActionResult {
+  if (input.goal !== undefined && input.outcome !== undefined) throw new Error("Send ledger.goal once. The outcome field is its legacy alias.");
+  const goal = input.goal ?? input.outcome;
   const store = openWorkLedgerStore({ cwd });
   const associatedLedgerId = session?.associatedLedgerId() ?? null;
   switch (input.action) {
     case "create": {
       if (input.ledgerId !== undefined || input.revision !== undefined || input.changes !== undefined || input.addItems !== undefined) {
-        throw new Error("update_todo ledger create uses outcome, boundaries, status, and items; do not send ledgerId, revision, changes, or addItems.");
+        throw new Error("update_todo ledger create uses goal, boundaries, status, and items; do not send ledgerId, revision, changes, or addItems.");
       }
-      if (input.outcome === undefined) throw new Error("update_todo ledger create requires outcome.");
+      if (goal === undefined) throw new Error("update_todo ledger create requires goal.");
       const ledger = store.create({
-        outcome: input.outcome,
+        outcome: goal,
         ...(input.boundaries === undefined ? {} : { boundaries: input.boundaries }),
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.items === undefined ? {} : { items: input.items as WorkItemDraft[] }),
@@ -155,16 +156,16 @@ export function executeLedgerMutation(
       const ledgerId = requireLedgerId(input);
       if (input.revision === undefined) throw new Error("update_todo ledger update requires the revision last read.");
       if (input.items !== undefined) throw new Error("update_todo ledger update takes changes and addItems; items is only for create.");
-      if (input.outcome === undefined && input.boundaries === undefined && input.status === undefined &&
+      if (goal === undefined && input.boundaries === undefined && input.status === undefined &&
           (input.changes === undefined || input.changes.length === 0) &&
           (input.addItems === undefined || input.addItems.length === 0)) {
-        throw new Error("update_todo ledger update needs outcome, boundaries, status, changes, or addItems.");
+        throw new Error("update_todo ledger update needs goal, boundaries, status, changes, or addItems.");
       }
       const ledger = store.update({
         ledgerId,
         revision: input.revision,
         ...(input.event === undefined ? {} : { event: input.event }),
-        ...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+        ...(goal === undefined ? {} : { outcome: goal }),
         ...(input.boundaries === undefined ? {} : { boundaries: input.boundaries }),
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.changes === undefined ? {} : { changes: input.changes as WorkItemPatch[] }),
@@ -176,7 +177,7 @@ export function executeLedgerMutation(
       if (!session) throw new Error("This session cannot associate a work ledger.");
       if (input.ledgerId === undefined) throw new Error("update_todo ledger attach requires ledgerId.");
       if (input.revision !== undefined || input.changes !== undefined || input.addItems !== undefined ||
-          input.items !== undefined || input.outcome !== undefined || input.boundaries !== undefined ||
+          input.items !== undefined || goal !== undefined || input.boundaries !== undefined ||
           input.status !== undefined) {
         throw new Error("update_todo ledger attach takes ledgerId only; update the ledger separately.");
       }
@@ -238,7 +239,11 @@ function result(
   details: Omit<LedgerActionResult["details"], "ok" | "action">,
 ): LedgerActionResult {
   const { content } = truncateLedgerText(text);
-  return { content: [{ type: "text", text: content }], details: { ok: true, action, ...details } };
+  const ledger = details.ledger;
+  return {
+    content: [{ type: "text", text: content }],
+    details: { ok: true, action, ...details, ...(ledger && { ledger: { ...ledger, goal: ledger.outcome } }) },
+  };
 }
 
 function queryResult(
@@ -247,7 +252,15 @@ function queryResult(
   details: Omit<LedgerQueryResult["details"], "ok" | "action">,
 ): LedgerQueryResult {
   const { content } = truncateLedgerText(text);
-  return { content: [{ type: "text", text: content }], details: { ok: true, action, ...details } };
+  const { ledger, ledgers } = details;
+  return {
+    content: [{ type: "text", text: content }],
+    details: {
+      ok: true, action, ...details,
+      ...(ledger && { ledger: { ...ledger, goal: ledger.outcome } }),
+      ...(ledgers && { ledgers: ledgers.map(row => ({ ...row, goal: row.outcome })) }),
+    },
+  };
 }
 
 function truncateLedgerText(text: string): { content: string } {
@@ -276,7 +289,7 @@ export function formatWorkLedger(ledger: WorkLedger): string {
   const recentHistory = ledger.history.slice(-10);
   return [
     `Work ledger ${ledger.id} rev ${ledger.revision} (${ledger.status})`,
-    `Outcome: ${ledger.outcome}`,
+    `Goal: ${ledger.outcome}`,
     ...(ledger.boundaries.length === 0 ? [] : [`Boundaries: ${ledger.boundaries.join("; ")}`]),
     `Items: ${totals.total}; completed ${totals.completed}; open ${totals.open}; `
       + `in progress ${totals.inProgress}; pending ${totals.pending}; blocked ${totals.blocked}; cancelled ${totals.cancelled}`,

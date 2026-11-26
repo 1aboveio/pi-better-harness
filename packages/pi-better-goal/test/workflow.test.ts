@@ -221,10 +221,10 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
     setActiveTools: (next: string[]) => { harnessActiveTools = next; },
   } as unknown as ExtensionAPI);
   await harnessHandlers.get("session_start")?.({ reason: "startup" }, ctx);
-  assert.equal(todoControl?.get(), "Off", "Outcome & Todo hooks default off");
+  assert.equal(todoControl?.get(), "Off", "Goal and Todo tools default off");
   await assert.rejects(
     harnessTools.get("update_todo")!.execute("off", { outcome: { objective: "x" } }, undefined, undefined, toolContext(ctx)),
-    /Outcome and Todo tools are off/,
+    /Goal and Todo tools are off/,
   );
   await todoControl!.change("On", ctx);
   assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo"]);

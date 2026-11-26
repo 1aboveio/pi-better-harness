@@ -42,6 +42,7 @@ export interface WorkLedgerTodoSummary {
   id: string;
   revision: number;
   status: WorkLedgerStatus;
+  goal: string;
   outcome: string;
   totals: WorkLedgerTotals;
   openItems: WorkLedgerOpenItem[];
@@ -84,6 +85,7 @@ export function workLedgerTodoSummary(ledger: WorkLedger): WorkLedgerTodoSummary
     id: ledger.id,
     revision: ledger.revision,
     status: ledger.status,
+    goal: ledger.outcome,
     outcome: ledger.outcome,
     totals: workLedgerTotals(ledger),
     openItems: workLedgerOpenItems(ledger).map((item) => ({
@@ -117,7 +119,7 @@ export function formatWorkLedgerTodo(ledger: WorkLedger, full = false): string {
     item.status === "completed" || item.status === "cancelled")].slice(0, MAX_SUMMARY_ITEMS);
   return [
     `Associated work ledger ${ledger.id} rev ${ledger.revision} (${ledger.status})`,
-    `Outcome: ${ledger.outcome}`,
+    `Goal: ${ledger.outcome}`,
     ...(ledger.boundaries.length === 0 ? [] : [`Boundaries: ${ledger.boundaries.join("; ")}`]),
     `Items: ${totals.completed}/${totals.total} completed; ${totals.open} open; `
       + `${totals.inProgress} in progress; ${totals.blocked} blocked; ${totals.pending} pending`,
@@ -145,7 +147,7 @@ export function formatWorkLedgerReminder(
   const shown = open.slice(0, MAX_REMINDER_OPEN_ITEMS);
   const header = [
     `Durable work ledger ${ledger.id} rev ${ledger.revision} (${ledger.status})`,
-    `Outcome: ${clip(ledger.outcome, 360)}`,
+    `Goal: ${clip(ledger.outcome, 360)}`,
     ...(ledger.boundaries.length === 0 ? [] : [`Boundaries: ${clip(ledger.boundaries.join("; "), 360)}`]),
     `Items: ${totals.completed}/${totals.total} completed; ${totals.open} open; `
       + `${totals.blocked} blocked; ${totals.inProgress} in progress`,

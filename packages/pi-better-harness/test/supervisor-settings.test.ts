@@ -19,7 +19,7 @@ test("Supervisor settings retain selections and merge edits from another session
     const selections = [0, 1, 0, 0];
     let index = 0;
     const select = async (_title: string, choices: string[]) => {
-      assert.deepEqual(choices, steps[index].length === 1 ? steps[index] : [...steps[index], "[ ] Diagnose stalled Outcomes", "[ ] Review Outcome scope", "[ ] Shared daemon fault diagnosis", "[ ] Consolidate authorization requests", "[ ] Follow up on recovery commitments"]);
+      assert.deepEqual(choices, steps[index].length === 1 ? steps[index] : [...steps[index], "[ ] Diagnose stalled Goals", "[ ] Review Goal scope", "[ ] Shared daemon fault diagnosis", "[ ] Consolidate authorization requests", "[ ] Follow up on recovery commitments"]);
       if (index === 1) updateHarnessSetting("supervisorMode", () => ({ enabled: true, scenarios: ["other"] }));
       return choices[selections[index++]];
     };

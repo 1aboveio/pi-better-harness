@@ -2,6 +2,11 @@
 
 **Status** — Accepted design. This ADR defines when the parent should keep working, wait, pause, resume or declare the objective complete. The Outcome & Todo bridge defines how the participating packages store and exchange that state. [Bridge and work ledger](0018-harness-outcome-todo.md)
 
+The user interface calls the accepted objective a **Goal** and its steps **Todo**.
+A saved Goal may have no execution record yet. Explicit pause or resume attaches
+execution to the same saved Goal and preserves the checklist. The historical
+`outcome` session entry and settings keys remain readable across versions.
+
 ## Core invariants
 
 - **Keep the acceptance criteria attached to the objective.** Goal owns foreground execution and its lifecycle. When a Harness Outcome is bound, it owns the requested result, boundaries and `doneWhen` criteria. Todo records the steps toward that result. A workflow coordinator retains authority over its own plan. Goal also works without a Harness Outcome.

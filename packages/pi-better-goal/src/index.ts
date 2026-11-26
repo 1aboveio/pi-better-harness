@@ -123,14 +123,14 @@ function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean, inc
 const BLOCKING_QUESTION_TOOLS: ReadonlySet<string> = new Set(["ask_user_question"]);
 
 const GOAL_ACTIONS: readonly AutocompleteItem[] = [
-  { value: "pause", label: "pause", description: "Pause the active goal" },
-  { value: "resume", label: "resume", description: "Resume the paused goal" },
+  { value: "pause", label: "pause", description: "Pause work on the current Goal and Todo" },
+  { value: "resume", label: "resume", description: "Start or resume work on the current Goal and Todo" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
-  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and automatic execution settings" },
 ];
 
-const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape", "auto-start-from-outcome"] as const;
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape", "auto-run"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
@@ -249,9 +249,15 @@ function formatGoal(
   stall = observeGoalStall(goal, continuation),
   preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false },
   permissions?: PermissionHold | null,
+  saved?: { objective: string; status: string },
 ): string {
   const settings = formatPreferences(preferences);
   if (!goal) {
+    if (saved) {
+      const status = saved.status === "active" ? "saved" : saved.status;
+      const control = status === "saved" || status === "paused" ? "\nUse /goal resume to work on its Todo." : "";
+      return `Goal: ${saved.objective}\nStatus: ${status}${control}\n${settings}`;
+    }
     return `No goal is set.\n${settings}`;
   }
   const budget = goal.tokenBudget === null ? "none" : String(goal.tokenBudget);
@@ -288,7 +294,7 @@ function formatPreferences(preferences: GoalPreferences): string {
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
     `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
-    `Auto-start Goal setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
+    `Auto-run saved Goals setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -407,7 +413,7 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.notify(message, type);
   };
 
-  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource, bindOutcome = false): void => {
+  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource, binding: "start" | "bind" | "adopt" = "start"): void => {
     executionGeneration += 1;
     lastAgentEvidence = null;
     const previous = getGoal(ctx);
@@ -416,13 +422,13 @@ export default function (pi: ExtensionAPI): void {
     // Bridge lifecycle after the raw Goal entry is durable. Harness may own the
     // structured outcome, but Goal still owns its trigger, clocks, pauses, and wakes.
     if (!previous || previous.goalId !== goal.goalId) {
-      requestTaskContext(pi, bindOutcome ? "bind" : "start", goal);
+      requestTaskContext(pi, binding, goal);
     } else if (goal.status === "complete") {
       requestTaskContext(pi, "complete", goal);
     } else if (goal.status === "paused" || goal.status === "budgetLimited") {
-      requestTaskContext(pi, "pause", goal);
+      requestTaskContext(pi, "pause", goal, undefined, source === "command");
     } else if (goal.status === "active" && previous.status !== "active") {
-      requestTaskContext(pi, "resume", goal);
+      requestTaskContext(pi, "resume", goal, undefined, source === "command");
     }
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
@@ -522,8 +528,9 @@ export default function (pi: ExtensionAPI): void {
   ): { ok: true; goal: GoalSnapshot } | { ok: false; message: string } => {
     const current = getGoal(ctx);
     const held = current?.status === "active" && currentContinuationState(ctx, current.goalId)?.blocked === true;
-    if (!current || (current.status !== "paused" && !held)) {
-      return { ok: false, message: "Only paused or no-progress-held goals can be resumed." };
+    if (!current) return { ok: false, message: "No Goal is set." };
+    if (current.status !== "paused" && !held) {
+      return { ok: false, message: current.status === "active" ? "This Goal is already running." : `This Goal is ${current.status}.` };
     }
     if (source === "tool" && currentContinuationState(ctx, current.goalId)?.blocked) {
       return { ok: false, message: "Only /goal resume or alt+g can reopen a no-progress hold." };
@@ -1014,10 +1021,71 @@ export default function (pi: ExtensionAPI): void {
     const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
     const restoredOwner = retainedCommand ? goalWorkflowOwner(goal) : null;
     if (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path)) return;
-    setGoal(goal, ctx, "runtime", true);
+    setGoal(goal, ctx, "runtime", "bind");
     if (restoredOwner && !owner) recordWorkflow(restoredOwner, true);
     resetContinuationState(goal);
   });
+
+  const inspectGoal = (ctx: ExtensionContext) => {
+    const current = getGoal(ctx);
+    const saved = requestTaskContext(pi, "saved").savedGoal;
+    const goal = current?.status === "complete" && saved && saved.goalId !== current.goalId ? null : current;
+    const bound = saved && goal && saved.goalId === goal.goalId;
+    const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
+    const permissionHold = goal ? currentPermissionHold(ctx, goal.goalId) : null;
+    const stall = observeGoalStall(goal, continuation, { foregroundRunning, backgroundRunning: latestSnapshot?.backgroundRunning ?? false });
+    const displayed = bound ? { ...goal, objective: saved.objective } : goal;
+    return {
+      content: [{ type: "text" as const, text: formatGoal(displayed, continuation, stall, preferences, permissionHold, saved) }],
+      details: { goal: displayed ?? saved ?? null,
+        executionStatus: goal?.status ?? (saved?.status === "active" ? "saved" : saved?.status ?? null),
+        continuation, permissionHold, stall, preferences: { ...preferences },
+        timing: goal ? goalTiming(goal) : null, hasGoal: !!(goal || saved) },
+    };
+  };
+
+  // Explicit controls can attach execution to a saved Goal or legacy checklist.
+  // Pausing writes a paused snapshot directly, so it cannot queue a kickoff.
+  const controlGoal = (action: "pause" | "resume", ctx: ExtensionContext): void => {
+    const current = getGoal(ctx);
+    const { savedGoal, handoffOwner } = requestTaskContext(pi, "saved");
+    const warn = (message: string) => ctx.ui.notify(message, "warning");
+    if (savedGoal && (!current || current.goalId !== savedGoal.goalId)) {
+      if (current && current.status !== "complete") {
+        warn("A different Goal still owns execution. Inspect it with /goal. Use /goal clear to release it before switching tasks.");
+        return;
+      }
+      if (savedGoal.status === "complete" || savedGoal.status === "cancelled") {
+        warn(`This Goal is ${savedGoal.status}.`);
+        return;
+      }
+      if (savedGoal.goalId || handoffOwner || savedGoal.objective.startsWith("/")) {
+        warn("This task has a previous execution or workflow binding. Reinvoke its original Goal or workflow to continue.");
+        return;
+      }
+      const invalid = validateObjective(savedGoal.objective);
+      if (invalid) { warn(invalid); return; }
+      const owner = getWorkflow(ctx);
+      if (owner && !workflowAvailable(owner)) {
+        warn(`Restore /skill:${owner.name} before continuing its Todo.`);
+        return;
+      }
+      const command = owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
+      const goal = createGoalSnapshot(savedGoal.objective, null, undefined, command ?? undefined);
+      setGoal(action === "pause" ? goalWithStatus(goal, "paused") : goal, ctx, "command", "adopt");
+      if (action === "resume") queueGoalContinuation(goal, ctx);
+    } else if (action === "resume") {
+      if (!current) { warn("No saved Goal or unfinished Todo to resume."); return; }
+      const result = resumeGoal(ctx, "command");
+      if (!result.ok) { warn(result.message); return; }
+    } else {
+      if (!current) { warn("No saved Goal or unfinished Todo to pause."); return; }
+      if (current.status !== "active") { warn(`Goal is already ${current.status}.`); return; }
+      setGoal(goalWithStatus(current, "paused"), ctx, "command");
+    }
+    if (action === "pause" && isForegroundBusy(ctx)) ctx.abort?.();
+    notifyGoal(ctx, action === "pause" ? "Goal paused." : "Goal resumed.");
+  };
 
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
     const previous = preferences;
@@ -1047,11 +1115,11 @@ export default function (pi: ExtensionAPI): void {
   const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
   const autoStartControl = {
     id: "goal-auto-start",
-    label: "Auto-start Goal",
+    label: "Auto-run saved Goals",
     values: ["Off", "On"],
     get: () => preferences.autoStartFromOutcome ? "On" : "Off",
     async change(value: string, ctx: ExtensionCommandContext) {
-      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-start Goal mode.");
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-run saved Goals mode.");
       await changePreference(ctx, "autoStartFromOutcome", value === "On");
     },
   };
@@ -1075,10 +1143,11 @@ export default function (pi: ExtensionAPI): void {
           await openSettings(ctx);
           return;
         }
-        const [, setting, mode, ...extra] = trimmed.split(/\s+/);
+        const [, name, mode, ...extra] = trimmed.split(/\s+/);
+        const setting = name === "auto-start-from-outcome" ? "auto-run" : name;
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
-          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape|auto-start-from-outcome on|off]", "warning");
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape|auto-run on|off]", "warning");
           return;
         }
         if (setting !== undefined) {
@@ -1097,30 +1166,12 @@ export default function (pi: ExtensionAPI): void {
       }
 
       if (!trimmed) {
-        const continuation = current ? currentContinuationState(ctx, current.goalId) : null;
-        // Inspection is always explicit user intent; show the full summary even while busy.
-        ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning }), preferences,
-          current ? currentPermissionHold(ctx, current.goalId) : null), "info");
+        ctx.ui.notify(inspectGoal(ctx).content[0]!.text, "info");
         return;
       }
 
-      if (trimmed === "pause") {
-        if (!current || current.status !== "active") {
-          notifyGoal(ctx, "Only active goals can be paused.", "warning");
-          return;
-        }
-        setGoal(goalWithStatus(current, "paused"), ctx, "command");
-        notifyGoal(ctx, "Goal paused.");
-        return;
-      }
-
-      if (trimmed === "resume") {
-        const result = resumeGoal(ctx, "command");
-        if (!result.ok) {
-          notifyGoal(ctx, result.message, current?.status === "paused" ? "error" : "warning");
-          return;
-        }
-        notifyGoal(ctx, "Goal resumed.");
+      if (trimmed === "pause" || trimmed === "resume") {
+        controlGoal(trimmed, ctx);
         return;
       }
 
@@ -1170,23 +1221,14 @@ export default function (pi: ExtensionAPI): void {
     promptSnippet: "Inspect the current goal, status, token budget, tokens used, active time, and total elapsed time.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const goal = getGoal(ctx);
-      const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
-      const stall = observeGoalStall(goal, continuation, {
-        foregroundRunning,
-        backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
-      });
-      return {
-        content: [{ type: "text", text: formatGoal(goal, continuation, stall, preferences, goal ? currentPermissionHold(ctx, goal.goalId) : null) }],
-        details: { goal, continuation, permissionHold: goal ? currentPermissionHold(ctx, goal.goalId) : null, stall, preferences: { ...preferences }, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
-      };
+      return inspectGoal(ctx);
     },
   });
 
   pi.registerTool({
     name: "update_goal",
     label: "Update Goal",
-    description: "Mark the Goal complete after verifying the requested outcome. For each recorded doneWhen criterion, supply its exact text and observed result in evidence. If a bound Outcome has no criteria, use its objective. A scheduler finish alone only confirms that workflow actions have settled.",
+    description: "Mark the Goal complete after verifying the requested outcome. For each recorded doneWhen criterion, supply its exact text and observed result in evidence. If the Goal has no criteria, use its objective. A scheduler finish alone only confirms that workflow actions have settled.",
     promptSnippet: "Mark the current Codex-style goal complete after verification.",
     parameters: Type.Object({
       evidence: Type.Optional(Type.Array(Type.Object({
@@ -1206,7 +1248,9 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
       if (!current) {
         return {
-          content: [{ type: "text", text: "No goal is set." }],
+          content: [{ type: "text", text: requestTaskContext(pi, "saved").savedGoal
+            ? "For a saved Goal, record verified completion with update_todo and goal.status set to complete."
+            : "No goal is set." }],
           details: { ok: false, goal: null },
         };
       }
@@ -1288,11 +1332,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerShortcut?.(GOAL_RESUME_SHORTCUT, {
-    description: "Resume the paused goal",
+    description: "Start or resume work on the current Goal and Todo",
     handler: (ctx) => {
       currentCtx = ctx;
-      const result = resumeGoal(ctx, "command");
-      notifyGoal(ctx, result.ok ? "Goal resumed." : result.message, result.ok ? "info" : "warning");
+      controlGoal("resume", ctx);
     },
   });
 
@@ -1532,7 +1575,7 @@ export default function (pi: ExtensionAPI): void {
           `${pausedInstruction}\n` + "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n",
         `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}`,
         isPokeable(goal) && (harnessPresent
-          ? "Complete the goal only after the workflow completion audit and verification of every accepted Outcome criterion."
+          ? "Complete the goal only after the workflow completion audit and verification of every accepted Goal criterion."
           : `Active objective: ${goal.objective}. Complete it only after the workflow completion audit.`),
         questionInstruction && questionInstruction.trim(),
         heldInstruction,

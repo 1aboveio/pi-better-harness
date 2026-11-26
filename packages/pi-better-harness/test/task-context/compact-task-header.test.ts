@@ -14,7 +14,7 @@ test("the task header groups its subtitle with progress and runtime without chan
     assert.equal(lines.length, 3);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `fits ${width} terminal cells`);
     if (width >= 40) {
-      assert.match(lines[0]!, /^todo ▸  2\/8 complete\s+active  2:14$/);
+      assert.match(lines[0]!, /^todo ▸  2\/8 complete\s+goal active  2:14$/);
       assert.equal(lines[2], "");
     }
     if (width >= 80) assert.equal(lines[1], "  Deliver checkout with a working 支付 flow");

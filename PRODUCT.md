@@ -22,7 +22,7 @@ People can install the full Harness or use individual Pi extensions. Commands an
 
 ## Capabilities and Constraints
 
-- Core capabilities include an opt-in foreground write sandbox, delegated subagents, durable background commands and watches, synchronous SSH commands, Goal continuation, and model routing. Outcome & Todo adds optional session and checklist tracking.
+- Core capabilities include an opt-in foreground write sandbox, delegated subagents, durable background commands and watches, synchronous SSH commands, Goal continuation, and model routing. Goal & Todo adds optional session and checklist tracking.
 - A supervised wait has an observer and an owner. The observer reports evidence. The owner interprets it and decides whether to continue waiting or take action. [Observed wait ownership](docs/adr/0020-observed-waits-retain-an-owner.md)
 - The Navigator supports inspecting and controlling tasks from the active conversation. Task status and recent evidence are available before an operator chooses an action.
 - Pi provides the terminal theme, keyboard conventions, and extension capabilities. Keep settings and navigation consistent across extensions that share those surfaces.

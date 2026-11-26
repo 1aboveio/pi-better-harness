@@ -9,7 +9,7 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
 - `pi-better-goal` for explicit triggers and background-aware continuation
-- Harness Outcome & Todo for persistent outcomes, optional checklists, and context reminders
+- Harness Goal & Todo for persistent Goals, optional checklists, and context reminders
 
 `pi-better-read-aloud` is intentionally not included yet.
 
@@ -32,38 +32,42 @@ its bundle, and removes a retired Plan registration in the selected scope.
 Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
 
 Normal bundle installs and updates mask a separately installed `pi-better-plan`
-whenever Harness is loaded, even with Outcome & Todo hooks off. Its tools, `/plan`,
+whenever Harness is loaded, even with Goal & Todo hooks off. Its tools, `/plan`,
 widget, and prompt hooks are not registered with the session. Both load orders
 are covered; its factory listeners are cleaned up before Todo starts. The old
 registration and cached files can remain, but settings and saved histories are
 untouched. Removing or excluding Harness allows the standalone package to load
 again. The explicit installer removes the selected registration instead.
 
-## Outcome & Todo
+<a id="outcome--todo"></a>
+## Goal & Todo
 
-In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
-defaults to **On**, independently of **Outcome and Todo tools** (legacy id
-`outcome-todo`), which defaults to **Off**, and **Project work ledger**
-(`outcome-todo-ledger`), which defaults to **Off**. Saved outcomes and checklists
-render with hooks off. If state is missing, Harness creates no placeholder, state,
-or settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
-the hooks authority; the optional display preference defaults to true and the
-ledger preference to false.
+Save a Goal using `update_todo` with a `goal` object containing an `objective`,
+optional `doneWhen` criteria and `boundaries`. Supply `todo` to record the steps.
+Use `newTask: true` when switching to unrelated work. The previous `outcome`
+field remains an alias for `goal`. Old sessions and settings work without migration.
+
+The panel shows the objective and task progress. `goal saved` means work is
+recorded and ready to start. `/goal resume` starts or resumes it, including
+an existing Todo that has never run as a Goal. `/goal pause` pauses the current
+Goal and keeps the checklist. `/todo expand` and `/todo collapse` control
+how many steps are visible. See the [settings table](../README.md#goal--todo)
+for tool access, display and automatic execution preferences.
 
 The compact widget has one Todo heading, a caret after Todo, and the completion
 count on the left. Matching Goal status and its existing active-time clock appear
-on the right. The outcome appears as a single muted, truncated subtitle. The
+on the right. The Goal objective appears as a single muted, truncated subtitle. The
 collapsed view shows up to five relevant rows; the expanded view shows all rows.
 Click to toggle. `/todo` reveals the compact Overview when display is on and
 returns it to automatic display; `/todo expand`, `/todo collapse`, `/todo hide`,
 and `/todo show` control its display. When hooks are enabled, the full objective, acceptance criteria,
 boundaries, and plan remain available through `get_todo`. These commands remain
-available with hooks off for explicit user control. An outcome can exist without a
-checklist. A finished or cleared checklist does not complete or remove the outcome.
+available with hooks off for explicit user control. A Goal can exist without a
+checklist. A finished or cleared checklist does not complete or remove the Goal.
 
 Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
-writes, outcome updates, and automated cleanup. When hooks are enabled, the next
-agent start records a hidden outcome message only if the outcome differs from
+writes, Goal updates, and automated cleanup. When hooks are enabled, the next
+agent start records a hidden Goal message only if the Goal differs from
 the last published update on the current branch. Pi persists these messages;
 subsequent requests keep them unchanged instead of rebuilding a temporary
 reminder. Todo progress remains available through the tools, not a per-request
@@ -79,14 +83,14 @@ instructions remain available through `/goal`; permission checks are unchanged.
 Skills use this optional interface only when its tools are available. Workflow task
 plans retain their own schema, revision checks, and source requirements. When the
 interface is off, workflows continue using their own records and text display.
-Use `newTask: true` with an outcome when switching to unrelated work; omit it for
+Use `newTask: true` with a Goal when switching to unrelated work; omit it for
 corrections to the current task. Session state follows the active branch and survives
 compaction and reload. Existing Plan histories remain readable as Todo.
 
 ### Durable work ledgers
 
 **Project work ledger** is a separate setting, default Off. When it and the
-Outcome & Todo hooks are on, the same `update_todo` / `get_todo` interface keeps a
+Goal & Todo hooks are on, the same `update_todo` / `get_todo` interface keeps a
 high-level work record that is independent of session history:
 
 - `update_todo` with a `ledger` payload creates or updates a ledger, or attaches
@@ -107,7 +111,7 @@ recovery condition. The overall ledger cannot complete while items remain open.
 Ledgers are stored under the Pi agent directory, keyed by the canonical project
 directory, not in the session or repository. Listing or creating one does not
 associate it with the session, inject old work, start a Goal, or change the
-generic outcome/Todo, workflow plan, or display/hooks state. Session association
+session Goal and Todo, workflow plan, or display/hooks state. Session association
 and recovery reminders are separate work. Turning the ledger setting off removes
 ledger views, queries, mutations, and hints, but never deletes records or changes
 Goal pause/authorization state. Re-enabling restores the association and hints
@@ -149,7 +153,7 @@ the reference.
 The existing Todo surface gains one compact ledger line when an association
 exists, for example `ledger 1/3 complete · 2 open · next: Ship API`. It is not a
 second checklist or widget; workflow rows remain canonical. Completing the
-session Outcome is refused while the associated ledger is active and has open
+session Goal is refused while the associated ledger is active and has open
 high-level items. Closing those items does not complete the ledger automatically,
 and completing a Todo or workflow plan never completes an unfinished high-level
 outcome. While the ledger setting is off, `/ledger list` and `/ledger show`
@@ -201,7 +205,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo` — optional ledger payload/selector when Long-term work ledger is on |
+| Harness Goal & Todo (when hooks are enabled) | `update_todo`, `get_todo` — optional ledger payload/selector when Long-term work ledger is on |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 

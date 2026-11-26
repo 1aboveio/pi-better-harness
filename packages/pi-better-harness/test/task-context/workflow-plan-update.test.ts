@@ -565,7 +565,7 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     const original = readFileSync(h.path, "utf8");
     const change = { workflow: { event: "x", changes: [{ id: "1201", set: { status: "succeeded" } }] } };
     await assert.rejects(h.update(change), /No workflow owns the task plan; send plan instead of workflow/);
-    await assert.rejects(h.update({}), /Send outcome, todo, or workflow/);
+    await assert.rejects(h.update({}), /Send goal, todo, or workflow/);
     const generic = await h.update({ todo: [{ step: "Generic", status: "in_progress" }] });
     assert.equal((generic.details as any).plan.steps[0].step, "Generic");
 

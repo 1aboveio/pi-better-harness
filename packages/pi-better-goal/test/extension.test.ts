@@ -38,11 +38,11 @@ interface WidgetRecord {
 
 test("goal action completions expose selectable actions with context", () => {
   assert.deepEqual(goalArgumentCompletions(""), [
-    { value: "pause", label: "pause", description: "Pause the active goal" },
-    { value: "resume", label: "resume", description: "Resume the paused goal" },
+    { value: "pause", label: "pause", description: "Pause work on the current Goal and Todo" },
+    { value: "resume", label: "resume", description: "Start or resume work on the current Goal and Todo" },
     { value: "clear", label: "clear", description: "Remove the current goal" },
     { value: "complete", label: "complete", description: "Mark the current goal complete" },
-    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
+    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and automatic execution settings" },
   ]);
   assert.deepEqual(
     goalArgumentCompletions("  c")?.map((entry) => entry.value),
@@ -50,7 +50,7 @@ test("goal action completions expose selectable actions with context", () => {
   );
   assert.equal(goalArgumentCompletions("ship the release"), null);
   assert.deepEqual(goalArgumentCompletions("settings ")?.map((item) => item.value), [
-    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape", "settings auto-start-from-outcome",
+    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape", "settings auto-run",
   ]);
   assert.deepEqual(goalArgumentCompletions("settings auto-continue o")?.map((item) => item.value), [
     "settings auto-continue on", "settings auto-continue off",
@@ -2268,7 +2268,7 @@ test("TUI goal settings opens the interactive page and its toggles persist", asy
     async custom(factory: Function) {
       opened = true;
       const page = factory({ requestRender() {} }, theme, {}, () => { closed = true; });
-      assert.match(page.render(80).join("\n"), /Goal settings/);
+      assert.match(page.render(80).join("\n"), /Goal execution settings/);
       page.handleInput(" ");
       await new Promise<void>((resolve) => setImmediate(resolve));
       page.handleInput("\x1b[B");

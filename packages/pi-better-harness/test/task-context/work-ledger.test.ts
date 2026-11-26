@@ -420,7 +420,7 @@ test("the unified update_todo ledger payload preserves items and history across 
     f.tools.get("update_todo")!.execute("create-disabled", {
       ledger: { action: "create", outcome: "Should not persist" },
     }, undefined, undefined, f.ctx),
-    /Outcome and Todo tools are off/,
+    /Goal and Todo tools are off/,
   );
 
   await f.setting()!.change("On", f.ctx);

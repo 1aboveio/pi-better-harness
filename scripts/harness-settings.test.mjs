@@ -63,7 +63,7 @@ test("native settings list selects package links without opening or changing the
   let opened = false;
   const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
   const selected = chooseHarnessSetting(ctx, [{ id: "goal", label: "Goal", command: "/goal settings", open() { opened = true; } }], "link:goal");
-  assert.match(page.render(80).join("\n"), /Goal settings\s+Open/);
+  assert.match(page.render(80).join("\n"), /Goal execution settings\s+Open/);
   assert.match(page.render(80).join("\n"), /You can also run \/goal settings/);
   page.handleInput("\r");
   assert.equal(await selected, "link:goal");
@@ -131,10 +131,10 @@ test("keyboard order groups controls with their package pages and keeps third-pa
     page = build({}, theme, {}, resolve);
   }) } }, links, undefined, callbacks, controls);
   const expected = [
-    "Outcome and Todo tools", "goal-auto-start", "Goal settings", "Project work ledger",
+    "Goal and Todo tools", "Goal and Todo panel", "Auto-run saved Goals", "Goal execution settings", "Project work ledger",
     "Subagent settings", "Agent catalog", "Sandbox settings",
     "Foreground wait guard", "Background wait reviews", "Completion delivery",
-    "Navigator layout", "Pin work panels", "Outcome and Todo panel", "tool-output", "Tool progress animation",
+    "Navigator layout", "Pin work panels", "tool-output", "Tool progress animation",
     "extra-control", "extra-page",
   ];
   for (const label of expected) {
@@ -157,7 +157,7 @@ test("selection restoration preserves ordering and rebound native navigation", a
     assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
     const lines = page.render(80).join("\n");
     assert.match(lines, /> Subagent settings/);
-    assert.ok(lines.indexOf("Goal settings") < lines.indexOf("Subagent settings") && lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
+    assert.ok(lines.indexOf("Goal execution settings") < lines.indexOf("Subagent settings") && lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
     page.handleInput("j");
     assert.match(page.render(80).join("\n"), /> Sandbox settings/);
     page.handleInput("k");
@@ -178,7 +178,7 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
+      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal execution settings/); page.handleInput("\r"); }
       else page.handleInput("\x1b");
     });
   } } };
@@ -307,7 +307,7 @@ test("an invalid callback default reports once, leaves package settings usable, 
         return new Promise(resolve => {
           const page = build({}, theme, {}, resolve);
           assert.match(page.render(80).join("\n"), /^[ >]+Completion delivery\s+When idle/m);
-          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
+          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal execution settings/); page.handleInput("\r"); }
           else {
             if (pages === 2) {
               page.handleInput("\x13");

@@ -81,6 +81,7 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
     goal: () => reconstructGoalSnapshot(entries),
     outcome: () => restoreOutcome(entries),
     update: (input: unknown) => tools.get("update_todo").execute("update", input, undefined, undefined, ctx),
+    getGoal: async () => (await tools.get("get_goal").execute("get", {}, undefined, undefined, ctx)).details,
     getTodo: async () => (await tools.get("get_todo").execute("get", {}, undefined, undefined, ctx)).details,
     complete: (evidence?: { criterion: string; result: string }[]) => tools.get("update_goal").execute("complete", { status: "complete", evidence }, undefined, undefined, ctx),
     command: (args: string) => commands.get("goal").handler(args, ctx),
@@ -88,6 +89,80 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
 }
 
 const accepted = { objective: "Ship checkout", doneWhen: ["Checkout succeeds"], boundaries: ["No production writes"] };
+
+for (const first of ["pause", "resume"] as const) {
+  test(`/goal ${first} controls a restored Todo with no execution record or doneWhen`, async t => {
+    const h = await fixture(t, { autoStart: false });
+    const objective = "Deliver checkout";
+    await h.update({ outcome: { objective, boundaries: ["Staging only"] }, todo: [{ step: "Verify checkout", status: "pending" }] });
+    await h.emit("session_tree");
+    const before = await h.getTodo();
+    assert.equal(h.goal(), null);
+    assert.equal((await h.getGoal()).goal.objective, objective);
+    await h.command(first);
+    const id = h.goal()?.goalId;
+    assert.ok(id);
+    assert.equal(h.goal()?.status, first === "pause" ? "paused" : "active");
+    assert.equal(h.messages.length, first === "pause" ? 0 : 1);
+    await h.emit("session_tree");
+    if (first === "pause") {
+      await assert.rejects(h.update({ goal: { objective, status: "active" } }), /goal resume/);
+      await h.command("resume");
+    }
+    assert.equal(h.messages.length, 1);
+    assert.equal(h.goal()?.goalId, id);
+    assert.equal(h.goal()?.status, "active");
+    const after = await h.getTodo();
+    assert.deepEqual(after.plan, before.plan);
+    assert.deepEqual(after.goal, { ...before.outcome, goalId: id, status: "active" });
+    await h.update({ goal: { objective: "Deliver checkout and receipts" } });
+    assert.equal(h.outcome()?.objective, "Deliver checkout and receipts");
+    assert.equal((await h.getGoal()).goal.objective, h.outcome()?.objective);
+    assert.equal(h.goal()?.goalId, id);
+  });
+}
+
+test("manual controls preserve a checklist without an objective and ignore an empty session", async t => {
+  const h = await fixture(t);
+  await h.command("resume");
+  assert.equal(h.goal(), null);
+  await h.update({ todo: [{ step: "Ship the patch", status: "in_progress" }] });
+  const before = await h.getTodo();
+  await h.command("pause");
+  assert.equal(h.goal()?.status, "paused");
+  await h.command("resume");
+  assert.deepEqual((await h.getTodo()).plan, before.plan);
+  assert.equal(h.messages.length, 1);
+});
+
+test("explicit Todo controls work with agent tools off and do not auto-enable them", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.update({ goal: accepted });
+  const tools = h.settings.controls().find(control => control.id === "outcome-todo")!;
+  await tools.change("Off", h.ctx);
+  await h.command("pause");
+  assert.equal(h.outcome()?.status, "paused");
+  await h.emit("session_tree");
+  await h.command("resume");
+  assert.equal(h.outcome()?.status, "active");
+  assert.equal(tools.get(), "Off");
+  assert.equal(h.messages.length, 1);
+});
+
+test("manual controls never replace another unfinished Goal or restart a finished task", async t => {
+  const h = await fixture(t, { autoStart: false });
+  await h.command("Ship checkout");
+  const first = h.goal()!.goalId;
+  await h.update({ newTask: true, goal: { objective: "Publish a guide" } });
+  const before = h.entries.length;
+  for (const control of ["pause", "resume"]) await h.command(control);
+  assert.equal(h.entries.length, before);
+  assert.equal(h.goal()?.goalId, first);
+  await h.command("clear");
+  await h.update({ goal: { objective: "Publish a guide", status: "complete" } });
+  await h.command("resume");
+  assert.equal(h.goal(), null);
+});
 
 test("automatic Goals retain the workflow's completion gates on creation and reopen", async t => {
   const h = await fixture(t, { workflow: "available" });
@@ -174,7 +249,7 @@ test("auto-start defaults off, enabling does not replay existing state, and disa
   assert.equal(h.goal(), null);
   const before = h.entries.length;
   const control = h.settings.controls().find(item => item.id === "goal-auto-start")!;
-  assert.equal(control.label, "Auto-start Goal");
+  assert.equal(control.label, "Auto-run saved Goals");
   assert.equal(control.get(), "Off");
   await control.change("On", h.ctx);
   assert.equal(control.get(), "On");

@@ -117,9 +117,10 @@ const OutcomeSchema = Type.Object({
 });
 const UpdatePlanSchema = Type.Object({
   explanation: Type.Optional(Type.String()),
-  newTask: Type.Optional(Type.Boolean({ description: "Start an unrelated task: replace the previous outcome and detach its Todo and Goal binding. Omit for a correction or refinement of the current task." })),
+  newTask: Type.Optional(Type.Boolean({ description: "Start an unrelated task: replace the previous Goal and detach its Todo. Omit for a correction or refinement of the current task." })),
   todo: Type.Optional(Type.Array(PlanStepSchema, { maxItems: 50 })),
-  outcome: Type.Optional(OutcomeSchema),
+  goal: Type.Optional(OutcomeSchema),
+  outcome: Type.Optional(Type.Object(OutcomeSchema.properties, { description: "Legacy alias for goal. Send one field." })),
   workflow: Type.Optional(WorkflowUpdateSchema),
   ledger: Type.Optional(updateTodoLedgerParameters),
 });
@@ -128,7 +129,7 @@ type WorkflowPlanInput = Omit<RushPlanUpdate, "event"> & { path?: string; event?
 
 const goalHeaderRuntime = (goal: GoalSnapshot) => ({ status: goal.status, clock: formatClockDuration(goalTiming(goal).activeSeconds) });
 const PLAN_ACTIONS: readonly AutocompleteItem[] = [
-  { value: "clear", label: "clear", description: "Remove the current Todo without changing its outcome" },
+  { value: "clear", label: "clear", description: "Remove the current Todo and keep its Goal" },
   { value: "hide", label: "hide", description: "Hide the Todo widget" },
   { value: "show", label: "show", description: "Restore automatic Todo display" },
   { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
@@ -361,15 +362,15 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (!nextOutcome || nextOutcome.status !== "complete" || !ledgerId || !ledgerEnabled) return;
     refreshAssociatedLedger(ctx);
     if (!ledger) {
-      throw new Error(`Outcome completion is blocked: associated work ledger ${ledgerId} is unavailable `
-        + `(${ledgerError ?? "not found"}). Read it again or detach it before completing the outcome.`);
+      throw new Error(`Goal completion is blocked: associated work ledger ${ledgerId} is unavailable `
+        + `(${ledgerError ?? "not found"}). Read it again or detach it before completing the Goal.`);
     }
     if (ledger.status !== "active") return;
     const open = ledger.items.filter((item) =>
       item.status === "pending" || item.status === "in_progress" || item.status === "blocked");
     if (open.length === 0) return;
     const examples = open.slice(0, 5).map((item) => `${item.id} (${item.status})`).join(", ");
-    throw new Error(`Outcome completion is blocked: work ledger ${ledger.id} still has ${open.length} open `
+    throw new Error(`Goal completion is blocked: work ledger ${ledger.id} still has ${open.length} open `
       + `high-level item(s): ${examples}${open.length > 5 ? ", ..." : ""}. Complete or cancel them first; `
       + "Todo or execution-plan completion does not complete the overall work.");
   };
@@ -530,7 +531,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             const header: CompactTaskHeader = {
               subtitle: outcome?.objective, disclosure,
               runtime: boundGoal ? goalHeaderRuntime(boundGoal)
-                : outcome ? { status: outcome.status } : undefined,
+                : outcome ? { status: outcome.status === "active" ? "saved" : outcome.status } : undefined,
               ledger: ledgerHeaderText(),
             };
             const heading = outcome || (ledgerEnabled && (ledger || ledgerId))
@@ -581,34 +582,36 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "update_todo",
     label: "Update Todo",
-    description: "Manage the accepted outcome, Todo, workflow canonical task plan, and optional durable long-term work ledger through one interface. Existing workflow and ledger revision checks apply.",
-    promptSnippet: "Remember the accepted outcome and update Todo, workflow, or durable ledger progress",
+    description: "Manage the accepted Goal, Todo, workflow canonical task plan, and optional durable long-term work ledger through one interface. Existing workflow and ledger revision checks apply.",
+    promptSnippet: "Remember the accepted Goal and update Todo, workflow, or durable ledger progress",
     promptGuidelines: [
-      "Capture the accepted outcome before substantive implementation, delegation, or investigation. An outcome-only update is valid; do not invent a checklist or acceptance criteria.",
-      "Use newTask:true with its outcome when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. For an active Goal, call update_goal after verifying delivery. Otherwise mark the outcome complete explicitly.",
+      "Capture the accepted Goal before substantive implementation, delegation, or investigation. A goal-only update is valid. Record the user’s acceptance criteria when available.",
+      "Use newTask:true with its goal when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. For a running Goal, call update_goal after verifying delivery. For a saved Goal, set goal.status to complete after verification.",
       "Use a Todo checklist when several meaningful milestones help track delivery; update it when work completes, is blocked, or changes scope.",
-      "Write each Todo label as a short action in plain language, usually 3-7 English words or a similarly short phrase in the task's language. For example: 'Add Todo toggle' or 'Test keyboard controls'. Put methods, file paths, rationale, and acceptance criteria in the outcome, explanation, or workflow records, not the label. Apply this to workflow titles too; do not copy long issue headings.",
+      "Write each Todo label as a short action in plain language, usually 3-7 English words or a similarly short phrase in the task's language. For example: 'Add Todo toggle' or 'Test keyboard controls'. Put methods, file paths, rationale, and acceptance criteria in the goal, explanation, or workflow records, not the label. Apply this to workflow titles too; do not copy long issue headings.",
       "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
       "For generic plans with prerequisites, give steps stable ids and dependsOn edges for actual dependencies, not list order. Start ready independent steps concurrently under the Harness execution policy; subagent delegation mode controls subagents, not background-command concurrency.",
       "For generic plans, follow the active delegation mode for subagents. Manual forbids proactive subagent delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
       "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
       "While a workflow owns planning, bind its persisted task plan with update_todo({workflow:{path,revision}}). Record transitions with workflow event and changes rather than editing task-plan.json or its profiling log.",
-      "When a durable work ledger is associated with this session, completing the overall Outcome is refused while high-level items remain open. Completing the Todo or an execution plan does not complete the associated ledger; reconcile the ledger explicitly.",
+      "When a durable work ledger is associated with this session, completing the overall Goal is refused while high-level items remain open. Completing the Todo or an execution plan does not complete the associated ledger; reconcile the ledger explicitly.",
       ...WORK_LEDGER_PROMPT_GUIDELINES,
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Outcome and Todo tools are off. Enable them in /harness-settings.");
+      if (!enabled) throw new Error("Goal and Todo tools are off. Enable them in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
-      const input = params as {
-        explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; outcome?: OutcomeInput;
+      const raw = params as {
+        explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; goal?: OutcomeInput; outcome?: OutcomeInput;
         workflow?: WorkflowPlanInput; ledger?: UpdateTodoLedgerInput;
       };
+      if (raw.goal !== undefined && raw.outcome !== undefined) throw new Error("Send goal once. The outcome field is its legacy alias.");
+      const input = { ...raw, goal: raw.goal ?? raw.outcome };
       if (input.ledger !== undefined) {
-        if (input.outcome !== undefined || input.todo !== undefined || input.workflow !== undefined ||
+        if (input.goal !== undefined || input.todo !== undefined || input.workflow !== undefined ||
             input.newTask !== undefined || input.explanation !== undefined) {
-          throw new Error("Send update_todo ledger alone; ledger changes are not combined with outcome, Todo, or workflow changes.");
+          throw new Error("Send update_todo ledger alone; ledger changes are not combined with goal, Todo, or workflow changes.");
         }
         if (!ledgerEnabled) throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
         const result = executeLedgerMutation(input.ledger, ctx.cwd, ledgerSessionBinding(ctx));
@@ -620,26 +623,30 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         return result;
       }
       const activeRun = dynamic.run();
-      if (!owner && activeRun && !activeRun.evidence && (input.newTask || input.todo || input.workflow || input.outcome?.status === "complete")) {
+      if (!owner && activeRun && !activeRun.evidence && (input.newTask || input.todo || input.workflow || input.goal?.status === "complete")) {
         throw new Error("Dynamic workflow owns this Todo. Record its output using dynamic_workflow.");
       }
-      if (!input.outcome && input.todo === undefined && !input.workflow) {
-        throw new Error("Send outcome, todo, or workflow; add ledger only as its own payload.");
+      if (!input.goal && input.todo === undefined && !input.workflow) {
+        throw new Error("Send goal, todo, or workflow; add ledger only as its own payload.");
       }
-      if (input.newTask && !input.outcome) throw new Error("A new task requires its outcome.");
+      if (input.newTask && !input.goal) throw new Error("A new task requires its goal.");
       if (input.todo !== undefined && input.workflow !== undefined) throw new Error("Send either todo or workflow, not both.");
       let todoOwner = owner;
-      const nextOutcome = input.outcome ? prepareOutcome(outcome, input.outcome, input.newTask) : null;
+      const nextOutcome = input.goal ? prepareOutcome(outcome, input.goal, input.newTask) : null;
       if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
       let reopenedGoalId: string | undefined;
       if (nextOutcome?.goalId) {
         const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
         if (goal?.goalId === nextOutcome.goalId) {
-          if (nextOutcome.status === "complete" && goal.status === "active") {
-            throw new Error("This Outcome belongs to an active Goal. Verify its acceptance criteria and use update_goal to complete both.");
+          if (nextOutcome.status === "complete" && goal.status !== "complete") {
+            throw new Error("Verify the running Goal’s acceptance criteria and use update_goal to complete it.");
+          }
+          if (goal.status !== "complete" && input.goal?.status !== undefined &&
+              nextOutcome.status !== (goal.status === "budgetLimited" ? "paused" : goal.status)) {
+            throw new Error("Use /goal pause or /goal resume to change execution. Use /goal clear to release this Goal.");
           }
           if (nextOutcome.status === "active" && goal.status === "complete") {
-            if (input.outcome?.status === "active") {
+            if (input.goal?.status === "active") {
               reopenedGoalId = nextOutcome.goalId;
               if (input.todo !== undefined && !todoOwner) todoOwner = reopeningPlanOwner(pi, ctx, goal);
             }
@@ -668,7 +675,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       };
       if (!input.workflow && input.todo === undefined) {
         commitOutcome();
-        return { content: [{ type: "text", text: "Outcome updated." }], details: { ok: true, outcome } };
+        return { content: [{ type: "text", text: "Goal updated." }], details: { ok: true, goal: outcome, outcome } };
       }
       if (input.workflow !== undefined) {
         const savedBinding = workflowBinding(ctx.sessionManager.getBranch());
@@ -729,7 +736,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       if (input.todo === undefined) throw new Error("todo is required: send the full list of steps.");
       if (!replacement) {
         clearWorkflowPlan(); clearPlan(); commitOutcome();
-        return { content: [{ type: "text", text: "Todo cleared." }], details: { ok: true, outcome } };
+        return { content: [{ type: "text", text: "Todo cleared." }], details: { ok: true, goal: outcome, outcome } };
       }
       const plan = replacement;
       persistPlan(plan);
@@ -737,7 +744,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       const progress = planProgress(plan);
       return {
         content: [{ type: "text", text: formatProgress(plan) }],
-        details: { ok: true, plan, progress },
+        details: { ok: true, plan, progress, goal: outcome },
       };
     },
     renderCall(args, theme) {
@@ -746,7 +753,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           ? `ledger ${args.ledger.action}`
           : args.workflow
             ? `workflow ${args.workflow.event ?? "bind"}`
-            : `${args.todo?.length ?? 0} steps`),
+            : args.todo === undefined && (args.goal || args.outcome) ? "goal" : `${args.todo?.length ?? 0} steps`),
         0,
         0,
       );
@@ -763,11 +770,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "get_todo",
     label: "Get Todo",
-    description: "Inspect the accepted outcome, Todo progress, any bound workflow task plan, and the associated work ledger.",
-    promptSnippet: "Inspect the common work plan: outcome, Todo or workflow rows, and the associated durable ledger",
+    description: "Inspect the accepted Goal, Todo progress, any bound workflow task plan, and the associated work ledger.",
+    promptSnippet: "Inspect the common work plan: Goal, Todo or workflow rows, and the associated durable ledger",
     parameters: getTodoParameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled && !dynamic.run()) throw new Error("Outcome and Todo tools are off. Enable them in /harness-settings.");
+      if (!enabled && !dynamic.run()) throw new Error("Goal and Todo tools are off. Enable them in /harness-settings.");
       const input = params as { ledger?: GetTodoLedgerInput };
       if (input.ledger !== undefined && !ledgerEnabled) {
         throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
@@ -788,22 +795,22 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             ? renderRushPlan(workflowPlan, 160, true, undefined, planOwner, !owner).join("\n")
             : owner ? `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.`
               : `${planOwner} read-only handoff unavailable: ${rushError ?? "not bound"}.`}${ledgerText ? `\n${ledgerText}` : ""}` }],
-          details: { outcome, hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...ledgerFields, ...(!owner ? { readOnly: true } : {}) },
+          details: { goal: outcome, outcome, hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...ledgerFields, ...(!owner ? { readOnly: true } : {}) },
         };
       } else if (dynamic.run()) {
         const run = dynamic.run()!;
         view = { content: [{ type: "text", text: [describeRun(run), ledgerText].filter(Boolean).join("\n") }],
-          details: { outcome, hasPlan: true, workflowOwner: "dynamic-workflow", plan: run, ...ledgerFields } };
+          details: { goal: outcome, outcome, hasPlan: true, workflowOwner: "dynamic-workflow", plan: run, ...ledgerFields } };
       } else if (!currentPlan) {
         view = {
           content: [{ type: "text", text: `${formatOutcome(outcome)}\nNo todo is set.${ledgerText ? `\n${ledgerText}` : ""}` }],
-          details: { outcome, hasPlan: false, plan: null, progress: null, ...ledgerFields },
+          details: { goal: outcome, outcome, hasPlan: false, plan: null, progress: null, ...ledgerFields },
         };
       } else {
         const progress = planProgress(currentPlan);
         view = {
           content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}${ledgerText ? `\n${ledgerText}` : ""}` }],
-          details: { outcome, hasPlan: true, plan: currentPlan, progress, ...ledgerFields },
+          details: { goal: outcome, outcome, hasPlan: true, plan: currentPlan, progress, ...ledgerFields },
         };
       }
       if (input.ledger === undefined) return view;
@@ -816,7 +823,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("todo", {
-    description: "Inspect, show, hide, or clear the current Todo and inspect its outcome",
+    description: "Inspect, show, hide, or clear the current Todo and inspect its Goal",
     getArgumentCompletions: planArgumentCompletions,
     handler: async (args, ctx) => {
       const input = args.trim().toLowerCase();
@@ -838,7 +845,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         if (run || dynamic.pending()) dynamic.clear();
         clearWorkflowPlan();
         clearPlan();
-        ctx.ui.notify("Todo cleared; the outcome is unchanged.", "info");
+        ctx.ui.notify("Todo cleared.", "info");
         return;
       }
       if (input === "hide") {
@@ -928,12 +935,12 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const setting = (key: "enabled" | "display" | "ledger") => ({
     id: key === "enabled" ? "outcome-todo" : key === "display" ? "outcome-todo-display" : "outcome-todo-ledger",
-    label: key === "enabled" ? "Outcome & Todo hooks"
-      : key === "display" ? "Outcome & Todo display" : "Long-term work ledger",
+    label: key === "enabled" ? "Goal and Todo tools"
+      : key === "display" ? "Goal and Todo panel" : "Long-term work ledger",
     values: ["Off", "On"],
     get: () => (key === "enabled" ? enabled : key === "display" ? display : ledgerEnabled) ? "On" : "Off",
     async change(value: string, ctx: ExtensionContext) {
-      if (value !== "On" && value !== "Off") throw new Error("Invalid Outcome & Todo mode.");
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Goal and Todo mode.");
       const preferences = updateHarnessSetting("outcomeTodo", current => changeOutcomeTodoPreference(current, key, value === "On"));
       enabled = preferences.enabled;
       display = preferences.display;
@@ -953,6 +960,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (!event || typeof event !== "object") return;
     const request = event as TaskContextRequest;
     request.enabled = enabled;
+    if (request.action === "saved" || request.action === "adopt") {
+      const saved = outcome ?? (currentPlan?.steps.some(step => step.status !== "completed")
+        ? { objective: "Complete the current Todo.", status: "active" as const } : null);
+      if (saved) request.savedGoal = saved;
+      if (rushBinding && !displayedWorkflowOwner) request.handoffOwner = rushBinding.owner;
+      if (request.action === "adopt" && saved && !saved.goalId && request.goalId && request.objective === saved.objective &&
+          (saved.status === "active" || saved.status === "paused") && (request.status === "active" || request.status === "paused")) {
+        saveOutcome({ ...saved, goalId: request.goalId, status: request.status });
+      }
+      return;
+    }
     if (request.action === "audit") {
       if (enabled && outcome?.goalId && outcome.goalId === request.goalId) {
         request.objective = outcome.objective;
@@ -988,7 +1006,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         request.goalId === displayedGoal && goal?.goalId === request.goalId && typeof request.width === "number" &&
         canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
     }
-    if (!enabled || request.action === "inspect") return;
+    if (request.action === "inspect") return;
+    if (!enabled && !(request.manual && (request.action === "pause" || request.action === "resume"))) return;
     if (request.action === "bind") {
       if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
         saveOutcome({ ...outcome, goalId: request.goalId });

@@ -126,7 +126,7 @@ export default function(pi){
   };
   const setSetting = (label, enabled) => {
     command("/harness-settings");
-    wait(frame => /Outcome and Todo panel\s+(?:On|Off)/.test(frame) && /Outcome and Todo tools\s+(?:On|Off)/.test(frame) &&
+    wait(frame => /Goal and Todo panel\s+(?:On|Off)/.test(frame) && /Goal and Todo tools\s+(?:On|Off)/.test(frame) &&
       /Project work ledger\s+(?:On|Off)/.test(frame));
     selectSetting(label);
     const expected = enabled ? "On" : "Off";
@@ -138,8 +138,8 @@ export default function(pi){
     key("Escape");
     wait(frame => !frame.includes("Harness settings"));
   };
-  const setHooks = enabled => setSetting("Outcome and Todo tools", enabled);
-  const setDisplay = enabled => setSetting("Outcome and Todo panel", enabled);
+  const setHooks = enabled => setSetting("Goal and Todo tools", enabled);
+  const setDisplay = enabled => setSetting("Goal and Todo panel", enabled);
   const setLedger = enabled => setSetting("Project work ledger", enabled);
   const probeState = () => {
     rmSync(probe, { force: true });
@@ -159,8 +159,8 @@ export default function(pi){
     assert.ok(index > 0, `compact Todo header must be visible:\n${frame}`);
     const header = rows[index];
     assert.match(header, /^todo\s+[▸▾]\s{2}0\/9 complete\b/, `Todo keeps the caret after its title and n/total on the left:\n${frame}`);
-    if (bound) assert.match(header, /active\s+\d+:\d{2}\s*$/, `bound Goal status and active clock stay on the right:\n${frame}`);
-    else assert.doesNotMatch(header, /\d+:\d{2}/, "no Goal active-time clock may appear without a bound Goal");
+    if (bound) assert.match(header, /goal active\s+\d+:\d{2}\s*$/, `bound Goal status and active clock stay on the right:\n${frame}`);
+    else assert.match(header, /goal saved\s*$/, "the saved Goal is visible before execution starts");
     const subtitle = rows[index + 1] ?? "";
     assert.ok(subtitle.trimStart().startsWith(objective.slice(0, 24)), `accepted Outcome is the subtitle:\n${frame}`);
     assert.ok(subtitle.trimEnd().endsWith("..."), `the Outcome subtitle must truncate instead of wrap:\n${frame}`);
@@ -204,8 +204,8 @@ export default function(pi){
     const fresh = probeState();
     assert.ok(!fresh.active.some(name => ["update_todo", "get_todo"].includes(name)), "fresh default must not expose todo tools");
     assert.deepEqual(fresh.settings.filter(item => item.id.startsWith("outcome-todo")), [
-      { id: "outcome-todo-display", label: "Outcome & Todo display", value: "On" },
-      { id: "outcome-todo", label: "Outcome & Todo hooks", value: "Off" },
+      { id: "outcome-todo-display", label: "Goal and Todo panel", value: "On" },
+      { id: "outcome-todo", label: "Goal and Todo tools", value: "Off" },
       { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "Off" },
     ], "display defaults On, hooks default Off, and each has its own id and label");
     assert.ok(!fresh.all.includes("work_ledger"), "the unified interface adds no public work_ledger tool");
@@ -283,7 +283,7 @@ export default function(pi){
     command("/todo");
     const revealed = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) &&
       frame.includes("Deliver the terminal journey") && !/^› /m.test(frame));
-    assert.doesNotMatch(revealed, /Outcome \(active\):|↑↓ navigate/, "/todo must reveal the compact overview, not the removed full view");
+    assert.doesNotMatch(revealed, /Goal \(saved\):|↑↓ navigate/, "/todo must reveal the compact overview, not the removed full view");
     assert.ok(revealed.split("\n").some(line => /Journey task 1|step_1/.test(line)), "the revealed overview keeps its checklist");
     send("TODO_OVERVIEW_EDITOR_SENTINEL");
     const overviewWithEditor = wait(frame => frame.includes("TODO_OVERVIEW_EDITOR_SENTINEL") && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
@@ -316,7 +316,7 @@ export default function(pi){
     command("/todo");
     const hooksOffRevealed = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) &&
       frame.includes("Journey task 1") && !/^› /m.test(frame));
-    assert.doesNotMatch(hooksOffRevealed, /Outcome \(active\):|↑↓ navigate/, "hooks off still reveals only the compact overview");
+    assert.doesNotMatch(hooksOffRevealed, /Goal \(saved\):|↑↓ navigate/, "hooks off still reveals only the compact overview");
     command("/todo hide");
     wait(frame => !headerLine(frame));
     command("/todo show");
@@ -372,8 +372,8 @@ export default function(pi){
     assertNoStandaloneGoal(reloaded);
     const reloadedState = probeState();
     assert.deepEqual(reloadedState.settings.filter(item => item.id.startsWith("outcome-todo")), [
-      { id: "outcome-todo-display", label: "Outcome & Todo display", value: "On" },
-      { id: "outcome-todo", label: "Outcome & Todo hooks", value: "On" },
+      { id: "outcome-todo-display", label: "Goal and Todo panel", value: "On" },
+      { id: "outcome-todo", label: "Goal and Todo tools", value: "On" },
       { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "On" },
     ], "reload keeps exactly one control per id with its saved value");
     assert.ok(!reloadedState.all.includes("work_ledger"), "reload keeps the unified interface free of a public ledger tool");

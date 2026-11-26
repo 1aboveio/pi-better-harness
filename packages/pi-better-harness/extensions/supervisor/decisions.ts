@@ -28,7 +28,7 @@ export function registerDecisionTool(pi: ExtensionAPI, connect: typeof openSuper
       const branch = ctx.sessionManager.getBranch();
       const scope = scopeEvidence(branch);
       const revision = scope?.revision;
-      if (!scope || !revision || !ctx.isProjectTrusted()) return reply("requires an active Outcome in a trusted workspace");
+      if (!scope || !revision || !ctx.isProjectTrusted()) return reply("requires an active Goal in a trusted workspace");
       const current = () => ctx.sessionManager.getSessionId() === session &&
         scopeEvidence(ctx.sessionManager.getBranch())?.revision === revision && scenarioRevision("shared-decisions") === setting;
       const key = digest(JSON.stringify([proposal.reference, proposal.operation, proposal.host, proposal.resource, proposal.effect]));
@@ -40,7 +40,7 @@ export function registerDecisionTool(pi: ExtensionAPI, connect: typeof openSuper
       const entry = branch[index];
       const last = entry?.type === "custom" ? entry.data as DecisionRecord : undefined;
       if (verifyToolCallId) {
-        if (last?.status !== "approved") return reply("no approved decision in this Outcome");
+        if (last?.status !== "approved") return reply("no approved decision in this Goal");
         if (last.result === verifyToolCallId) return reply(last.successful ? "verified" : "verification failed");
         const proof = branch.slice(index + 1).find(e => e.type === "message" && e.message.role === "toolResult" &&
           e.message.toolCallId === verifyToolCallId && !e.message.toolName.startsWith("supervisor_"));

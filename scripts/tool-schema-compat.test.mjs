@@ -80,7 +80,9 @@ test("Outcome & Todo tool schemas, including the optional outcome, use only prov
   for (const field of ["dependsOn", "id", "status", "step"]) {
     assert.ok(todo.items.properties[field], `todo rows keep the ${field} field`);
   }
-  const outcome = update.properties.outcome;
+  const outcome = update.properties.goal;
+  assert.deepEqual(update.properties.outcome.properties, outcome.properties, "existing callers can send the legacy outcome field");
+  assert.ok(!update.required?.includes("goal"));
   assert.equal(outcome.type, "object");
   for (const field of ["boundaries", "doneWhen", "objective", "source", "status"]) {
     assert.ok(outcome.properties[field], `the outcome schema keeps ${field}`);
