@@ -159,9 +159,9 @@ export function ledgerArgumentCompletions(argumentPrefix: string): AutocompleteI
   return matches.length > 0 ? [...matches] : null;
 }
 
-function workflowPlanOwner(ctx: ExtensionContext): string | null {
+function workflowPlanOwner(ctx: ExtensionContext, entries = ctx.sessionManager.getBranch()): string | null {
   let owner: string | null = null;
-  for (const entry of ctx.sessionManager.getBranch()) {
+  for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-workflow") continue;
     const data = entry.data as { version?: unknown; kind?: unknown; owner?: { name?: unknown; planOwner?: unknown } } | null;
     if (data?.version !== 1) continue;
@@ -212,6 +212,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let rushBinding: WorkflowPlanBinding | null = null;
   let rushPlan: RushPlan | null = null;
   let rushError: string | null = null;
+  let invalidateWidget: (() => void) | undefined;
   let refreshWidget: ((force?: boolean) => void) | undefined;
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
   let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -458,6 +459,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     () => { syncTools(); refresh(true); });
 
   const restore = (ctx: ExtensionContext): void => {
+    invalidateWidget?.();
     const entries = ctx.sessionManager.getBranch();
     sessionContext = ctx;
     dynamic.restore(ctx);
@@ -523,7 +525,19 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     setNavigatorPanel(ctx,
       EXTENSION_NAME,
       (tui, theme) => {
-        const localRefresh = (force = false): void => tui.requestRender(force);
+        const readWidgetState = () => {
+          const entries = ctx.sessionManager.getBranch();
+          return {
+            goal: reconstructGoalSnapshot(entries), owner: workflowPlanOwner(ctx, entries),
+            binding: rushBinding ? workflowBinding(entries) : null,
+          };
+        };
+        let branchState: ReturnType<typeof readWidgetState> | undefined;
+        let branchLeaf: string | null | undefined;
+        const localRefresh = (force = false): void => {
+          if (force) branchState = undefined;
+          tui.requestRender(force);
+        };
         refreshWidget = localRefresh;
         let workflowFrame: WorkflowFrame | undefined;
         let renderedRun: string | undefined;
@@ -533,8 +547,14 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           (width: number, disclosure?: string, previewShare = leftShare): string[] => {
             workflowFrame = undefined;
             startButton = undefined;
-            if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
-            const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+            if (displayMode === "hidden") return [];
+            const leaf = ctx.sessionManager.getLeafId?.();
+            if (!branchState || leaf === undefined || leaf !== branchLeaf) {
+              branchState = readWidgetState();
+              branchLeaf = leaf;
+            }
+            if (displayedWorkflowOwner !== branchState.owner) return [];
+            const { goal } = branchState;
             const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
             const header: CompactTaskHeader = {
               subtitle: outcome?.objective, disclosure,
@@ -550,7 +570,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
             if (displayedWorkflowOwner || rushBinding) {
               if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
-                  !workflowBinding(ctx.sessionManager.getBranch())) return heading();
+                  !branchState.binding) return heading();
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
                 : plainPlanTheme.fg;
@@ -591,12 +611,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           },
           { resizeAt: (x, y) => workflowFrame?.resizeAt(x, y), save: saveWorkflowSplit },
         );
+        invalidateWidget = widget.invalidate;
         return {
           ...widget,
           dispose() {
             startButton = undefined;
             widget.invalidate();
-            if (refreshWidget === localRefresh) refreshWidget = undefined;
+            if (refreshWidget === localRefresh) { refreshWidget = undefined; invalidateWidget = undefined; }
           },
         };
       },
@@ -1011,7 +1032,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             request.ledgerBlocker = error instanceof Error ? error.message : String(error);
           }
         }
-        if (sessionContext && !workflowPlanOwner(sessionContext) && !rushBinding) {
+        if (!request.workflowOwnsPlan) {
           request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
         }
       }
@@ -1028,14 +1049,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       return;
     }
     if (request.action === "inspect") {
-      const goal = sessionContext ? reconstructGoalSnapshot(sessionContext.sessionManager.getBranch()) : null;
+      request.display = false;
+      if (!sessionContext?.hasUI || displayMode === "hidden" || !request.goalId ||
+          typeof request.width !== "number" || !Number.isFinite(request.width) || request.width <= 0) return;
       const run = !displayedWorkflowOwner && !rushBinding ? dynamic.run() : undefined;
-      const displayedGoal = run ? run.goalId : outcome?.goalId;
-      request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && displayMode !== "hidden" &&
-        request.goalId === displayedGoal && goal?.goalId === request.goalId && typeof request.width === "number" &&
-        canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
+      if (request.goalId !== (run ? run.goalId : outcome?.goalId)) return;
+      const entries = sessionContext.sessionManager.getBranch();
+      const goal = reconstructGoalSnapshot(entries);
+      request.display = goal?.goalId === request.goalId && canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) &&
+        displayedWorkflowOwner === workflowPlanOwner(sessionContext, entries);
+      return;
     }
-    if (request.action === "inspect") return;
     if (request.action === "bind") {
       if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
         saveOutcome({ ...outcome, goalId: request.goalId });
@@ -1120,6 +1144,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (typeof unsubscribeWorkflow === "function") unsubscribeWorkflow();
     if (typeof unsubscribeSettings === "function") unsubscribeSettings();
     if (typeof unsubscribeTask === "function") unsubscribeTask();
+    invalidateWidget?.();
+    invalidateWidget = undefined;
     refreshWidget = undefined;
     sessionContext = undefined;
     try {

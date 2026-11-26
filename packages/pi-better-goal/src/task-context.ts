@@ -50,6 +50,8 @@ export interface TaskContextRequest {
   status?: GoalSnapshot["status"];
   doneWhen?: readonly string[];
   openSteps?: readonly string[];
+  /** The Goal delegated its checklist to the workflow checked by the completion gate. */
+  workflowOwnsPlan?: boolean;
   /** Evidence retained by a finished workflow bound to this Goal. */
   evidence?: readonly { criterion: string; result: string }[];
   ledgerBlocker?: string;
@@ -75,12 +77,12 @@ export interface TaskContextRequest {
  */
 export function requestTaskContext(
   pi: Pick<ExtensionAPI, "events">,
-  action: TaskContextAction,
+  action: TaskContextAction | { action: "audit"; workflowOwnsPlan: boolean },
   goal?: GoalSnapshot | null,
   width?: number,
   manual = false,
 ): TaskContextRequest {
-  const request: TaskContextRequest = { action };
+  const request: TaskContextRequest = typeof action === "string" ? { action } : { ...action };
   if (manual) request.manual = true;
   if (width !== undefined) request.width = width;
   if (goal) {

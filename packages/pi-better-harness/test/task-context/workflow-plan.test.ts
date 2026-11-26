@@ -190,6 +190,7 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
       return { ...result, details: result.details as { hasPlan: boolean; plan: { runId?: string; planRevision?: number } | null } };
     },
     command: (args: string, context = ctx) => commands.get("todo")!.handler(args, context),
+    mount: () => widgetFactory(tui, { fg: (_color: string, value: string) => value }),
     widget: () => widgetFactory(tui, { fg: (_color: string, value: string) => value }).render(140).join("\n"),
     notification: () => notification,
   };
@@ -205,6 +206,50 @@ function writeLifecyclePlan(cwd: string, runId: string, revision = 1) {
   }));
   return path;
 }
+
+test("drag previews reuse the rendered branch until the session leaf changes", async t => {
+  const cwd = mkdtempSync(join(tmpdir(), "workflow-divider-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = workflowHarness(cwd);
+  t.after(() => h.shutdown());
+  await h.start();
+  h.owner("fixture-workflow");
+  await h.update({ workflow: { path: writeLifecyclePlan(cwd, "drag"), revision: 1 } });
+  const session = h.ctx.sessionManager;
+  Object.assign(session, { getLeafId: () => String(h.entries().length) });
+  const history = t.mock.method(session, "getBranch");
+  const panel = h.mount();
+  const width = 100;
+  const rows: string[] = panel.render(width);
+  const y = rows.findIndex(row => row.includes(" │ "));
+  assert.ok(y >= 0);
+  const start = rows[y]!.indexOf(" │ ") + 1;
+  const mouse = (type: string, x: number) => panel.handleMouse({ type, x, y, width, button: "left" });
+  assert.equal(mouse("press", start)?.capture, true);
+  const initialReads = history.mock.callCount();
+  for (let move = 1; move <= 16; move++) {
+    mouse("drag", start + move);
+    assert.equal(panel.render(width)[y].indexOf(" │ ") + 1, start + move);
+  }
+  assert.equal(history.mock.callCount(), initialReads);
+  mouse("release", start + 16);
+  h.entries().push({ type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } });
+  assert.deepEqual(panel.render(width), []);
+  assert.equal(history.mock.callCount(), initialReads + 1);
+
+  await h.navigate(h.entries().slice(0, -1));
+  const restored = panel.render(width);
+  const divider = restored[y].indexOf(" │ ") + 1;
+  const press = { type: "press", button: "left", x: divider, y, screenX: divider, screenY: y, width };
+  const target = panel.handleMouse(press)?.target;
+  assert.ok(target, "fullscreen mouse capture targets the mounted workflow widget");
+  const pointer = { ...press, x: divider - 5, y: y - target.originY };
+  target.component.handleMouse({ ...pointer, type: "drag" });
+  await h.navigate([]);
+  assert.deepEqual(panel.render(width), []);
+  target.component.handleMouse({ ...pointer, type: "release" });
+  assert.deepEqual(h.entries(), [], "a drag started on the old branch cannot persist in the new one");
+});
 
 function workflowText(result: Awaited<ReturnType<ReturnType<typeof workflowHarness>["get"]>>) {
   return (result.content[0] as { text: string }).text;

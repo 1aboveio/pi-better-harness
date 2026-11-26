@@ -373,6 +373,25 @@ test("session restore, branch navigation and foreign session notifications do no
   assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
 });
 
+test("a separate coordinator cannot bypass a plain Goal's unfinished Todo or be released by it", async t => {
+  for (const status of ["pending", "completed"]) {
+    await t.test(status, async t => {
+      const h = await fixture(t, { workflow: "available" });
+      h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(null) });
+      await h.emit("session_tree");
+      await h.update({ goal: accepted, todo: [{ step: "Check receipts", status }] });
+      assert.equal(h.goal()?.command, undefined);
+      await h.emit("input", { source: "interactive", text: "/skill:rush-issues #42" });
+      assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+      const result = await h.complete([{ criterion: accepted.doneWhen[0]!, result: "Checkout test passed" }]);
+      assert.equal(result.details.ok, status === "completed");
+      if (status === "pending") assert.deepEqual(result.details.openSteps, ["Check receipts"]);
+      assert.equal(h.goal()?.status, status === "pending" ? "active" : "complete");
+      assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+    });
+  }
+});
+
 test("scheduler finish still requires evidence for each accepted criterion", async t => {
   const h = await fixture(t, { workflow: "available" });
   const doneWhen = ["SGP1 deployment verified", "Payment rules accepted", "Issue closed"];
