@@ -2,8 +2,13 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
     existsSync,
+    lchmodSync,
+    lstatSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
+    readlinkSync,
+    realpathSync,
     rmSync,
     symlinkSync,
     utimesSync,
@@ -35,6 +40,8 @@ const {
     taskRuntimeProvenancePath,
     writeMeta,
 } = await import("../registry.ts");
+const { resultDir } = await import("../session-store.ts");
+const { readRetainedResult } = await import("../retained-result.ts");
 
 const DAY = new Date("2026-07-30T12:00:00").getTime();
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -245,6 +252,46 @@ describe("enforceRegistrySizeCapOnce", () => {
             protectedIds: new Set(),
         });
         assert.equal(later.ran, true, "runs again once the interval has passed");
+    });
+
+    it("counts only successful removals when a result cannot be retained", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const blocked = "sa_cap_blocked";
+        const removable = "sa_cap_removable";
+        writeMeta(meta(blocked, { status: "killed", timing: { stopReason: "deadline" } }));
+        writeMeta(meta(removable));
+        // An incomplete retained result prevents deletion of its original run.
+        mkdirSync(resultDir(blocked), { recursive: true });
+        const sizes = new Map(collectSizeCapEntries().map(entry => [entry.id, entry.bytes]));
+        const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1, protectedIds: new Set() });
+        assert.deepEqual(result.removed, [removable]);
+        assert.ok(existsSync(runDir(blocked)));
+        assert.ok(result.errors.some(error => error.includes("Retained result identity changed")));
+        assert.equal(result.reclaimedBytes, sizes.get(removable));
+        assert.equal(result.keptBytes, sizes.get(blocked));
+        assert.equal(result.overBudget, true);
+    });
+
+    it("preserves scratch file and link modes before reclaiming the run", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const id = "sa_scratch_links";
+        const scratch = realpathSync(mkdtempSync(join(RUNTIME, "pi-task-scratch-")));
+        writeFileSync(join(scratch, "artifact"), "kept", { mode: 0o640 });
+        symlinkSync("artifact", join(scratch, "link"));
+        symlinkSync("missing", join(scratch, "dangling"));
+        lchmodSync?.(join(scratch, "link"), 0o700);
+        lchmodSync?.(join(scratch, "dangling"), 0o755);
+        const names = ["", "artifact", "link", "dangling"];
+        const modes = names.map(name => lstatSync(join(scratch, name)).mode);
+        writeMeta(meta(id, { taskRuntime: true, taskScratch: scratch }));
+        const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1, protectedIds: new Set() });
+        assert.deepEqual(result.errors, []);
+        assert.deepEqual(result.removed, [id]);
+        assert.equal(existsSync(scratch), false);
+        const saved = readRetainedResult(id).taskScratch;
+        assert.deepEqual(names.map(name => lstatSync(join(saved, name)).mode), modes);
+        assert.equal(readFileSync(join(saved, "link"), "utf8"), "kept");
+        assert.equal(readlinkSync(join(saved, "dangling")), "missing");
     });
 
     it("protects this pi's own runs by default", () => {

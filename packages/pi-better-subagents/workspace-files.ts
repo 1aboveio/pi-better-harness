@@ -6,7 +6,9 @@ import {
     closeSync,
     constants,
     copyFileSync,
+    cpSync,
     existsSync,
+    lchmodSync,
     lstatSync,
     mkdirSync,
     openSync,
@@ -84,6 +86,11 @@ export function snapshotTree(root: string, store?: string, omit: ReadonlySet<str
     return entries;
 }
 
+function restoreSymlink(dest: string, entry: Extract<SavedEntry, { type: "symlink" }>): void {
+    symlinkSync(entry.target, dest);
+    lchmodSync?.(dest, entry.mode);
+}
+
 export function restoreTree(root: string, store: string, entries: SavedEntry[]): void {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const directories = new Set(["."]);
@@ -96,8 +103,9 @@ export function restoreTree(root: string, store: string, entries: SavedEntry[]):
         if (entry.type === "directory") {
             mkdirSync(dest);
             directories.add(entry.name);
-        } else if (entry.type === "symlink") symlinkSync(entry.target, dest);
-        else {
+        } else if (entry.type === "symlink") {
+            restoreSymlink(dest, entry);
+        } else {
             copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
             chmodSync(dest, entry.mode);
         }
@@ -105,6 +113,28 @@ export function restoreTree(root: string, store: string, entries: SavedEntry[]):
     for (const entry of entries.slice().reverse()) {
         if (entry.type === "directory") chmodSync(join(root, entry.name), entry.mode);
     }
+}
+
+export function copyTree(source: string, dest: string, entries: SavedEntry[]): void {
+    const options = { recursive: true, verbatimSymlinks: true };
+    const links = new Map<string, Extract<SavedEntry, { type: "symlink" }>>();
+    for (const entry of entries) {
+        if (entry.type === "symlink") links.set(join(source, entry.name), entry);
+    }
+    if (!links.size || typeof lchmodSync !== "function") {
+        cpSync(source, dest, options);
+        return;
+    }
+    // cpSync preserves the link text but creates links with the process's default mode.
+    cpSync(source, dest, {
+        ...options,
+        filter(from, to) {
+            const link = links.get(from);
+            if (!link) return true;
+            restoreSymlink(to, link);
+            return false;
+        },
+    });
 }
 
 export function verifyTree(root: string, entries: SavedEntry[], omit?: ReadonlySet<string>): void {

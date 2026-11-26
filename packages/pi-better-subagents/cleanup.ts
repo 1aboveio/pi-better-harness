@@ -969,15 +969,13 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
     };
     const bytesById = new Map(entries.map((entry) => [entry.id, entry.bytes]));
     const removed: string[] = [];
-    let retainedBytes = 0;
+    let reclaimedBytes = 0;
     for (const id of plan.remove) {
-        const outcome = removeSizeCappedRun(id, scope, errors);
-        if (outcome === "removed") removed.push(id);
-        else if (outcome === "retained") retainedBytes += bytesById.get(id) ?? 0;
+        if (removeSizeCappedRun(id, scope, errors) !== "removed") continue;
+        removed.push(id);
+        reclaimedBytes += bytesById.get(id) ?? 0;
     }
-    // A candidate the recheck retained is still on disk, so the byte account and
-    // the shortfall it reports stay honest.
-    const keptBytes = plan.keptBytes + retainedBytes;
+    const keptBytes = totalBytes - reclaimedBytes;
 
     try {
         writeCleanupState({ ...state, lastSizeSweepAt: options.now ?? Date.now() });
@@ -985,7 +983,7 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
         errors.push(`${cleanupStatePath()}: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    return { ...plan, ran: true, removed, keptBytes, overBudget: keptBytes > maxBytes, errors };
+    return { ran: true, remove: plan.remove, removed, reclaimedBytes, keptBytes, overBudget: keptBytes > maxBytes, errors };
 }
 
 /**

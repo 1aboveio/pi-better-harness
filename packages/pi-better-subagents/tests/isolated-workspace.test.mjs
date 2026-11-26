@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
     existsSync,
+    lchmodSync,
     lstatSync,
     mkdirSync,
     mkdtempSync,
@@ -70,7 +71,14 @@ for (const mode of ["clone", "worktree"])
         writeFileSync(join(cwd, "f"), "unstaged\n");
         writeFileSync(join(cwd, "artifact.bin"), Buffer.from([0, 255, 1]));
         mkdirSync(join(cwd, "empty"));
-        symlinkSync("f", join(cwd, "link"));
+        const link = join(cwd, "link");
+        const dangling = join(cwd, "dangling");
+        symlinkSync("f", link);
+        symlinkSync("missing", dangling);
+        lchmodSync?.(link, 0o700);
+        lchmodSync?.(dangling, 0o755);
+        const linkMode = lstatSync(link).mode;
+        const danglingMode = lstatSync(dangling).mode;
         assert.equal(readFileSync(join(other, "f"), "utf8"), "base\n");
         assert.equal(git(source, "status", "--porcelain"), "");
         reclaimWorkspace(a);
@@ -88,7 +96,8 @@ for (const mode of ["clone", "worktree"])
         assert.equal(readFileSync(join(cwd, "f"), "utf8"), "unstaged\n");
         assert.deepEqual(readFileSync(join(cwd, "artifact.bin")), Buffer.from([0, 255, 1]));
         assert.deepEqual(readdirSync(join(cwd, "empty")), []);
-        assert.ok(lstatSync(join(cwd, "link")).isSymbolicLink());
+        assert.equal(lstatSync(link).mode, linkMode);
+        assert.equal(lstatSync(dangling).mode, danglingMode);
     });
 test("a Worktree to Clone handoff preserves evidence without replaying work", (t) => {
     const source = fixture(t),

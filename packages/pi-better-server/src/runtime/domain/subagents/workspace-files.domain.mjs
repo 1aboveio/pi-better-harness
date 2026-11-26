@@ -2,7 +2,7 @@
 // A private content store lets retained checkouts share identical Git objects and files.
 // Source files are never hardlinked into storage. Restoring a file makes an independent copy.
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, cpSync, existsSync, lchmodSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, } from "node:fs";
 import { dirname, join } from "node:path";
 function fileHash(path, buffer) {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -71,6 +71,10 @@ export function snapshotTree(root, store, omit = new Set()) {
     walk("");
     return entries;
 }
+function restoreSymlink(dest, entry) {
+    symlinkSync(entry.target, dest);
+    lchmodSync?.(dest, entry.mode);
+}
 export function restoreTree(root, store, entries) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const directories = new Set(["."]);
@@ -84,8 +88,9 @@ export function restoreTree(root, store, entries) {
             mkdirSync(dest);
             directories.add(entry.name);
         }
-        else if (entry.type === "symlink")
-            symlinkSync(entry.target, dest);
+        else if (entry.type === "symlink") {
+            restoreSymlink(dest, entry);
+        }
         else {
             copyFileSync(blobPath(store, entry.blob), dest, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
             chmodSync(dest, entry.mode);
@@ -95,6 +100,29 @@ export function restoreTree(root, store, entries) {
         if (entry.type === "directory")
             chmodSync(join(root, entry.name), entry.mode);
     }
+}
+export function copyTree(source, dest, entries) {
+    const options = { recursive: true, verbatimSymlinks: true };
+    const links = new Map();
+    for (const entry of entries) {
+        if (entry.type === "symlink")
+            links.set(join(source, entry.name), entry);
+    }
+    if (!links.size || typeof lchmodSync !== "function") {
+        cpSync(source, dest, options);
+        return;
+    }
+    // cpSync preserves the link text but creates links with the process's default mode.
+    cpSync(source, dest, {
+        ...options,
+        filter(from, to) {
+            const link = links.get(from);
+            if (!link)
+                return true;
+            restoreSymlink(to, link);
+            return false;
+        },
+    });
 }
 export function verifyTree(root, entries, omit) {
     if (JSON.stringify(snapshotTree(root, undefined, omit)) !== JSON.stringify(entries)) {

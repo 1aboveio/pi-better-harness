@@ -1,7 +1,7 @@
 // Generated fixed launch domain from packages/pi-better-subagents/retained-result.ts. Do not edit directly.
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { dirname, join } from "node:path";
-import { snapshotTree, verifyTree } from "./workspace-files.domain.mjs";
+import { copyTree, snapshotTree, verifyTree } from "./workspace-files.domain.mjs";
 import { resultDir } from "./session-store.domain.mjs";
 // Published only while retiring a quiescent attempt. A result record can answer reads,
 // but cannot authorize admission, revive a writer or make a failed attempt resumable.
@@ -26,7 +26,7 @@ export function retainResult(meta, logPath, scratch) {
         if (scratch && existsSync(scratch)) {
             const files = snapshotTree(scratch);
             if (files.some((entry) => entry.name !== ".sandbox-anchor")) {
-                cpSync(scratch, join(temp, "scratch"), { recursive: true, verbatimSymlinks: true });
+                copyTree(scratch, join(temp, "scratch"), files);
                 verifyTree(join(temp, "scratch"), files);
                 verifyTree(scratch, files);
                 savedScratch = join(dir, "scratch");
