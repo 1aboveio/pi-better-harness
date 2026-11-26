@@ -4,6 +4,46 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.56.0] - 2026-11-26
+
+### Changed
+
+- The saved objective in Todo is now called Goal. Start it from the Todo panel and use `/goal pause` and `/goal resume` to control the current Todo.
+- Harness settings has one switch for automatically starting Goals. Existing saved objectives remain available for manual start.
+- Bundle Goal 0.17.0, Background Tasks 0.21.1, and Subagents 0.39.1.
+
+## [pi-better-goal@0.17.0] - 2026-11-26
+
+### Changed
+
+- Start a saved Goal from Todo or resume it with `/goal resume`. An explicit start works when automatic start is off.
+
+### Fixed
+
+- Keep the original workflow and its completion checks when reopening a Goal. If the skill is unavailable, further edits and session reloads preserve the binding.
+
+## [pi-better-background-tasks@0.21.1] - 2026-11-26
+
+### Fixed
+
+- Route assignment cleanup to the supervisor that launched the task, including when another host handles discovery.
+- Keep Windows cleanup pending when process-tree exit cannot be verified.
+
+## [pi-better-subagents@0.39.1] - 2026-11-26
+
+### Fixed
+
+- Reuse archived park records during startup and skip settled parks when reconciling continuations.
+- Skip repeated workspace cleanup after reclamation and report the bytes actually reclaimed. (#910)
+
+## [pi-better-server@0.8.1] - 2026-11-26
+
+### Fixed
+
+- Look up outstanding assignment cleanup by index and wait for in-flight stops before releasing daemon ownership.
+- Ending an assignment preserves unrelated Background poll caches. Windows cleanup requires evidence of process-tree exit.
+- Include the Subagents workspace cleanup and archive recovery fixes in the server runtime.
+
 ## [pi-better-harness@0.55.0] - 2026-11-25
 
 ### Added

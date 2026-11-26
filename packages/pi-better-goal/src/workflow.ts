@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
+import { EXTENSION_NAME } from "./types.js";
 
 export const WORKFLOW_ENTRY_TYPE = "pi-better-workflow";
 
@@ -83,10 +84,15 @@ export function workflowEntry(owner: WorkflowOwner | null) {
     : { version: 1, kind: "set" as const, owner };
 }
 
-export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>): WorkflowOwner | null {
+export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>, atGoalCompletion?: string): WorkflowOwner | null {
   let owner: WorkflowOwner | null = null;
   for (const entry of entries) {
-    if (entry.type !== "custom" || entry.customType !== WORKFLOW_ENTRY_TYPE) continue;
+    if (entry.type !== "custom") continue;
+    if (atGoalCompletion && entry.customType === EXTENSION_NAME) {
+      const data = entry.data as { kind?: string; goal?: { goalId?: string; status?: string } } | null;
+      if (data?.kind === "set" && data.goal?.goalId === atGoalCompletion && data.goal.status === "complete") return owner;
+    }
+    if (entry.customType !== WORKFLOW_ENTRY_TYPE) continue;
     const data = entry.data as { version?: unknown; kind?: unknown; owner?: Partial<WorkflowOwner> } | null;
     if (data?.version !== 1) continue;
     if (data.kind === "clear") owner = null;
@@ -95,7 +101,7 @@ export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>): Workf
       owner = data.owner as WorkflowOwner;
     }
   }
-  return owner;
+  return atGoalCompletion ? null : owner;
 }
 
 export function skillCommandName(text: string): string | null {

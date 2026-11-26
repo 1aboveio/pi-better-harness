@@ -1018,7 +1018,10 @@ export default function (pi: ExtensionAPI): void {
     const command = previous?.command ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
     const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
     const restoredOwner = previous?.command ? goalWorkflowOwner(goal) : null;
-    if ((handoffOwner && restoredOwner?.name !== handoffOwner) ||
+    const completedOwner = previous?.command?.source === "skill"
+      ? currentWorkflowOwner(ctx.sessionManager.getBranch(), previous.goalId) : null;
+    if ((completedOwner && (restoredOwner?.name !== completedOwner.name || restoredOwner.path !== completedOwner.path)) ||
+        (handoffOwner && restoredOwner?.name !== handoffOwner) ||
         (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path))) {
       return "Reinvoke the original workflow to continue its Todo.";
     }

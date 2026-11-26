@@ -93,3 +93,8 @@ export function processGroupAlive(pgid) {
         return error.code !== "ESRCH";
     }
 }
+/** Windows has no POSIX group probe. Older cleanup records used that probe there too. */
+export function processGroupExitVerified(pgid, recordedEmpty = false) {
+    return process.platform !== "win32" && (recordedEmpty ||
+        (pgid !== undefined && Number.isSafeInteger(pgid) && pgid > 0 && !processGroupAlive(pgid)));
+}

@@ -126,7 +126,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       finally {
         try { await cancellations?.close(); }
         finally {
-          resultSupervision?.close();
+          await resultSupervision?.close();
           controlStore.release();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           try { await (await launchInitialization?.catch(() => undefined))?.close();
@@ -301,6 +301,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...requests.values(),
                 ...registry.lifecycleReasons(),
+                ...(resultSupervision?.busy ? [{ kind: "assignment-cleanup", id: resultSupervision.hostId }] : []),
                 ...(resultSupervision?.livenessReasons() ?? []),
                 ...(launches?.lifecycleReasons() ?? []),
                 ...(backgroundTools?.lifecycleReasons() ?? []),
@@ -571,7 +572,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       await cancellations?.close();
       await (await launchInitialization?.catch(() => undefined))?.close();
           await (await backgroundInitialization?.catch(() => undefined))?.close();
-      resultSupervision?.close();
+      await resultSupervision?.close();
       controlStore.release();
       if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
@@ -628,7 +629,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   upgradeBlockers = await work().upgradeObligations();
                   if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
                   if (launches?.cleaningRegistry) throw new Error("Waiting for subagent registry cleanup");
-                  if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
+                  if (inFlight > 0 || resultSupervision?.busy || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
                     (hosted as HostedSession & { publishRuntimeEvent(event: unknown): void }).publishRuntimeEvent({
@@ -685,7 +686,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
           }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || resultSupervision?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           idleStopping = true;
           idleEvidence = { at: now(), deadline: hostedUsed ? zeroSince! + config.daemonIdleMs : runtimeZeroSince! + config.runtimeIdleMs,
@@ -720,7 +721,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await cancellations?.close();
           await (await launchInitialization?.catch(() => undefined))?.close();
           await (await backgroundInitialization?.catch(() => undefined))?.close();
-          resultSupervision?.close();
+          await resultSupervision?.close();
           controlStore.release();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();

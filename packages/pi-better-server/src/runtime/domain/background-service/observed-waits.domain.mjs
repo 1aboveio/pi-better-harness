@@ -35,7 +35,7 @@ import { currentProcessStartToken, readProcessStartToken } from "./process-ident
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, resolveForegroundSandboxPlan, currentForegroundSandboxPolicy, resolveWorkerSandboxPlan, sandboxProvenance, } from "./sandbox.domain.mjs";
 import { openStore, cancellationCredential, } from "./shared-operation-coordinator/index.domain.mjs";
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
-import { processGroupAlive } from "./supervisor/identity.domain.mjs";
+import { processGroupExitVerified } from "./supervisor/identity.domain.mjs";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.domain.mjs";
 import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
@@ -788,11 +788,14 @@ export class ObservedWaitHost {
             return;
         this.authorityPassCache = new Map();
         try {
-            const discovery = this.options.serverOwnedResults ? undefined : this.store.readDiscoveryState(this.discoveryScope);
+            const discovery = this.options.serverOwnedResults ? undefined : this.store.readDiscoveryState(this.discoveryScope, this.hostId);
             if (this.options.serverOwnedResults || discovery?.managed) {
                 this.releaseDiscoveryAuthority();
-                if (!this.options.serverOwnedResults)
+                if (!this.options.serverOwnedResults) {
                     this.reconcileFollowerRunning();
+                    if (discovery?.cleanupPending)
+                        await this.reconcileAssignmentCleanup();
+                }
                 this.reconcileOwnerChanges();
                 this.retryPendingTerminalCallbacks();
                 await this.dispatchOutbox();
@@ -803,13 +806,13 @@ export class ObservedWaitHost {
             if (role === "holder") {
                 this.discoverObservedTasks();
                 this.reconcileGlobalRunning();
-                if (discovery.hasAssignmentTasks)
-                    await this.reconcileAssignmentCleanup();
             }
             else {
                 this.reconcileFollowerRunning();
                 this.reconcileOwnerChanges();
             }
+            if (discovery?.cleanupPending)
+                await this.reconcileAssignmentCleanup();
             this.retryPendingTerminalCallbacks();
             await this.dispatchOutbox();
         }
@@ -819,7 +822,7 @@ export class ObservedWaitHost {
     }
     async reconcileAssignmentCleanup() {
         const store = this.requireStore();
-        const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+        const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor, this.hostId);
         this.assignmentCleanupCursor = candidate?.operationId;
         if (!candidate || candidate.resultManaged || this.supervisionAuthority(candidate) !== "self")
             return;
@@ -833,7 +836,7 @@ export class ObservedWaitHost {
                 if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven")
                     return;
                 const pgid = inspection.command?.pgid ?? inspection.command?.pid;
-                if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+                if (processGroupExitVerified(pgid, inspection.cleanup?.groupEmpty)) {
                     store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
                     return;
                 }

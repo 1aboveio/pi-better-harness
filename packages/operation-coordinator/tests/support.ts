@@ -51,8 +51,19 @@ export function cleanupHarnesses(): void {
     }
 }
 
-/** Strip v5 operation provenance from a fresh store to build a legacy fixture. */
+/** Restore the schema that discovered cleanup work by scanning operations. */
+export function removePendingCleanupIndex(db: DatabaseSync): void {
+    db.exec(`DROP TRIGGER assignment_cleanup_enqueue;
+        DROP TRIGGER assignment_cleanup_terminal;
+        DROP TRIGGER assignment_cleanup_transfer;
+        DROP TRIGGER assignment_cleanup_verified;
+        DROP TABLE assignment_cleanup_pending;
+        DROP INDEX assignment_attempts_by_assignment;
+        DROP INDEX operations_by_assignment_attempt`);
+}
+
 export function removeAssignmentOperationBinding(db: DatabaseSync): void {
+    removePendingCleanupIndex(db);
     db.exec("DROP INDEX operations_assignment_cleanup; ALTER TABLE operations DROP COLUMN assignment_attempt_id");
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -208,6 +208,37 @@ test("automatic Goals retain the workflow's completion gates on creation and reo
   await h.update({ newTask: true, outcome: accepted });
   assert.equal(h.goal()?.status, "active");
   assert.equal(h.goal()?.command, undefined, "a new task with the same objective has its own binding");
+});
+
+test("a failed workflow reopen keeps its binding across edits and reload", async t => {
+  const h = await fixture(t, { workflow: "available" });
+  await h.update({ outcome: accepted });
+  const original = h.goal()!;
+  await h.command("complete");
+  const skill = original.command!.path;
+  const contents = readFileSync(skill);
+  rmSync(skill);
+  await h.update({ outcome: { ...accepted, status: "active" } });
+  await h.emit("session_tree");
+  const refinement = { objective: "Verify deployment", doneWhen: ["Deployment checked"] };
+  await h.update({ outcome: refinement });
+  assert.equal(h.outcome()?.reopenedGoalId, original.goalId);
+  assert.equal(h.goal()?.goalId, original.goalId);
+  assert.equal(h.goal()?.status, "complete");
+
+  await assert.rejects(h.update({ todo: [] }), /Restore \/skill:rush-issues/);
+  writeFileSync(skill, "# Skill without workflow metadata");
+  await h.update({ outcome: refinement });
+  assert.equal(h.goal()?.status, "complete");
+  writeFileSync(skill, contents);
+  await h.update({ outcome: refinement });
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(h.outcome()?.reopenedGoalId, undefined);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  const result = await h.complete([{ criterion: refinement.doneWhen[0]!, result: "Verified" }]);
+  assert.equal(result.details.ok, false);
+  assert.match(result.content[0].text, /plan|scheduler/i);
 });
 
 for (const workflow of ["missing", "invalid"] as const) {

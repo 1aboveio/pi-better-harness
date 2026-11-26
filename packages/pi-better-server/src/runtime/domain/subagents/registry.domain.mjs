@@ -184,24 +184,26 @@ export function listParkRecordCandidates(metas = listMetas()) {
         || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
 }
 /** Read recovery sidecars in batches so a large registry does not block socket replies. */
-export async function* scanParkRecords(metas = listMetas()) {
+export async function* scanParkRecords(metas = listMetas(), include) {
     const runs = join(baseDir(), "runs");
-    const volatileIds = new Set(await readdir(runs).catch(() => []));
+    const volatileIds = await readdir(runs).then(ids => new Set(ids), (error) => error.code === "ENOENT" ? new Set() : undefined);
     const batchSize = 32;
     for (let offset = 0; offset < metas.length; offset += batchSize) {
         const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
-            if (!meta.park && !volatileIds.has(meta.id))
+            if (meta.park && include && !include(meta.park))
+                return;
+            if (volatileIds && !volatileIds.has(meta.id))
+                return meta.park ? { meta, record: meta.park } : undefined;
+            if (!volatileIds && !meta.park)
                 return;
             try {
                 const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
-                if (record)
+                if (record && (!include || include(record)))
                     return { meta, record };
             }
             catch (error) {
                 if (error.code === "ENOENT" && meta.park) {
-                    const record = readMeta(meta.id)?.park;
-                    if (record)
-                        return { meta, record };
+                    return { meta, record: meta.park };
                 }
             }
         }));

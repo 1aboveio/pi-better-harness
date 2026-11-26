@@ -544,20 +544,25 @@ export function listParkRecordCandidates(metas: readonly RunMeta[] = listMetas()
 }
 
 /** Read recovery sidecars in batches so a large registry does not block socket replies. */
-export async function* scanParkRecords(metas: readonly RunMeta[] = listMetas()): AsyncGenerator<{ meta: RunMeta; record: ParkRecord }> {
+export async function* scanParkRecords(
+    metas: readonly RunMeta[] = listMetas(),
+    include?: (record: ParkRecord) => boolean,
+): AsyncGenerator<{ meta: RunMeta; record: ParkRecord }> {
     const runs = join(baseDir(), "runs");
-    const volatileIds = new Set(await readdir(runs).catch(() => [] as string[]));
+    const volatileIds = await readdir(runs).then(ids => new Set(ids),
+        (error: NodeJS.ErrnoException) => error.code === "ENOENT" ? new Set<string>() : undefined);
     const batchSize = 32;
     for (let offset = 0; offset < metas.length; offset += batchSize) {
         const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
-            if (!meta.park && !volatileIds.has(meta.id)) return;
+            if (meta.park && include && !include(meta.park)) return;
+            if (volatileIds && !volatileIds.has(meta.id)) return meta.park ? { meta, record: meta.park } : undefined;
+            if (!volatileIds && !meta.park) return;
             try {
                 const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
-                if (record) return { meta, record };
+                if (record && (!include || include(record))) return { meta, record };
             } catch (error) {
                 if ((error as NodeJS.ErrnoException).code === "ENOENT" && meta.park) {
-                    const record = readMeta(meta.id)?.park;
-                    if (record) return { meta, record };
+                    return { meta, record: meta.park };
                 }
             }
         }));

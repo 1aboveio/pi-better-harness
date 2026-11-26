@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { bumpChangeRevision } from "./discovery.ts";
 import { StoreError } from "./errors.ts";
 import { columnText, getRow, getRows, run, type StoreContext } from "./sqlite.ts";
 import { requireWait, readPins } from "./rows.ts";
@@ -120,7 +119,6 @@ export function recordAssignmentOutcome(ctx: StoreContext, input: AssignmentOutc
         }
         for (const e of retained) run(ctx, `INSERT OR IGNORE INTO evidence_pins (pin_id, wait_id, generation, operation_id, terminal_revision, kind, ref, summary, detail_lost, bytes, pinned_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, `pin_${randomUUID()}`, eventId, e.operationId, e.terminalRevision, e.kind, e.ref, e.summary ?? null, e.detailLost ? 1 : 0, e.bytes ?? null, at);
         run(ctx, `INSERT INTO outbox_events (event_id, event_type, operation_id, terminal_revision, wait_id, generation, recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id, state, created_at) VALUES (?, 'assignment-outcome', ?, ?, ?, 1, ?, ?, ?, ?, ?, 'pending', ?)`, eventId, assignmentId, revision, eventId, recipient.kind, recipient.sessionId, recipient.workspace, recipient.branchId ?? null, recipient.goalId ?? null, at);
-        bumpChangeRevision(ctx);
         return record;
     });
 }

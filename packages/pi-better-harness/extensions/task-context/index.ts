@@ -178,7 +178,7 @@ function reopeningPlanOwner(pi: ExtensionAPI, ctx: ExtensionContext, goal: GoalS
   if (command?.source !== "skill") return null;
   const binding = workflowBinding(ctx.sessionManager.getBranch());
   if (binding) return binding.owner;
-  if (!commandAvailable(pi, command)) return null;
+  if (!commandAvailable(pi, command)) throw new Error(`Restore /${command.name} before changing its task plan.`);
   const owner = workflowOwnerFromSkill(command.name.slice("skill:".length), command.path,
     name => pi.getCommands().find(item => item.source === "skill" && item.name === `skill:${name}`)?.sourceInfo.path);
   return owner?.name ?? null;
@@ -655,9 +655,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             throw new Error("Use /goal pause or /goal resume to change execution. Use /goal clear to release this Goal.");
           }
           if (nextOutcome.status === "active" && goal.status === "complete") {
-            if (input.goal?.status === "active") {
-              nextOutcome.reopenedGoalId = nextOutcome.goalId;
-            }
+            nextOutcome.reopenedGoalId = nextOutcome.goalId;
             delete nextOutcome.goalId;
             if (nextOutcome.source === "goal") delete nextOutcome.source;
           }

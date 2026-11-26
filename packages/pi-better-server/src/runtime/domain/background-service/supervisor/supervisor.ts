@@ -25,7 +25,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateCondition } from "../conditions.ts";
 import { stopProcessGroup } from "../process.ts";
-import { identityAlive, identityAllowsSignals, processGroupAlive, readStartToken, verifyProcessIdentity } from "./identity.ts";
+import { identityAlive, identityAllowsSignals, processGroupAlive, processGroupExitVerified, readStartToken, verifyProcessIdentity } from "./identity.ts";
 import type { ProcessIdentityVerdict } from "./identity.ts";
 import { supervisorRunnerInvocation } from "./invocation.ts";
 import {
@@ -685,8 +685,7 @@ class Supervisor implements LocalSupervisor {
       // Unknown identity cannot authorize an external signal. A recorded process
       // that is gone is only "already gone" when its group is gone too; survivors
       // in a group whose leader died cannot be verified, so they are refused.
-      const groupStillAlive = processGroupAlive(pgid);
-      outcome = (verdict === "dead" || verdict === "absent") && !groupStillAlive ? "already-gone" : "refused-unknown-identity";
+      outcome = (verdict === "dead" || verdict === "absent") && processGroupExitVerified(pgid) ? "already-gone" : "refused-unknown-identity";
       groupEmpty = outcome === "already-gone" ? true : false;
     } else {
       /**
@@ -717,7 +716,7 @@ class Supervisor implements LocalSupervisor {
       while (Date.now() < killDeadline && processGroupAlive(pgid)) {
         await delay(25);
       }
-      groupEmpty = !processGroupAlive(pgid);
+      groupEmpty = processGroupExitVerified(pgid);
       outcome = !groupEmpty ? "unproven" : signalledWhileVerified ? "killed" : "already-gone";
     }
 

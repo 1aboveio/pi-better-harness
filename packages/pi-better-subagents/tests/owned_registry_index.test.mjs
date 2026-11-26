@@ -117,6 +117,17 @@ describe("owned subagent registry indexes", () => {
     assert.equal(getRegistryIoMetrics().fullDirectoryReads, 0);
   });
 
+  it("uses listed dispositions after volatile park directories are reclaimed", async () => {
+    const runs = ["consumed", "cancelled", "waiting"].map((phase, index) => ({
+      ...meta(`sa_archived_park_${index}`, 4100 + index, "park-owner"),
+      park: { version: 1, waitId: `wait-${index}`, generation: 1, attemptId: `attempt-${index}`, parkedAt: 1, phase },
+    }));
+    resetRegistryIoMetrics();
+    const listed = await Array.fromAsync(scanParkRecords(runs));
+    assert.deepEqual(listed.map(entry => entry.record), runs.map(run => run.park));
+    assert.equal(getRegistryIoMetrics().metadataFileReads, 0);
+  });
+
   it("answers a socket request while checking historical park sidecars", { timeout: 5000 }, async () => {
     const history = Array.from({ length: 1024 }, (_, i) => ({ id: `sa_scan_history_${i}` }));
     for (const { id } of history) mkdirSync(runDir(id), { recursive: true });

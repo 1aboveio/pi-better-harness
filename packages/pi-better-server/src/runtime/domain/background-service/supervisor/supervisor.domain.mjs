@@ -25,7 +25,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateCondition } from "../conditions.domain.mjs";
 import { stopProcessGroup } from "../process.domain.mjs";
-import { identityAlive, identityAllowsSignals, processGroupAlive, readStartToken, verifyProcessIdentity } from "./identity.domain.mjs";
+import { identityAlive, identityAllowsSignals, processGroupAlive, processGroupExitVerified, readStartToken, verifyProcessIdentity } from "./identity.domain.mjs";
 import { supervisorRunnerInvocation } from "./invocation.domain.mjs";
 import { appendEvent, ensureSupervisorTaskDir, launchRequestHash, readClaimRecord, readCleanupRecord, readCommandRecord, readLaunchRecord, readLostRecord, readStopRequest, readTerminalRecord, resolveSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, SupervisorFenceBusyError, withStateFence, writeCleanupRecord, writeLaunchRecord, writeLostRecord, writeStopRequest, writeTerminalRecord, } from "./store.domain.mjs";
 import { DEFAULT_CLAIM_GRACE_MS, DEFAULT_CLAIM_WAIT_MS, DEFAULT_MAX_LOG_BYTES, DEFAULT_STOP_WAIT_MS, DEFAULT_WATCH_INTERVAL_MS, DEFAULT_WATCH_TIMEOUT_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_INSPECT_FENCE_WAIT_MS, SUPERVISOR_POLL_MS, SUPERVISOR_RECORD_VERSION, SUPERVISOR_TERMINATION_GRACE_MS, } from "./types.domain.mjs";
@@ -607,8 +607,7 @@ class Supervisor {
             // Unknown identity cannot authorize an external signal. A recorded process
             // that is gone is only "already gone" when its group is gone too; survivors
             // in a group whose leader died cannot be verified, so they are refused.
-            const groupStillAlive = processGroupAlive(pgid);
-            outcome = (verdict === "dead" || verdict === "absent") && !groupStillAlive ? "already-gone" : "refused-unknown-identity";
+            outcome = (verdict === "dead" || verdict === "absent") && processGroupExitVerified(pgid) ? "already-gone" : "refused-unknown-identity";
             groupEmpty = outcome === "already-gone" ? true : false;
         }
         else {
@@ -643,7 +642,7 @@ class Supervisor {
             while (Date.now() < killDeadline && processGroupAlive(pgid)) {
                 await delay(25);
             }
-            groupEmpty = !processGroupAlive(pgid);
+            groupEmpty = processGroupExitVerified(pgid);
             outcome = !groupEmpty ? "unproven" : signalledWhileVerified ? "killed" : "already-gone";
         }
         const reason = outcome === "killed"
