@@ -103,7 +103,7 @@ test("long workflow and read-only handoff views use the same five-row window and
   }));
   const folded = renderRushPlan(workflow, 100, false, undefined, "rush-issues", true);
   assert.equal(folded.filter((line) => /Unit \d/.test(line)).length, 5);
-  assert.match(folded.join("\n"), /Unit 12 +review passed/);
+  assert.match(folded.join("\n"), /◑ +#12 +Unit 12 +│/);
   assert.match(folded.join("\n"), /read-only handoff/);
   assert.match(folded[0]!, /10\/12 complete/);
   const expanded = renderRushPlan(workflow, 100, false, undefined, "rush-issues", true, true);
@@ -173,7 +173,7 @@ test("native and workflow plans share summary, colors and glyphs in the task lis
   for (const [i, row] of workflow.issues.entries()) {
     const nativeRow = a[i + 1]!;
     const boundRow = tasks.find(line => line.includes(`#${row.id}`))!;
-    assert.equal(normalize(boundRow).replace(`#${row.id}`, String(i + 1)), normalize(nativeRow));
+    assert.equal(normalize(boundRow).replace(`#${row.id}`, String(i + 1)), normalize(nativeRow).replace(/ (active|blocked)$/, ""));
     const styledTitle = nativeRow.match(new RegExp(`\\x1b\\[[0-9]+m${row.title}\\x1b\\[0m`))![0];
     assert.ok(boundRow.includes(styledTitle), row.title + " uses its status color");
   }
@@ -211,27 +211,35 @@ test("workflow failures and unknown statuses never look active or completed", ()
   }));
   const rendered = renderRushPlan(workflow, 100).join("\n");
   assert.match(rendered, /0\/4 complete · 1 blocked · 1 failed · 1 skipped · 1 unknown/);
-  assert.match(rendered, /×\s+#0\s+Task 0\s+failed/);
-  assert.match(rendered, /\?\s+#4\s+Task 4\s+awaiting-approval/);
+  assert.match(rendered, /× +#0 +Task 0 +│/);
+  assert.match(rendered, /\? +#4 +Task 4 +│/);
   assert.doesNotMatch(rendered, /active/);
 });
 
-test("a long workflow status leaves the next task visible in the compact list", () => {
+test("workflow columns split the available cells equally and each task uses one row", () => {
   const workflow = rushFixture();
   workflow.issues = [
-    { id: "1", title: "First task", stage: "review", status: "waiting-for-provider-".repeat(100), dependsOn: [] },
-    { id: "2", title: "Next task", stage: "pending", status: "pending", dependsOn: [] },
+    { id: "1", title: "修复布局", stage: "review", status: "waiting-for-provider-".repeat(100), dependsOn: [] },
+    { id: "2", title: "Next task", stage: "done", status: "in-flight", headSha: "abc", reviewedHead: "abc", dependsOn: [] },
   ];
-  const lines = renderRushPlan(workflow, 80);
-  const first = lines.findIndex(line => line.includes("#1 First task"));
-  assert.ok(first >= 0);
-  assert.match(lines[first + 1]!, /waiting-for-provider/);
-  assert.match(lines[first + 2]!, /#2 Next task/);
-
-  Object.assign(workflow.issues[0]!, { status: "in-flight", stage: "done", headSha: "abc", reviewedHead: "abc" });
-  const left = renderRushPlan(workflow, 36).map(line => line.split("│")[0]!.trim());
-  const task = left.findIndex(line => line.includes("#1"));
-  assert.deepEqual(left.slice(task + 1, task + 3), ["review", "passed"]);
+  for (const width of [35, 36, 81, 100, 161, 240]) {
+    for (const expanded of [false, true]) {
+      const lines = renderRushPlan(workflow, width, false, undefined, "rush-issues", false, expanded);
+      const first = lines.findIndex(line => line.includes("#1"));
+      assert.ok(first >= 0);
+      const rows = lines.slice(first, first + 2);
+      assert.deepEqual(rows.map(line => line.split(" │ ")[0]!.trimEnd()), ["? #1 修复布局", "◑ #2 Next task"]);
+      if (width >= 36) {
+        for (const line of rows) {
+          const divider = line.indexOf(" │ ");
+          assert.ok(divider >= 0);
+          const left = visibleWidth(line.slice(0, divider));
+          const right = width - left - 3;
+          assert.ok(Math.abs(left - right) <= 1, `width ${width}: ${left} and ${right} cells`);
+        }
+      }
+    }
+  }
 });
 
 test("workflow completion counts exclude cancellation spellings but retain skipped and other unfinished rows", () => {
@@ -295,9 +303,9 @@ test("issue rows show implemented, review passed and delivered as distinct state
   ];
   const rendered = renderRushPlan(workflow, 100).join("\n");
   assert.equal(renderRushPlan(workflow, 100)[0], "todo  2/5 complete · 1 in progress · 1 implemented · 1 review passed");
-  assert.match(rendered, /●\s+#1\s+Building\s+active/);
-  assert.match(rendered, /◐\s+#2\s+Implemented\s+implemented/);
-  assert.match(rendered, /◑\s+#3\s+Reviewed\s+review passed/);
+  assert.match(rendered, /● +#1 +Building +│/);
+  assert.match(rendered, /◐ +#2 +Implemented +│/);
+  assert.match(rendered, /◑ +#3 +Reviewed +│/);
   assert.match(rendered, /✓\s+#4\s+Merged/);
   assert.match(rendered, /✓\s+#5\s+Pushed/, "a direct push with no PR fields is delivered");
   assert.match(renderRushPlan(workflow, 100, true).join("\n"), /done · in-flight · ci/);
@@ -345,7 +353,7 @@ test("a review can return to fix and re-review before the unit ships", () => {
   const unit = { id: "1", title: "Deliver report", stage: "done", status: "in-flight", headSha: "a", delivery: "ci" };
   const diagram = (fields: Record<string, unknown>) => renderRushPlan(projectRushPlan({
     runId: "loop", planRevision: 1, units: [{ ...unit, ...fields }],
-  }, "loop"), 100).slice(2, 5).join("\n");
+  }, "loop"), 160).slice(2, 5).join("\n");
   const open = [{ status: "open" }];
   assert.match(diagram({ worker: 1, workerKind: "review", fixRound: 1 }), /Review 1 active .*Ship 0\/1\n[^]*Fix as needed/);
   assert.match(diagram({ reviewFindings: open }), /Review 1 open finding .*Ship 0\/1\n[^]*Fix 1 pending/);
@@ -368,7 +376,7 @@ test("blocked validation uses the explicit delivery phase or the legacy fleet re
   const render = (fleet: Record<string, string>, delivery?: string) => renderRushPlan(projectRushPlan({
     runId: "legacy", planRevision: 1, fleet,
     units: [{ id: "1", title: "Deploy", stage: "validate", status: "blocked", delivery }],
-  }, "legacy"), 100)[2]!;
+  }, "legacy"), 160)[2]!;
   assert.match(render({ ci: "blocked", review: "succeeded" }), /Implement 1\/1 .*Review 1\/1 passed .*Ship 0\/1 · 1 blocked/);
   assert.match(render({ review: "blocked" }, "ci"), /Implement 1\/1 .*Review pending .*Ship 0\/1 · 1 blocked/);
   assert.match(render({ review: "blocked" }), /Implement 1\/1 .*Review 1 blocked .*Ship 0\/1$/);
@@ -385,8 +393,8 @@ test("the default diagram connects fixes back to review and counts findings acro
     ],
   }, "graph");
   const [top, middle, bottom] = renderRushPlan(plan, 160).slice(2, 5) as [string, string, string];
-  assert.match(top, /#1 Report +fixing +│ Implement 2\/2 ─→ Review 1 active · 2 open findings .*┬ ─→ Ship 0\/2$/);
-  assert.match(middle, /#2 Dashboard +in review +│/);
+  assert.match(top, /#1 Report +│ Implement 2\/2 ─→ Review 1 active · 2 open findings .*┬ ─→ Ship 0\/2$/);
+  assert.match(middle, /#2 Dashboard +│/);
   assert.match(bottom, /Fix 1 active/);
   assert.equal(top.indexOf("Review"), middle.indexOf("↑"));
   assert.equal(top.indexOf("Review"), bottom.indexOf("└"));
@@ -415,7 +423,7 @@ test("a code-done unit without a HEAD keeps the plain in-progress state", () => 
     runId: "r", planRevision: 1, fleet: {},
     units: [{ id: "1", title: "Older plan", stage: "done", status: "in-flight" }],
   }, "r");
-  assert.match(renderRushPlan(unit, 100).join("\n"), /●\s+#1\s+Older plan\s+active/);
+  assert.match(renderRushPlan(unit, 100).join("\n"), /● +#1 +Older plan +│/);
   assert.equal(renderRushPlan(unit, 100)[0], "todo  0/1 complete · 1 in progress");
 });
 

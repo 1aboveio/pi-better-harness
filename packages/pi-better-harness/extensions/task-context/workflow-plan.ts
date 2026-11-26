@@ -392,7 +392,6 @@ export function renderRushPlan(
         { color: "dim", text: labels[index]! + " " },
         { color: planRowTitleColor(row.status), text: row.title },
       ],
-      badge: { color: style.color, text: row.statusLabel ?? style.label },
     };
   });
   return renderWorkflowFrame(rows, nodes, heading, width, theme, expanded).lines;

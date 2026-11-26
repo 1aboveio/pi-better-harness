@@ -78,7 +78,7 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
     assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>todo<\/warning><dim>  0\/2 complete/);
     assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
-    assert.match(renderWidget(), /#214 Extract shared core +active +│ Implement/);
+    assert.match(renderWidget(), /● +#214 Extract shared core +│ Implement/);
     assert.match(renderWidget(), /Add mux support/);
     const result = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
     assert.equal((result.details as any).workflowOwner, owner);
@@ -229,7 +229,7 @@ test("canceled rows disappear at 30 seconds, redraw automatically, and can be re
     event: "scope-cancelled", changes: [{ id: "U2", set: { status: "cancelled" } }],
   } });
   assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);
-  assert.match(harness.widget(), /Optional work\s+cancelled/);
+  assert.match(harness.widget(), /— +#U2 Optional work +│/);
   t.mock.timers.tick(29_999);
   // Reloading the file must not restart the row's display deadline.
   assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);

@@ -91,8 +91,11 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
   assert.equal(rushHeader, "todo  0/2 complete · ●", "the icon reflects the reviewed issue in CI");
   assert.match(widget, /◑ +#214 +Extract shared core +│ Implement 2\/2/);
-  assert.match(widget, /review passed +│/);
-  assert.match(widget, /Add mux support/);
+  const tasks = widget.split("\n").filter(line => line.includes(" │ "));
+  assert.deepEqual(tasks.map(line => line.split(" │ ")[0].trimEnd()).filter(Boolean), [
+    "◑ #214 Extract shared core", "! #215 Add mux support",
+  ]);
+  assert.equal(tasks[0].indexOf("│"), 49);
   assert.doesNotMatch(widget, /Old generic step/);
   sendLiteral("\x1b[200~/todo hide\x1b[201~");
   sendKey("Enter");
@@ -182,6 +185,7 @@ test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow te
   sendLiteral("/seed-dynamic");
   sendKey("Enter");
   waitForFile(seededPath);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "160", "-y", "35"]);
   const graph = waitForScreen(screen => /✓ Draft report +│ ✓ Draft report ─→ · Review draft/.test(screen));
   assert.match(graph, /○ Revise draft +│ +└─ ○ Revise draft ←─+┘/);
   assert.match(graph, /┬ ─→ · Deliver report/);

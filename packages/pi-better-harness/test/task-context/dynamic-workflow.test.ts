@@ -68,7 +68,7 @@ test("two independent tasks join, then versioned review either ships directly or
 test("independent stages retain their individual edges at a join", () => {
   const steps = report.steps.slice(0, 3).map(s => ({ ...s, stage: undefined }));
   const run = defineWorkflow({ ...report, steps }, []);
-  const graph = renderDynamic(run, 100, { fg: (_, text) => text }, false, {}).join("\n");
+  const graph = renderDynamic(run, 140, { fg: (_, text) => text }, false, {}).join("\n");
   assert.match(graph, /○ Interview buyer/);
   assert.match(graph, /○ Interview seller/);
   assert.match(graph, /Interview buyer \+ Interview seller → · Draft report/);
@@ -86,14 +86,19 @@ test("a task click selects its diagram node in terminal cells without folding th
     const id = frame.stepAt(x, y);
     return id ? () => { selected = id; } : undefined;
   });
-  for (const width of [18, 35, 36, 60, 110]) {
+  for (const width of [18, 35, 36, 61, 110, 161]) {
     const lines = widget.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     const y = lines.findIndex(line => line.includes("整理"));
     assert.ok(y > 0, lines.join("\n"));
     const click = { type: "click", button: "left", x: 2, y, width };
     if (width >= 36) {
-      assert.ok(lines[y]!.includes("│"), "the task list is left of the diagram");
+      const leftWidth = Math.floor((width - 3) / 2);
+      const divider = lines[y]!.indexOf(" │ ");
+      assert.ok(divider >= 0);
+      assert.equal(visibleWidth(lines[y]!.slice(0, divider)), leftWidth);
+      click.x = leftWidth - 1;
+      assert.equal(widget.handleMouse({ ...click, x: leftWidth }), undefined);
       assert.equal(widget.handleMouse({ ...click, x: width - 1 }), undefined);
     }
     assert.deepEqual(widget.handleMouse({ ...click, type: "press" }), { handled: true, render: false });
