@@ -33,7 +33,7 @@ function diagramNodes(run: WorkflowRun, selected?: string): WorkflowNode[] {
   });
 }
 
-export function renderDynamicFrame(run: WorkflowRun, width: number, theme: WorkflowTheme, expanded: boolean, header: CompactTaskHeader, selected?: string): WorkflowFrame {
+export function renderDynamicFrame(run: WorkflowRun, width: number, theme: WorkflowTheme, expanded: boolean, header: CompactTaskHeader, selected?: string, leftShare = 0.5): WorkflowFrame {
   const size = Math.max(1, Math.floor(width));
   const rows = run.steps.map(step => {
     const state = phase(run, step);
@@ -51,7 +51,7 @@ export function renderDynamicFrame(run: WorkflowRun, width: number, theme: Workf
     ...header, subtitle: run.objective, runtime: header.runtime ?? { subject: "workflow", status: run.evidence ? "complete" : "active" },
   });
 
-  const frame = renderWorkflowFrame(rows, diagramNodes(run, selected), heading, size, theme, expanded);
+  const frame = renderWorkflowFrame(rows, diagramNodes(run, selected), heading, size, theme, expanded, leftShare);
   const step = run.steps.find(s => s.id === selected);
   if (step) {
     const entry = run.history.filter(h => h.step === step.id).at(-1);

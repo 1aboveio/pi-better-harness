@@ -31,9 +31,9 @@ import {
 import { renderCompactPlan } from "./plan-render.js";
 import { createPlanWidget } from "./plan-widget.js";
 import { installLegacyPlanMask, type LegacyPlanMask } from "./legacy-plan-mask.js";
-import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
+import { COMPACT_PLAN_ROWS, plainPlanTheme } from "./plan-presentation.js";
 import {
-  readRushPlan, renderRushPlan, workflowBinding,
+  readRushPlan, renderRushFrame, renderRushPlan, workflowBinding,
   WORKFLOW_PLAN_ENTRY, visibleRushUnits, type RushPlan, type WorkflowPlanBinding,
 } from "./workflow-plan.js";
 import { cancelledRowsClearDelay, observeCancelledRows } from "./cancelled-rows.js";
@@ -134,6 +134,7 @@ const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "show", label: "show", description: "Restore automatic Todo display" },
   { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
   { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
+  { value: "split ", label: "split", description: "Set workflow task and diagram widths, e.g. split 3:2 or split 1:1" },
   { value: "pin auto", label: "pin auto", description: "Use automatic Todo pinning" },
   { value: "pin on", label: "pin on", description: "Keep Todo pinned" },
   { value: "pin off", label: "pin off", description: "Keep Todo unpinned" },
@@ -206,6 +207,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
   let expanded = false;
+  let leftShare = 0.5;
   let displayedWorkflowOwner: string | null = null;
   let rushBinding: WorkflowPlanBinding | null = null;
   let rushPlan: RushPlan | null = null;
@@ -482,6 +484,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     expanded = state.expanded;
+    leftShare = state.leftShare;
     refresh(true);
     scheduleCompletedPlanClear();
   };
@@ -506,6 +509,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     refresh(true);
   };
 
+  const saveWorkflowSplit = (share: number): void => {
+    if (share === leftShare) return;
+    pi.appendEntry(EXTENSION_NAME, { version: 1, kind: "workflow-split", leftShare: share, at: Math.floor(Date.now() / 1_000) });
+    leftShare = share;
+    refresh(true);
+  };
+
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     const startControl: GoalPanelStartRequest = { action: "probe" };
@@ -515,13 +525,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
         refreshWidget = localRefresh;
-        let dynamicFrame: WorkflowFrame | undefined;
+        let workflowFrame: WorkflowFrame | undefined;
         let renderedRun: string | undefined;
         let selectedStep: string | undefined;
         let startButton: { y: number; left: number; right: number; task: Outcome } | undefined;
         const widget = createPlanWidget(
-          (width: number, disclosure?: string): string[] => {
-            dynamicFrame = undefined;
+          (width: number, disclosure?: string, previewShare = leftShare): string[] => {
+            workflowFrame = undefined;
             startButton = undefined;
             if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
             const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
@@ -543,17 +553,19 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
                   !workflowBinding(ctx.sessionManager.getBranch())) return heading();
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
-                : undefined;
-              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading();
+                : plainPlanTheme.fg;
+              if (!rushPlan) return heading();
+              workflowFrame = renderRushFrame(rushPlan, width, { fg }, rushBinding.owner, !displayedWorkflowOwner, expanded, header, previewShare);
+              return workflowFrame.lines;
             }
             const run = dynamic.run();
             if (run) {
               if (renderedRun !== run.id) selectedStep = undefined;
               renderedRun = run.id;
-              dynamicFrame = renderDynamicFrame(run, width, theme, expanded, {
+              workflowFrame = renderDynamicFrame(run, width, theme, expanded, {
                 disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
-              }, selectedStep);
-              return dynamicFrame.lines;
+              }, selectedStep, previewShare);
+              return workflowFrame.lines;
             }
             return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading();
           },
@@ -573,15 +585,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
                 pi.events.emit(GOAL_PANEL_START_EVENT, { action: "start", sessionId, objective: button.task.objective } satisfies GoalPanelStartRequest);
               };
             }
-            const step = dynamicFrame?.stepAt(x, y);
+            const step = workflowFrame?.stepAt(x, y);
             if (!step || dynamic.run()?.id !== renderedRun) return undefined;
             return () => { selectedStep = selectedStep === step ? undefined : step; };
           },
+          { resizeAt: (x, y) => workflowFrame?.resizeAt(x, y), save: saveWorkflowSplit },
         );
         return {
           ...widget,
           dispose() {
             startButton = undefined;
+            widget.invalidate();
             if (refreshWidget === localRefresh) refreshWidget = undefined;
           },
         };
@@ -871,13 +885,23 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         setExpanded(input === "expand");
         return;
       }
+      if (/^split(?:\s|$)/.test(input)) {
+        const ratio = /^split\s+(\d+)\s*:\s*(\d+)$/.exec(input);
+        const left = Number(ratio?.[1]), right = Number(ratio?.[2]);
+        if (!Number.isSafeInteger(left + right) || left <= 0 || right <= 0) {
+          ctx.ui.notify("Use /todo split LEFT:RIGHT with positive integers, e.g. /todo split 3:2.", "warning");
+          return;
+        }
+        saveWorkflowSplit(left / (left + right));
+        return;
+      }
       const pinMode = input.match(/^pin\s+(auto|on|off)$/)?.[1] as PlanDisplayMode | undefined;
       if (pinMode) {
         setDisplayMode(pinMode);
         ctx.ui.notify(`Todo display: ${pinMode}.`, "info");
         return;
       }
-      ctx.ui.notify("Usage: /todo [clear|hide|show|expand|collapse|pin auto|pin on|pin off]", "warning");
+      ctx.ui.notify("Usage: /todo [clear|hide|show|expand|collapse|split LEFT:RIGHT|pin auto|pin on|pin off]", "warning");
     },
   });
 

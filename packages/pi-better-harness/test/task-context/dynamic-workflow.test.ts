@@ -115,6 +115,41 @@ test("a task click selects its diagram node in terminal cells without folding th
   }
 });
 
+test("dragging the divider previews the split and saves it once on release", () => {
+  const run = defineWorkflow(report, []);
+  const saved: number[] = [];
+  let frame!: ReturnType<typeof renderDynamicFrame>;
+  const widget = createPlanWidget((width, _, preview) => {
+    frame = renderDynamicFrame(run, width, { fg: (_color, text) => text }, false, {}, undefined, preview ?? saved.at(-1));
+    return frame.lines;
+  }, () => true, () => false, () => assert.fail("divider toggled the list"), undefined, {
+    resizeAt: (x, y) => frame.resizeAt(x, y), save: share => saved.push(share),
+  });
+  const dividerX = (row: string) => visibleWidth(row.slice(0, row.indexOf(" │ "))) + 1;
+  const width = 100;
+  const rows = widget.render(width);
+  const y = rows.findIndex(line => line.includes(" │ "));
+  const x = dividerX(rows[y]!);
+  const mouse = (type: string, at: number) => widget.handleMouse({ type, x: at, y, width, button: "left" });
+  mouse("press", x);
+  mouse("release", x);
+  mouse("click", x);
+  assert.deepEqual(saved, []);
+
+  assert.equal(mouse("press", x)?.capture, true);
+  for (const [at, expected] of [[-50, 13], [200, 86], [38, 38]] as const) {
+    mouse("drag", at);
+    assert.equal(dividerX(widget.render(width)[y]!), expected);
+    assert.deepEqual(saved, []);
+  }
+  mouse("release", 38);
+  assert.deepEqual(saved, [37 / 97]);
+  assert.equal(dividerX(widget.render(width)[y]!), 38);
+  assert.equal(frame.resizeAt(38, 0), undefined);
+  assert.equal(widget.render(35).some(line => line.includes(" │ ")), false);
+  assert.equal(frame.resizeAt(12, y), undefined);
+});
+
 async function harness(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "dynamic-workflow-"));
   const saved = process.env.PI_CODING_AGENT_DIR;

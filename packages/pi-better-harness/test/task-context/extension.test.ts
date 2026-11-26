@@ -39,6 +39,7 @@ test("Todo action completions expose valid commands with context", () => {
     { value: "show", label: "show", description: "Restore automatic Todo display" },
     { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
     { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
+    { value: "split ", label: "split", description: "Set workflow task and diagram widths, e.g. split 3:2 or split 1:1" },
     { value: "pin auto", label: "pin auto", description: "Use automatic Todo pinning" },
     { value: "pin on", label: "pin on", description: "Keep Todo pinned" },
     { value: "pin off", label: "pin off", description: "Keep Todo unpinned" },

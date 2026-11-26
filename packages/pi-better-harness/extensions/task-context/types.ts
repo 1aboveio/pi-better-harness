@@ -40,4 +40,5 @@ export type PlanEntry =
   | { version: 1; kind: "set"; plan: PlanSnapshot; at: number }
   | { version: 1; kind: "clear"; at: number }
   | { version: 1; kind: "display"; mode: PlanDisplayMode; at: number }
+  | { version: 1; kind: "workflow-split"; leftShare: number; at: number }
   | { version: 1; kind: "expansion"; expanded: boolean; at: number };

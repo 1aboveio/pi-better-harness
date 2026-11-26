@@ -13,17 +13,20 @@ interface WorkflowTask {
 export interface WorkflowFrame {
   lines: string[];
   stepAt(x: number, y: number): string | undefined;
+  resizeAt(x: number, y: number): ((nextX: number) => number) | undefined;
 }
 
 export function renderWorkflowFrame(
   tasks: WorkflowTask[], nodes: WorkflowNode[], heading: string[],
-  width: number, theme: WorkflowTheme, expanded: boolean,
+  width: number, theme: WorkflowTheme, expanded: boolean, leftShare = 0.5,
 ): WorkflowFrame {
   const size = Math.max(1, Math.floor(width));
   const split = size >= 36 && nodes.length > 0;
   const gutter = " │ ";
   const available = size - visibleWidth(gutter);
-  const listWidth = split ? Math.floor(available / 2) : size;
+  const fitColumn = (cells: number) => Math.max(12, Math.min(available - 12, cells));
+  // Round to the nearest terminal cell, giving a tied cell to the diagram.
+  const listWidth = split ? fitColumn(Math.ceil(available * leftShare - 0.5)) : size;
   const graphWidth = split ? available - listWidth : size;
   const styled = (part: DiagramPart) => {
     const value = theme.fg(part.color, planText(part.text));
@@ -55,8 +58,13 @@ export function renderWorkflowFrame(
   } else {
     lines.push(...list.map(row => row.line), ...graph);
   }
+  const bodyEnd = lines.length;
   return {
     lines: lines.map(line => truncateToWidth(line, size)),
+    resizeAt(x, y) {
+      if (!split || y < heading.length || y >= bodyEnd || Math.abs(x - (listWidth + 1)) > 1) return;
+      return nextX => fitColumn(listWidth + nextX - x) / available;
+    },
     stepAt: (x, y) => x >= 0 && x < listWidth ? list[y - heading.length]?.id : undefined,
   };
 }
