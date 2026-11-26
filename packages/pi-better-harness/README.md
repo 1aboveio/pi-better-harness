@@ -45,8 +45,10 @@ work. Any of `doneWhen`, `boundaries` and `todo` may be omitted. Set
 clients using the legacy `outcome` field remain supported.
 
 Todo uses the same workflow view for a bound task plan and a dynamic workflow.
-It shows tasks on the left and the workflow diagram on the right. Below 36 terminal
-columns, the diagram follows the task list.
+The task list and diagram start at equal widths. Drag their divider in fullscreen Pi
+or enter `/todo split 3:2` to give the task list three fifths of the available width.
+The session remembers the ratio across reloads. Use `/todo split 1:1` to restore equal columns.
+Below 36 terminal columns, the diagram follows the task list.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks continue to govern workflow-owned plans. See the [usage guide](docs/usage.md#goal--todo).

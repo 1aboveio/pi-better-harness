@@ -8,11 +8,11 @@
  */
 import { expireWaits, overdueOperations } from "./expiry.ts";
 import { setUpgradeFence } from "./upgrade.ts";
-import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks, type ParentCallbackScope, type ParentCallbackPage, type RecentBackgroundTerminalPage } from './background-parent-callbacks.ts';
+import { parentRecoveryRevision, setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks, type ParentCallbackScope, type ParentCallbackPage, type RecentBackgroundTerminalPage } from './background-parent-callbacks.ts';
 import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
 import { SubagentLaunchJournal } from "./subagent-launch.ts";
-import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
+import { serverAssignmentCleanup, serverAssignmentCleanupRevision, resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
@@ -130,6 +130,8 @@ export interface Store {
     overdueOperations(): OperationRecord[];
     expireWaits(): number;
     hasSubagentManagement(): boolean;
+    serverAssignmentCleanupRevision(): number;
+    serverAssignmentCleanup(limit: number, after?: Parameters<typeof serverAssignmentCleanup>[2]): ReturnType<typeof serverAssignmentCleanup>;
     resultSupervisionChanges(after?: Parameters<typeof resultSupervisionChanges>[1]): ReturnType<typeof resultSupervisionChanges>;
     subagentLaunchJournal(): SubagentLaunchJournal;
     resultScopeManaged(scope: string): boolean;
@@ -168,6 +170,7 @@ export interface Store {
     // ---- operations ----
 
     backgroundRequests(): BackgroundRequests;
+    parentRecoveryRevision(scope: ParentCallbackScope): number;
     setParentCallbackPending(taskId: string, pending: boolean): boolean;
     listPendingParentCallbacks(scope: ParentCallbackScope, options?: ParentCallbackPage): OperationRecord[];
     listRecentBackgroundTerminals(options: RecentBackgroundTerminalPage): OperationRecord[];
@@ -368,6 +371,8 @@ export function openStore(options: StoreOptions): Store {
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
         hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        serverAssignmentCleanupRevision() { alive(); return serverAssignmentCleanupRevision(ctx); },
+        serverAssignmentCleanup(limit, after) { alive(); return serverAssignmentCleanup(ctx, limit, after); },
         resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
@@ -396,6 +401,7 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        parentRecoveryRevision(scope) { alive(); return parentRecoveryRevision(ctx, scope); },
         setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
         listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
         listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
@@ -434,7 +440,7 @@ export function openStore(options: StoreOptions): Store {
             alive();
             if (!Number.isSafeInteger(terminalRevision) || terminalRevision < 1) return false;
             return run(ctx, `INSERT OR IGNORE INTO coordinator_state (key, value)
-                SELECT 'assignment-cleanup-verified:' || op.operation_id, op.launch_token
+                SELECT 'assignment-cleanup-verified:' || op.operation_id, 'v2:' || op.launch_token
                 FROM operations op JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
                 JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
                 WHERE op.operation_id = ? AND op.launch_token = ? AND op.terminal_revision = ?`,

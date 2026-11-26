@@ -112,6 +112,43 @@ test("one Background task input changes only its projection and dependent wait q
   } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("ending an assignment removes the ready wait from only its cached terminal dependency", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-assignment-disarm-"));
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const observation = new BackgroundObservation(root, join(root, "supervisor"));
+  const recipient = { kind: "parent-session", workspace: root, sessionId: "parent" };
+  const owner = { kind: "worker-conversation", workspace: root, sessionId: "worker" };
+  const scope = { background: true, cwd: root, sessionId: recipient.sessionId };
+  try {
+    store.registerAssignment({ assignmentId: "assignment", owner, recipient });
+    const taskId = "bgs_00000000000000000000";
+    for (let i = 0; i <= 16; i++) {
+      const id = `bgs_${i.toString(16).padStart(20, "0")}`;
+      const taskOwner = i === 0 ? owner : { ...recipient, sessionId: `unrelated-${i}` };
+      store.registerOperation({ operationId: id, taskId: id, launchToken: id, owner: taskOwner,
+        observer: { kind: "local-supervisor", version: "1" } });
+      store.recordTerminalOutcome({ operationId: id, eventId: id, owner: taskOwner, outcome: "succeeded",
+        evidence: [{ kind: "terminal-record", ref: id }] });
+      if (i) observation.read({ ...scope, sessionId: taskOwner.sessionId });
+    }
+    const { wait } = store.registerWait({ waitId: "interpret", owner, origin: { assignmentRef: "assignment" },
+      dependencies: [{ operationId: taskId }], continuationNote: "Interpret the result" });
+    assert.deepEqual(observation.read(scope).find(row => row.id === taskId)?.waits,
+      [{ waitId: wait.waitId, generation: wait.generation, phase: "ready" }]);
+    observation.refresh();
+    const before = structuredClone(observation.metrics), revision = store.getChangeRevision();
+    store.recordAssignmentOutcome({ assignmentId: "assignment", owner, recipient, outcome: "cancelled",
+      revision: 1, reason: "Stopped", processUncertain: false, evidence: [], waits: [wait] });
+    observation.refresh();
+    assert.equal(observation.metrics.sourceWork.active.stats - before.sourceWork.active.stats, 8,
+      "the changed worker's eight files are checked once across all subscribed parents");
+    assert.equal(store.getWait(wait).phase, "held");
+    assert.deepEqual(observation.read(scope).find(row => row.id === taskId)?.waits, []);
+    assert.equal(observation.metrics.dependencyQueries - before.dependencyQueries, 1);
+    assert.equal(store.getChangeRevision(), revision, "disarming the wait must not wake unrelated callback recovery");
+  } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("unchanged Background repair positions do not write the shared derived handle", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-idle-writes-"));
   const store = openStore({ path: join(root, "operation-coordinator.sqlite") });

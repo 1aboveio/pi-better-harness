@@ -91,9 +91,31 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
   assert.equal(rushHeader, "todo  0/2 complete · ●", "the icon reflects the reviewed issue in CI");
   assert.match(widget, /◑ +#214 +Extract shared core +│ Implement 2\/2/);
-  assert.match(widget, /review passed +│/);
-  assert.match(widget, /Add mux support/);
+  const tasks = widget.split("\n").filter(line => line.includes(" │ "));
+  assert.deepEqual(tasks.map(line => line.split(" │ ")[0].trimEnd()).filter(Boolean), [
+    "◑ #214 Extract shared core", "! #215 Add mux support",
+  ]);
+  assert.equal(tasks[0].indexOf("│"), 49);
   assert.doesNotMatch(widget, /Old generic step/);
+  const dividerAt = (screen, column) => screen.split("\n").some(line => line.includes("#214") && line.indexOf("│") === column);
+  sendLiteral("\x1b[200~/todo split 3:2\x1b[201~");
+  sendKey("Enter");
+  let adjusted = waitForScreen(screen => dividerAt(screen, 59));
+  if (process.env.PI_TODO_TUI_MOUSE === "1" || process.env.PI_PLAN_TUI_MOUSE === "1") {
+    const y = adjusted.split("\n").findIndex(line => line.includes("#214") && line.includes(" │ ")) + 1;
+    sendLiteral(`\x1b[<0;60;${y}M\x1b[<32;40;${y}M`);
+    waitForScreen(screen => dividerAt(screen, 39)); // while the button is still held
+    sendLiteral("\x1b[<0;40;1m"); // release above the widget after the pointer leaves it
+    rmSync(readyPath, { force: true });
+    sendLiteral("/reload");
+    sendKey("Enter");
+    waitForFile(readyPath);
+    adjusted = waitForScreen(screen => dividerAt(screen, 39));
+    assert.match(adjusted, /#215 Add mux support/);
+  }
+  sendLiteral("\x1b[200~/todo split 1:1\x1b[201~");
+  sendKey("Enter");
+  waitForScreen(screen => dividerAt(screen, 49));
   sendLiteral("\x1b[200~/todo hide\x1b[201~");
   sendKey("Enter");
   waitForScreen((screen) => !/^todo(?:\s|$)/m.test(screen));
@@ -182,6 +204,7 @@ test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow te
   sendLiteral("/seed-dynamic");
   sendKey("Enter");
   waitForFile(seededPath);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "160", "-y", "35"]);
   const graph = waitForScreen(screen => /✓ Draft report +│ ✓ Draft report ─→ · Review draft/.test(screen));
   assert.match(graph, /○ Revise draft +│ +└─ ○ Revise draft ←─+┘/);
   assert.match(graph, /┬ ─→ · Deliver report/);
@@ -191,6 +214,10 @@ test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow te
   assert.match(narrow, /^✓ Draft[^│\n]*│ ✓ Draft report/m);
   execFileSync("tmux", ["resize-window", "-t", session, "-x", "30", "-y", "35"]);
   waitForScreen(screen => screen.includes("↺ Review draft") && /^✓ Draft report *$/m.test(screen) && !screen.includes("│ ✓ Draft report"));
+  sendLiteral("\x1b[200~/todo split 2:1\x1b[201~");
+  sendKey("Enter");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "120", "-y", "35"]);
+  waitForScreen(screen => screen.split("\n").some(line => line.startsWith("✓ Draft report") && line.indexOf("│") === 79));
 });
 
 function startPiSession() {

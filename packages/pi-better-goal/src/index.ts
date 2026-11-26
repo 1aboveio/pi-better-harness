@@ -1296,7 +1296,13 @@ export default function (pi: ExtensionAPI): void {
       if (latest?.goalId !== current.goalId || latest.status !== current.status) {
         return { content: [{ type: "text", text: "Goal changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
       }
-      const audit = requestTaskContext(pi, "audit", current);
+      if (gated) {
+        const owner = getWorkflow(ctx);
+        if (owner?.name !== gated.name || owner.path !== gated.path) {
+          return { content: [{ type: "text", text: "Workflow changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
+        }
+      }
+      const audit = requestTaskContext(pi, { action: "audit", workflowOwnsPlan: !!gated }, current);
       const criteria = audit.doneWhen?.length ? audit.doneWhen : audit.objective ? [audit.objective] : [];
       const evidence = [...input.evidence ?? [], ...audit.evidence ?? []];
       const missing = criteria.filter(criterion => !evidence.some(item => item.criterion === criterion && item.result.trim()));
@@ -1311,7 +1317,7 @@ export default function (pi: ExtensionAPI): void {
       }
       const goal = goalWithStatus(latest, "complete");
       setGoal(goal, ctx, "tool");
-      if (getWorkflow(ctx)) recordWorkflow(null);
+      if (gated) recordWorkflow(null);
       const warning = verdict?.allow ? verdict.warning : undefined;
       return {
         content: [{ type: "text", text: warning ? `Goal marked complete. ${warning}` : "Goal marked complete." }],

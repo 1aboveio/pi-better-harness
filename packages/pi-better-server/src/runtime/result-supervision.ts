@@ -8,7 +8,7 @@ import { createLocalSupervisor } from "./domain/background/supervisor/supervisor
 // @ts-expect-error Generated canonical durable stop records.
 import { readStopRequest } from "./domain/background/supervisor/store.mjs";
 // @ts-expect-error Generated canonical process identity checks.
-import { processGroupExitVerified } from "./domain/background/supervisor/identity.mjs";
+import { processGroupExitVerified, verifyProcessIdentity } from "./domain/background/supervisor/identity.mjs";
 // @ts-expect-error Generated canonical terminal evidence rules.
 import { supervisorTerminalPublication } from "./domain/background/terminal-publication.mjs";
 
@@ -41,7 +41,8 @@ export class RuntimeResultSupervision {
   private assignmentCleanup?: Promise<void>;
   private closing?: Promise<void>;
   get busy() { return this.assignmentCleanup !== undefined; }
-  private assignmentCleanupCursor?: string;
+  private assignmentCleanupCursor?: { hostId: string; operationId: string };
+  private idleCleanupCursor?: { hostId: string; operationId: string; revision: number };
   private assignmentCleanupReason?: string;
   get reason() { return this.assignmentCleanupReason ?? this.observationReason; }
   private verificationMs: number;
@@ -196,13 +197,34 @@ export class RuntimeResultSupervision {
   private reconcileAssignmentCleanup() {
     if (this.assignmentCleanup) return;
     const cursor = this.assignmentCleanupCursor;
-    const [operation] = this.store.listAssignmentCleanupOperations(1, cursor);
-    this.assignmentCleanupCursor = operation?.operationId;
-    if (!operation) {
-      if (cursor === undefined) this.assignmentCleanupReason = undefined;
-      return;
-    }
-    const grant = this.store.resultSupervision(operation.operationId);
+    const [candidate] = this.store.serverAssignmentCleanup(1, cursor);
+    this.assignmentCleanupCursor = candidate && { hostId: candidate.operation.supervision.hostId, operationId: candidate.operation.operationId };
+    if (candidate) this.advanceAssignmentCleanup(candidate);
+    else if (!cursor) this.assignmentCleanupReason = undefined;
+  }
+
+  /** At idle, inspect the durable queue even when the last stop promise has settled. */
+  hasCleanupAtIdle(revision: number): boolean {
+    if (this.assignmentCleanup) return true;
+    const release = this.budget.enter("control");
+    if (!release) return true;
+    try {
+      const after = this.idleCleanupCursor?.revision === revision ? this.idleCleanupCursor : undefined;
+      const page = this.store.serverAssignmentCleanup(ENTITY_BUDGET, after);
+      this.idleCleanupCursor = undefined;
+      for (const candidate of page) {
+        try { this.advanceAssignmentCleanup(candidate); }
+        catch (error) { this.assignmentCleanupReason = `Assignment cleanup for ${candidate.operation.taskId}: ${String(error)}`; }
+        if (this.assignmentCleanup) return true;
+      }
+      if (page.length < ENTITY_BUDGET) return false;
+      const last = page.at(-1).operation;
+      this.idleCleanupCursor = { hostId: last.supervision.hostId, operationId: last.operationId, revision };
+      return true;
+    } finally { release(); }
+  }
+
+  private advanceAssignmentCleanup({ operation, grant }: { operation: any; grant: any }) {
     if (!grant || (operation.terminalRevision === 0 && grant.epoch !== this.epoch) || grant.launchToken !== operation.launchToken || grant.hostId !== operation.supervision?.hostId ||
         grant.capability?.adapter !== "background-results-v1" || !grant.capability.captured || !grant.capability.current) {
       this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: exact supervision authority unavailable`;
@@ -224,7 +246,8 @@ export class RuntimeResultSupervision {
         return;
       }
       this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: process group exit unverified`;
-      if (!pgid) return;
+      // A group with an unprovable leader stays on the durable queue for recovery.
+      if (!pgid || verifyProcessIdentity(inspection.command.pid, inspection.command.pidStartTime) !== "verified") return;
     }
     this.assignmentCleanup = supervisor.stop(operation.taskId, { token: operation.launchToken, reason: "owning assignment ended" })
       .catch((error: unknown) => { this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: ${String(error)}`; })

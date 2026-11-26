@@ -306,7 +306,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (!observe)
                         throw new Error('Shared Background observation unavailable');
                     // Recovery is indexed and bounded independently of display readiness.
-                    const recoveryVersion = authority.backgroundDigest([lease.store.getChangeRevision(), record.branchIds]);
+                    const recoveryVersion = authority.backgroundDigest([lease.store.parentRecoveryRevision(record.owner), record.branchIds]);
                     if (recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
                         metrics.reconciles++;
                         service.noteParentContext(ctx);

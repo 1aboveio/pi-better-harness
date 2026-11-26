@@ -239,9 +239,13 @@ test("a rewritten saved conversation cannot certify a park", () => {
     assert.equal(registry.readMeta(fixture.id).park.phase, "held");
 });
 
-test("cleanup protects a parked conversation and its owned workspace", () => {
+test("cleanup protects a parked conversation and its workspace with a stale metadata mirror", () => {
     const fixture = parkedRunFixture("sa_park_4");
     finalizeRun(fixture.id, 0);
+    const completed = registry.readMeta(fixture.id);
+    registry.writeMeta({ ...completed, park: { ...completed.park, phase: "consumed" } });
+    // A new generation was published before its metadata mirror could be updated.
+    writeFileSync(registry.parkRecordPath(fixture.id), JSON.stringify({ ...completed.park, generation: 2 }));
 
     // A finished run that is NOT parked is an ordinary removal candidate.
     const ordinary = "sa_park_5";
@@ -271,7 +275,7 @@ test("cleanup protects a parked conversation and its owned workspace", () => {
     assert.equal(result.errors.length === 0 || result.errors.every((line) => !line.includes("park")), true, JSON.stringify(result.errors));
 
     // The parked run and its saved conversation survive; the ordinary one need not.
-    assert.ok(registry.readMeta(fixture.id), "a parked attempt keeps its record");
+    assert.ok(existsSync(registry.parkRecordPath(fixture.id)), "cleanup preserves the live park sidecar");
     assert.equal(existsSync(fixture.sessionFile), true, "the saved conversation a resume must reopen survives");
     assert.equal(parkedWaits().filter((entry) => entry.runId === fixture.id).length, 1);
 });

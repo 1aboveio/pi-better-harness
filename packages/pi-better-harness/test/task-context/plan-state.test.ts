@@ -189,13 +189,13 @@ test("reconstructs plan and display preference from the active branch", () => {
   assert.deepEqual(reconstructPlanState([
     entry(planSetEntry(plan, 100)),
     entry(planDisplayEntry("on", 101)),
-  ]), { plan, displayMode: "on", expanded: false });
+  ]), { plan, displayMode: "on", expanded: false, leftShare: 0.5 });
 
   assert.deepEqual(reconstructPlanState([
     entry(planSetEntry(plan, 100)),
     entry(planDisplayEntry("hidden", 101)),
     entry(planClearEntry(102)),
-  ]), { plan: null, displayMode: "hidden", expanded: false });
+  ]), { plan: null, displayMode: "hidden", expanded: false, leftShare: 0.5 });
 });
 
 test("expansion preferences restore from the active branch independently of plan updates", () => {
@@ -206,4 +206,13 @@ test("expansion preferences restore from the active branch independently of plan
   assert.equal(reconstructPlanState([...base, entry({ version: 1, kind: "expansion", expanded: false, at: 101 })]).expanded, false);
   assert.equal(reconstructPlanState([...base, entry({ version: 1, kind: "expansion", expanded: "invalid", at: 101 })]).expanded, true);
   assert.deepEqual(reconstructPlanState(base).plan, plan);
+});
+test("invalid saved splits do not overwrite the branch's last usable ratio", () => {
+  const split = (leftShare: unknown) => ({
+    type: "custom", customType: EXTENSION_NAME, data: { version: 1, kind: "workflow-split", leftShare },
+  });
+  assert.equal(reconstructPlanState([]).leftShare, 0.5);
+  for (const invalid of [0, 1, NaN, Infinity, "0.4"]) {
+    assert.equal(reconstructPlanState([split(0.4), split(invalid)]).leftShare, 0.4);
+  }
 });

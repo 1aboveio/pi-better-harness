@@ -495,14 +495,14 @@ export function writeParkRecord(id: string, record: ParkRecord, options: { ifAbs
 }
 
 /** Read the attempt's park disposition; absent for an ordinary run. */
-export function readParkRecord(id: string): ParkRecord | undefined {
+export function readParkRecord(id: string, listedMeta?: RunMeta): ParkRecord | undefined {
     try {
         return parseParkRecord(JSON.parse(readFileSync(parkRecordPath(id), "utf-8")));
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
         // The volatile run directory may already be reclaimed; the durable
         // completed-attempt record carries the park snapshot taken at finalization.
-        return readMeta(id)?.park;
+        return (listedMeta ?? readMeta(id))?.park;
     }
 }
 
@@ -527,20 +527,29 @@ export function isPendingPark(record: Pick<ParkRecord, "phase">): boolean {
  * Runs whose park disposition can still resume. Used by cleanup protection and
  * by resume reconciliation; a consumed or cancelled park is not included.
  */
-export function listPendingParkedRuns(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
-    return listParkRecordCandidates(metas).filter((meta) => {
-        const record = meta.park ?? readParkRecord(meta.id);
-        return record !== undefined && isPendingPark(record);
-    });
+export function listPendingParkedRuns(metas: readonly RunMeta[] = listMetas()) {
+    return listParkRecordCandidates(metas, isPendingPark);
 }
 
-/** Include a park file that was published just before its metadata mirror was lost. */
-export function listParkRecordCandidates(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
-    let volatileIds: Set<string>;
-    try { volatileIds = new Set(readdirSync(join(baseDir(), "runs"))); }
-    catch { volatileIds = new Set(); }
-    return metas.filter((meta) => meta.park !== undefined
-        || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
+/** Read live sidecars before consulting the listed disposition of a reclaimed run. */
+export function listParkRecordCandidates(
+    metas: readonly RunMeta[] = listMetas(),
+    include?: (record: ParkRecord) => boolean,
+): Array<RunMeta & { park: ParkRecord }> {
+    const runs = join(baseDir(), "runs");
+    let volatileIds: Set<string> | undefined;
+    try { volatileIds = new Set(readdirSync(runs)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") volatileIds = new Set(); }
+    const parked: Array<RunMeta & { park: ParkRecord }> = [];
+    for (const meta of metas) {
+        let record = meta.park;
+        if (!volatileIds || volatileIds.has(meta.id)) {
+            if (!record && !existsSync(join(runs, meta.id, "park.json"))) continue;
+            record = readParkRecord(meta.id, meta);
+        }
+        if (record && (!include || include(record))) parked.push({ ...meta, park: record });
+    }
+    return parked;
 }
 
 /** Read recovery sidecars in batches so a large registry does not block socket replies. */
@@ -554,17 +563,15 @@ export async function* scanParkRecords(
     const batchSize = 32;
     for (let offset = 0; offset < metas.length; offset += batchSize) {
         const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
-            if (meta.park && include && !include(meta.park)) return;
-            if (volatileIds && !volatileIds.has(meta.id)) return meta.park ? { meta, record: meta.park } : undefined;
-            if (!volatileIds && !meta.park) return;
-            try {
-                const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
-                if (record && (!include || include(record))) return { meta, record };
-            } catch (error) {
-                if ((error as NodeJS.ErrnoException).code === "ENOENT" && meta.park) {
-                    return { meta, record: meta.park };
+            let record = meta.park;
+            if (!volatileIds || volatileIds.has(meta.id)) {
+                try {
+                    record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
                 }
             }
+            if (record && (!include || include(record))) return { meta, record };
         }));
         for (const entry of batch) if (entry) yield entry;
     }

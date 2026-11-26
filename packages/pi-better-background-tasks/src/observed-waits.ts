@@ -882,6 +882,9 @@ export function supervisorTerminalPublication(operation: OperationRecord, inspec
   };
 }
 
+type CallbackPageCursor = { revision: number; after?: string };
+type CallbackRecoveryState = { revision: number; branch: string; delivery?: CallbackPageCursor; claims?: CallbackPageCursor };
+
 export class ObservedWaitHost {
   readonly service: BackgroundOperationService;
   private store?: Store;
@@ -985,8 +988,8 @@ export class ObservedWaitHost {
   private authorityPassCache?: Map<string, "live" | "dead" | "unknown">;
   /** Running operations this follower is currently assigned to supervise. */
   private readonly followerRunningTasks = new Set<string>();
-  private readonly unscopedCallbackRecovery = { revision: -1, branch: "", delivery: undefined as string | undefined, claims: undefined as string | undefined };
-  private readonly callbackRecoveryScopes = new Map<string, { revision: number; delivery?: string; claims?: string; branch: string }>();
+  private readonly unscopedCallbackRecovery: CallbackRecoveryState = { revision: -1, branch: "" };
+  private readonly callbackRecoveryScopes = new Map<string, CallbackRecoveryState>();
   private recoveryScopeState() {
     if (!this.activeOrigin) return this.unscopedCallbackRecovery;
     // Concurrent foregrounds can retain different branch snapshots of one session.
@@ -1001,9 +1004,9 @@ export class ObservedWaitHost {
   private get lastChangeRevision() { return this.recoveryScopeState().revision; }
   private set lastChangeRevision(value: number) { this.recoveryScopeState().revision = value; }
   private get pendingCallbackCursor() { return this.recoveryScopeState().delivery; }
-  private set pendingCallbackCursor(value: string | undefined) { this.recoveryScopeState().delivery = value; }
+  private set pendingCallbackCursor(value: CallbackPageCursor | undefined) { this.recoveryScopeState().delivery = value; }
   private get pendingClaimCursor() { return this.recoveryScopeState().claims; }
-  private set pendingClaimCursor(value: string | undefined) { this.recoveryScopeState().claims = value; }
+  private set pendingClaimCursor(value: CallbackPageCursor | undefined) { this.recoveryScopeState().claims = value; }
   private get activeBranchSignature() { return this.recoveryScopeState().branch; }
   private set activeBranchSignature(value: string) { this.recoveryScopeState().branch = value; }
   private lastOwnedTerminalAt = 0;
@@ -1172,13 +1175,20 @@ export class ObservedWaitHost {
     }
   }
 
-  private activeParentTerminalOperations(claims = false): OperationRecord[] {
+  private activeParentTerminalOperations(claims = false, knownRevision?: number): OperationRecord[] {
     const origin = this.activeOrigin;
     if (!this.store || !origin?.sessionId) return [];
-    const page = this.store.listPendingParentCallbacks({ sessionId: origin.sessionId, workspace: origin.cwd },
-      { after: claims ? this.pendingClaimCursor : this.pendingCallbackCursor, limit: 256 });
-    const next = page.length === 256 ? page.at(-1)!.operationId : undefined;
-    if (claims) this.pendingClaimCursor = next; else this.pendingCallbackCursor = next;
+    const scope = { sessionId: origin.sessionId, workspace: origin.cwd };
+    const revision = knownRevision ?? this.store.parentRecoveryRevision(scope);
+    const state = this.recoveryScopeState();
+    const key = claims ? "claims" : "delivery";
+    const cursor = state[key];
+    const startRevision = cursor?.after ? cursor.revision : revision;
+    const page = this.store.listPendingParentCallbacks(scope, { after: cursor?.after, limit: 256 });
+    if (page.length === 256) state[key] = { after: page.at(-1)!.operationId, revision: startRevision };
+    // Finish the current sweep before revisiting callbacks inserted behind its cursor.
+    else if (revision !== startRevision) state[key] = { revision };
+    else delete state[key];
     return page;
   }
 
@@ -1404,7 +1414,7 @@ export class ObservedWaitHost {
 
   /**
    * A follower does not scan foreign operations. It refreshes the exact active
-   * owner's terminal records only when the shared change revision advances, so
+   * owner's terminal records only when that parent's recovery revision advances, so
    * callback recovery stays correct without multiplying the running-set scan.
    */
   private reconcileOwnerChanges(): void {
@@ -1415,18 +1425,19 @@ export class ObservedWaitHost {
     if (!sessionId) return;
     let revision: number;
     try {
-      revision = store.getChangeRevision();
+      revision = store.parentRecoveryRevision({ workspace: ctx.cwd, sessionId });
     } catch {
       return;
     }
     if (revision === this.lastChangeRevision && !this.pendingCallbackCursor) return;
-    this.lastChangeRevision = revision;
     let operations: OperationRecord[];
     try {
-      operations = this.activeParentTerminalOperations();
+      operations = this.activeParentTerminalOperations(false, revision);
     } catch {
+      this.lastChangeRevision = -1;
       return;
     }
+    this.lastChangeRevision = revision;
     let newest = this.lastOwnedTerminalAt;
     let visibleOwner: OwnerIdentity | undefined;
     for (const operation of operations) {

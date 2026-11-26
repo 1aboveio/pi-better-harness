@@ -5,7 +5,7 @@ import type { CompactTaskHeader } from "./compact-task-header.js";
 import { workflowDiagram, type DiagramPart, type WorkflowNode } from "./workflow-diagram.js";
 import {
   alignedPlanLabels, plainPlanTheme, planRowTitleColor, planText, renderPlanHeading, renderPlanPresentation, statusStyle,
-  type DisplayStatus, type PlanPresentation,
+  type DisplayStatus, type PlanRenderTheme, type PlanPresentation,
 } from "./plan-presentation.js";
 
 export const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
@@ -375,12 +375,19 @@ export function renderRushPlan(
   header?: CompactTaskHeader,
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  const presentation = presentRushPlan(plan, owner, readOnly);
-  const nodes = issueWorkflowNodes(plan);
   if (full) {
-    const graph = workflowDiagram(nodes, Math.max(1, width - 2));
+    const presentation = presentRushPlan(plan, owner, readOnly);
+    const graph = workflowDiagram(issueWorkflowNodes(plan), Math.max(1, width - 2));
     return renderPlanPresentation({ ...presentation, metadata: [...(presentation.metadata ?? []), ...graph] }, width, theme, true);
   }
+  return renderRushFrame(plan, width, theme, owner, readOnly, expanded, header).lines;
+}
+
+export function renderRushFrame(
+  plan: RushPlan, width: number, theme: PlanRenderTheme, owner: string, readOnly: boolean,
+  expanded: boolean, header?: CompactTaskHeader, leftShare = 0.5,
+) {
+  const presentation = presentRushPlan(plan, owner, readOnly);
   const heading = renderPlanHeading(presentation, width, theme, header);
   const labels = alignedPlanLabels(presentation.rows);
   const rows = presentation.rows.map((row, index) => {
@@ -392,8 +399,7 @@ export function renderRushPlan(
         { color: "dim", text: labels[index]! + " " },
         { color: planRowTitleColor(row.status), text: row.title },
       ],
-      badge: { color: style.color, text: row.statusLabel ?? style.label },
     };
   });
-  return renderWorkflowFrame(rows, nodes, heading, width, theme, expanded).lines;
+  return renderWorkflowFrame(rows, issueWorkflowNodes(plan), heading, width, theme, expanded, leftShare);
 }

@@ -461,6 +461,7 @@ describe("store guards", () => {
 
         const raw = new DatabaseSync(harness.path);
         removeAssignmentOperationBinding(raw);
+        raw.exec("DROP TRIGGER background_recovery_operation_changed");
         raw.exec("DROP INDEX operations_running_supervisor");
         raw.exec("ALTER TABLE operations DROP COLUMN supervision_host_id");
         raw.exec("DROP TABLE discovery_claims");

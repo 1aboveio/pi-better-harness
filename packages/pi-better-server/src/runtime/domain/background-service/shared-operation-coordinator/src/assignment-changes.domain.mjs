@@ -34,6 +34,40 @@ export function ensureAssignmentChanges(ctx) {
                 const records = action === "UPDATE" ? ["OLD", "NEW"] : [action === "DELETE" ? "OLD" : "NEW"];
                 ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS assignment_change_${table}_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN ${records.map(r => `INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace) ${select(r)};`).join(" ")} END;`);
             }
+        // An idle scan may span several pages. Insertions and authority transfers can
+        // put a new candidate behind its cursor; deleting completed work cannot.
+        const advanceCleanup = `INSERT INTO coordinator_state VALUES ('server-assignment-cleanup-revision', '1')
+            ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;`;
+        ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS server_cleanup_added AFTER INSERT ON assignment_cleanup_pending
+            WHEN NEW.supervision_host_id GLOB 'server:*' BEGIN ${advanceCleanup} END;
+            CREATE TRIGGER IF NOT EXISTS server_cleanup_transferred AFTER UPDATE OF supervision_host_id ON assignment_cleanup_pending
+            WHEN NEW.supervision_host_id GLOB 'server:*' AND NEW.supervision_host_id IS NOT OLD.supervision_host_id
+            BEGIN ${advanceCleanup} END;`);
+        // The result grant can arrive after the assignment already ended.
+        for (const event of ["INSERT", "UPDATE"])
+            ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS server_cleanup_grant_${event}
+            AFTER ${event} ON coordinator_state WHEN NEW.key GLOB 'result-supervision-v1:*' AND EXISTS (
+                SELECT 1 FROM assignment_cleanup_pending WHERE operation_id=substr(NEW.key,length('result-supervision-v1:')+1)
+                AND supervision_host_id GLOB 'server:*') BEGIN ${advanceCleanup} END`);
+        // A foreground polls the branch views of one parent. Keep their durable
+        // recovery revision even after older entries roll out of the change journal.
+        ctx.db.exec(`CREATE TABLE IF NOT EXISTS background_recovery_scopes (
+            workspace TEXT NOT NULL, session_id TEXT NOT NULL, revision INTEGER NOT NULL,
+            PRIMARY KEY(workspace,session_id)) WITHOUT ROWID`);
+        const recoverySources = [
+            ["operation_added", "INSERT ON operations", "NEW.owner_kind='parent-session'", "NEW.owner_workspace", "NEW.owner_session_id"],
+            ["operation_changed", "UPDATE OF terminal_revision, supervision_host_id ON operations",
+                "NEW.owner_kind='parent-session' AND (NEW.terminal_revision<>OLD.terminal_revision OR NEW.supervision_host_id IS NOT OLD.supervision_host_id)", "NEW.owner_workspace", "NEW.owner_session_id"],
+            ["callback_added", "INSERT ON background_parent_callbacks", "1", "NEW.owner_workspace", "NEW.owner_session_id"],
+            ["callback_removed", "DELETE ON background_parent_callbacks", "1", "OLD.owner_workspace", "OLD.owner_session_id"],
+            ["delivery_added", "INSERT ON outbox_events", "NEW.event_type='dependency-ready' AND NEW.state='pending' AND NEW.recipient_kind='parent-session'", "NEW.recipient_workspace", "NEW.recipient_session_id"],
+            ["delivery_released", "UPDATE OF state ON outbox_events", "NEW.event_type='dependency-ready' AND NEW.state='pending' AND OLD.state<>'pending' AND NEW.recipient_kind='parent-session'", "NEW.recipient_workspace", "NEW.recipient_session_id"],
+        ];
+        for (const [name, event, condition, workspace, session] of recoverySources) {
+            ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS background_recovery_${name} AFTER ${event} WHEN ${condition}
+                BEGIN INSERT INTO background_recovery_scopes VALUES(${workspace},${session},1)
+                ON CONFLICT(workspace,session_id) DO UPDATE SET revision=revision+1; END`);
+        }
         // These are observation inputs, not execution or delivery authority. Old
         // cooperative SQL writers inherit the same atomic invalidation triggers.
         const backgroundSources = [

@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.57.0] - 2026-11-26
+
+### Added
+
+- Drag the divider between workflow tasks and the diagram, or enter `/todo split 3:2` to set their relative widths. The session branch remembers the split.
+
+### Changed
+
+- Workflow panels open with equal column widths. Each task fits on one row and shows its status with an icon. Narrow terminals stack the list and diagram.
+- Bundle Goal 0.17.1, Background Tasks 0.21.2, and Subagents 0.39.2.
+
+### Fixed
+
+- Reuse session history during divider drags and skip visual Goal inspection in headless sessions. Switching branches during a drag discards the unfinished resize.
+
+## [pi-better-goal@0.17.1] - 2026-11-26
+
+### Fixed
+
+- A Goal checks its unfinished Todo even when a separate coordinator starts in the same session. Completing the Goal releases only its own workflow.
+
+## [pi-better-background-tasks@0.21.2] - 2026-11-26
+
+### Fixed
+
+- Recover terminal callbacks for the affected parent session. Paged recovery picks up callbacks inserted behind its cursor.
+- Keep Windows process-tree cleanup pending when a host using the legacy verification format reconnects or stays connected during an upgrade.
+
+## [pi-better-subagents@0.39.2] - 2026-11-26
+
+### Fixed
+
+- Recover parked waits from their live checkpoint when the metadata still describes an older generation.
+- If a launch receipt times out or the caller cancels after dispatch, report the unknown outcome and direct the caller to check subagent status before retrying.
+
+## [pi-better-server@0.8.2] - 2026-11-26
+
+### Fixed
+
+- Drain actionable, server-owned process cleanup before idle shutdown, including lost tasks left by an earlier server instance.
+- Reuse a changed worker's task projection across parent views and refresh callbacks only for the affected session.
+
 ## [pi-better-harness@0.56.0] - 2026-11-26
 
 ### Changed

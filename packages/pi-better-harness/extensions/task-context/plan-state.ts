@@ -17,6 +17,7 @@ export interface ReconstructedPlanState {
   plan: PlanSnapshot | null;
   displayMode: PlanDisplayMode;
   expanded: boolean;
+  leftShare: number;
 }
 
 function nowSeconds(): number {
@@ -178,14 +179,16 @@ export function reconstructPlanState(entries: Iterable<SessionEntryLike>): Recon
   let plan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
   let expanded = false;
+  let leftShare = 0.5;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== EXTENSION_NAME || !isPlanEntry(entry.data)) continue;
     if (entry.data.kind === "set") plan = entry.data.plan;
     else if (entry.data.kind === "clear") plan = null;
     else if (entry.data.kind === "display") displayMode = entry.data.mode;
+    else if (entry.data.kind === "workflow-split") leftShare = entry.data.leftShare;
     else expanded = entry.data.expanded;
   }
-  return { plan, displayMode, expanded };
+  return { plan, displayMode, expanded, leftShare };
 }
 
 function isPlanEntry(value: unknown): value is PlanEntry {
@@ -193,6 +196,7 @@ function isPlanEntry(value: unknown): value is PlanEntry {
   const candidate = value as Partial<PlanEntry>;
   if (candidate.version !== 1) return false;
   if (candidate.kind === "clear") return true;
+  if (candidate.kind === "workflow-split") return typeof candidate.leftShare === "number" && candidate.leftShare > 0 && candidate.leftShare < 1;
   if (candidate.kind === "expansion") return typeof candidate.expanded === "boolean";
   if (candidate.kind === "display") {
     return candidate.mode === "auto" || candidate.mode === "on" || candidate.mode === "off" || candidate.mode === "hidden";

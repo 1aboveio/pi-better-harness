@@ -16,8 +16,8 @@ export function instrumentRecoveryTrace(source) {
     };
     const traceBeforeContext = { owner: service.activeOrigin, state: traceRecoveryState() };
     service.noteParentContext(ctx, { recover: false });`);
-  replace('const recoveryVersion = authority.backgroundDigest([lease.store.getChangeRevision(), record.branchIds]);', `
-    const traceCoordinatorRevision = lease.store.getChangeRevision();
+  replace('const recoveryVersion = authority.backgroundDigest([lease.store.parentRecoveryRevision(record.owner), record.branchIds]);', `
+    const traceCoordinatorRevision = lease.store.parentRecoveryRevision(record.owner);
     const recoveryVersion = authority.backgroundDigest([traceCoordinatorRevision, record.branchIds]);`);
   replace('metrics.reconciles++;', `
     const traceAfterContext = traceRecoveryState();

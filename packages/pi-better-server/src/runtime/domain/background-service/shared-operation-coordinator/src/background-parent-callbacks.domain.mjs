@@ -7,6 +7,10 @@ import { getRow, getRows, run } from "./sqlite.domain.mjs";
 import { requireBoolean, requireCounter, requireId, requirePath } from "./validate.domain.mjs";
 const pageSize = (limit = 256) => Math.max(1, Math.min(256, requireCounter('limit', limit)));
 const scopeValues = (scope) => [requirePath('workspace', scope.workspace), requireId('sessionId', scope.sessionId)];
+export function parentRecoveryRevision(ctx, scope) {
+    const row = getRow(ctx, 'SELECT revision FROM background_recovery_scopes WHERE workspace=? AND session_id=?', ...scopeValues(scope));
+    return Number(row?.revision ?? 0);
+}
 export function setParentCallbackPending(ctx, taskId, pending) {
     taskId = requireId('taskId', taskId);
     pending = requireBoolean('pending', pending);

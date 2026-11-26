@@ -10,11 +10,11 @@
  */
 import { expireWaits, overdueOperations } from "./expiry.domain.mjs";
 import { setUpgradeFence } from "./upgrade.domain.mjs";
-import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks } from "./background-parent-callbacks.domain.mjs";
+import { parentRecoveryRevision, setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks } from "./background-parent-callbacks.domain.mjs";
 import { BackgroundRequests } from "./background-requests.domain.mjs";
 import { StoreError } from "./errors.domain.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.domain.mjs";
-import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
+import { serverAssignmentCleanup, serverAssignmentCleanupRevision, resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.domain.mjs";
 import { repairFailedResume } from "./recovery.domain.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.domain.mjs";
@@ -59,6 +59,8 @@ export function openStore(options) {
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
         hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        serverAssignmentCleanupRevision() { alive(); return serverAssignmentCleanupRevision(ctx); },
+        serverAssignmentCleanup(limit, after) { alive(); return serverAssignmentCleanup(ctx, limit, after); },
         resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
@@ -88,6 +90,7 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        parentRecoveryRevision(scope) { alive(); return parentRecoveryRevision(ctx, scope); },
         setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
         listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
         listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
@@ -127,7 +130,7 @@ export function openStore(options) {
             if (!Number.isSafeInteger(terminalRevision) || terminalRevision < 1)
                 return false;
             return run(ctx, `INSERT OR IGNORE INTO coordinator_state (key, value)
-                SELECT 'assignment-cleanup-verified:' || op.operation_id, op.launch_token
+                SELECT 'assignment-cleanup-verified:' || op.operation_id, 'v2:' || op.launch_token
                 FROM operations op JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
                 JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
                 WHERE op.operation_id = ? AND op.launch_token = ? AND op.terminal_revision = ?`, operationId, launchToken, terminalRevision) > 0;

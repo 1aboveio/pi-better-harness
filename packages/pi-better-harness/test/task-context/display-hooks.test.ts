@@ -89,6 +89,25 @@ test("an empty session stays invisible without placeholders, state writes, or im
   assert.equal(request.display, false);
 });
 
+test("inspecting Harness availability only reads history for an eligible visual Goal", async t => {
+  const f = await fixture(t);
+  const history = t.mock.method(f.ctx.sessionManager, "getBranch");
+  const inspect = (goalId: string, width?: number) => {
+    const request: any = { action: "inspect", goalId, width };
+    f.events.emit("pi-better-harness:task-context", request);
+    assert.equal(request.enabled, true);
+    return request.display;
+  };
+  for (let turn = 0; turn < 16; turn++) assert.equal(inspect(f.goal.goalId), false);
+  f.ctx.hasUI = false;
+  assert.equal(inspect(f.goal.goalId, 80), false);
+  f.ctx.hasUI = true;
+  assert.equal(inspect("unrelated", 80), false);
+  assert.equal(history.mock.callCount(), 0);
+  assert.equal(inspect(f.goal.goalId, 80), true);
+  assert.equal(history.mock.callCount(), 1);
+});
+
 test("legacy display and tool flags cannot prevent saving or displaying a Goal", async t => {
   for (const display of [false, true]) for (const enabled of [false, true]) {
     await t.test(`display ${display}, hooks ${enabled}`, async t => {

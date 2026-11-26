@@ -178,10 +178,12 @@ for (const platform of new Set([process.platform, "win32"])) {
         settleOperation(h.store, "settled");
         for (const operationId of ["lost", "verified"]) settleOperation(h.store, operationId, "lost");
         const verified = h.store.getOperation("verified")!;
-        assert.equal(h.store.verifyAssignmentCleanup(verified.operationId, verified.launchToken, 1), true);
         h.closeStore();
         const db = new DatabaseSync(h.path);
-        try { removePendingCleanupIndex(db); } finally { db.close(); }
+        try {
+            removePendingCleanupIndex(db);
+            db.prepare("INSERT INTO coordinator_state (key, value) VALUES (?, ?)").run("assignment-cleanup-verified:verified", verified.launchToken);
+        } finally { db.close(); }
         const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
         try {
             Object.defineProperty(process, "platform", { ...descriptor, value: platform });
@@ -195,6 +197,34 @@ for (const platform of new Set([process.platform, "win32"])) {
         assert.deepEqual(h.store.listAssignmentCleanupOperations(10, undefined, "peer").map(op => op.operationId), ["running"]);
     });
 }
+
+test("Windows rejects a legacy proof on an open connection after upgrading an existing queue", () => {
+    const h = createHarness();
+    h.store.registerAssignment({ ...assignment, attemptId });
+    const { operation } = registerOperation(h.store, { assignmentAttemptId: attemptId });
+    h.store.recordAssignmentOutcome(outcomeInput);
+    settleOperation(h.store, operation.operationId, "lost");
+    const old = new DatabaseSync(h.path);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    try {
+        old.exec("DROP TRIGGER IF EXISTS assignment_cleanup_windows_proof");
+        const legacy = old.prepare("INSERT OR IGNORE INTO coordinator_state (key, value) VALUES (?, ?)");
+        const key = "assignment-cleanup-verified:" + operation.operationId;
+        legacy.run(key, operation.launchToken);
+        assert.deepEqual(cleanupIds(h.store), []);
+        Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+        h.reopen();
+        assert.deepEqual(cleanupIds(h.store), [operation.operationId]);
+        assert.equal(legacy.run(key, operation.launchToken).changes, 0);
+        assert.deepEqual(cleanupIds(h.store), [operation.operationId]);
+        assert.equal(h.store.verifyAssignmentCleanup(operation.operationId, operation.launchToken, 1), true);
+        h.reopen();
+        assert.deepEqual(cleanupIds(h.store), []);
+    } finally {
+        Object.defineProperty(process, "platform", platform);
+        old.close();
+    }
+});
 
 test("v4 migration keeps legacy operations unbound even when their owner has a committed outcome", () => {
     const h = createHarness();

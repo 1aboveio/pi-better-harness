@@ -31,9 +31,9 @@ import {
 import { renderCompactPlan } from "./plan-render.js";
 import { createPlanWidget } from "./plan-widget.js";
 import { installLegacyPlanMask, type LegacyPlanMask } from "./legacy-plan-mask.js";
-import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
+import { COMPACT_PLAN_ROWS, plainPlanTheme } from "./plan-presentation.js";
 import {
-  readRushPlan, renderRushPlan, workflowBinding,
+  readRushPlan, renderRushFrame, renderRushPlan, workflowBinding,
   WORKFLOW_PLAN_ENTRY, visibleRushUnits, type RushPlan, type WorkflowPlanBinding,
 } from "./workflow-plan.js";
 import { cancelledRowsClearDelay, observeCancelledRows } from "./cancelled-rows.js";
@@ -134,6 +134,7 @@ const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "show", label: "show", description: "Restore automatic Todo display" },
   { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
   { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
+  { value: "split ", label: "split", description: "Set workflow task and diagram widths, e.g. split 3:2 or split 1:1" },
   { value: "pin auto", label: "pin auto", description: "Use automatic Todo pinning" },
   { value: "pin on", label: "pin on", description: "Keep Todo pinned" },
   { value: "pin off", label: "pin off", description: "Keep Todo unpinned" },
@@ -158,9 +159,9 @@ export function ledgerArgumentCompletions(argumentPrefix: string): AutocompleteI
   return matches.length > 0 ? [...matches] : null;
 }
 
-function workflowPlanOwner(ctx: ExtensionContext): string | null {
+function workflowPlanOwner(ctx: ExtensionContext, entries = ctx.sessionManager.getBranch()): string | null {
   let owner: string | null = null;
-  for (const entry of ctx.sessionManager.getBranch()) {
+  for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-workflow") continue;
     const data = entry.data as { version?: unknown; kind?: unknown; owner?: { name?: unknown; planOwner?: unknown } } | null;
     if (data?.version !== 1) continue;
@@ -206,10 +207,12 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
   let expanded = false;
+  let leftShare = 0.5;
   let displayedWorkflowOwner: string | null = null;
   let rushBinding: WorkflowPlanBinding | null = null;
   let rushPlan: RushPlan | null = null;
   let rushError: string | null = null;
+  let invalidateWidget: (() => void) | undefined;
   let refreshWidget: ((force?: boolean) => void) | undefined;
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
   let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -456,6 +459,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     () => { syncTools(); refresh(true); });
 
   const restore = (ctx: ExtensionContext): void => {
+    invalidateWidget?.();
     const entries = ctx.sessionManager.getBranch();
     sessionContext = ctx;
     dynamic.restore(ctx);
@@ -482,6 +486,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     expanded = state.expanded;
+    leftShare = state.leftShare;
     refresh(true);
     scheduleCompletedPlanClear();
   };
@@ -506,6 +511,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     refresh(true);
   };
 
+  const saveWorkflowSplit = (share: number): void => {
+    if (share === leftShare) return;
+    pi.appendEntry(EXTENSION_NAME, { version: 1, kind: "workflow-split", leftShare: share, at: Math.floor(Date.now() / 1_000) });
+    leftShare = share;
+    refresh(true);
+  };
+
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     const startControl: GoalPanelStartRequest = { action: "probe" };
@@ -513,18 +525,36 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     setNavigatorPanel(ctx,
       EXTENSION_NAME,
       (tui, theme) => {
-        const localRefresh = (force = false): void => tui.requestRender(force);
+        const readWidgetState = () => {
+          const entries = ctx.sessionManager.getBranch();
+          return {
+            goal: reconstructGoalSnapshot(entries), owner: workflowPlanOwner(ctx, entries),
+            binding: rushBinding ? workflowBinding(entries) : null,
+          };
+        };
+        let branchState: ReturnType<typeof readWidgetState> | undefined;
+        let branchLeaf: string | null | undefined;
+        const localRefresh = (force = false): void => {
+          if (force) branchState = undefined;
+          tui.requestRender(force);
+        };
         refreshWidget = localRefresh;
-        let dynamicFrame: WorkflowFrame | undefined;
+        let workflowFrame: WorkflowFrame | undefined;
         let renderedRun: string | undefined;
         let selectedStep: string | undefined;
         let startButton: { y: number; left: number; right: number; task: Outcome } | undefined;
         const widget = createPlanWidget(
-          (width: number, disclosure?: string): string[] => {
-            dynamicFrame = undefined;
+          (width: number, disclosure?: string, previewShare = leftShare): string[] => {
+            workflowFrame = undefined;
             startButton = undefined;
-            if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
-            const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+            if (displayMode === "hidden") return [];
+            const leaf = ctx.sessionManager.getLeafId?.();
+            if (!branchState || leaf === undefined || leaf !== branchLeaf) {
+              branchState = readWidgetState();
+              branchLeaf = leaf;
+            }
+            if (displayedWorkflowOwner !== branchState.owner) return [];
+            const { goal } = branchState;
             const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
             const header: CompactTaskHeader = {
               subtitle: outcome?.objective, disclosure,
@@ -540,20 +570,22 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
             if (displayedWorkflowOwner || rushBinding) {
               if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
-                  !workflowBinding(ctx.sessionManager.getBranch())) return heading();
+                  !branchState.binding) return heading();
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
-                : undefined;
-              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading();
+                : plainPlanTheme.fg;
+              if (!rushPlan) return heading();
+              workflowFrame = renderRushFrame(rushPlan, width, { fg }, rushBinding.owner, !displayedWorkflowOwner, expanded, header, previewShare);
+              return workflowFrame.lines;
             }
             const run = dynamic.run();
             if (run) {
               if (renderedRun !== run.id) selectedStep = undefined;
               renderedRun = run.id;
-              dynamicFrame = renderDynamicFrame(run, width, theme, expanded, {
+              workflowFrame = renderDynamicFrame(run, width, theme, expanded, {
                 disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
-              }, selectedStep);
-              return dynamicFrame.lines;
+              }, selectedStep, previewShare);
+              return workflowFrame.lines;
             }
             return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading();
           },
@@ -573,16 +605,19 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
                 pi.events.emit(GOAL_PANEL_START_EVENT, { action: "start", sessionId, objective: button.task.objective } satisfies GoalPanelStartRequest);
               };
             }
-            const step = dynamicFrame?.stepAt(x, y);
+            const step = workflowFrame?.stepAt(x, y);
             if (!step || dynamic.run()?.id !== renderedRun) return undefined;
             return () => { selectedStep = selectedStep === step ? undefined : step; };
           },
+          { resizeAt: (x, y) => workflowFrame?.resizeAt(x, y), save: saveWorkflowSplit },
         );
+        invalidateWidget = widget.invalidate;
         return {
           ...widget,
           dispose() {
             startButton = undefined;
-            if (refreshWidget === localRefresh) refreshWidget = undefined;
+            widget.invalidate();
+            if (refreshWidget === localRefresh) { refreshWidget = undefined; invalidateWidget = undefined; }
           },
         };
       },
@@ -871,13 +906,23 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         setExpanded(input === "expand");
         return;
       }
+      if (/^split(?:\s|$)/.test(input)) {
+        const ratio = /^split\s+(\d+)\s*:\s*(\d+)$/.exec(input);
+        const left = Number(ratio?.[1]), right = Number(ratio?.[2]);
+        if (!Number.isSafeInteger(left + right) || left <= 0 || right <= 0) {
+          ctx.ui.notify("Use /todo split LEFT:RIGHT with positive integers, e.g. /todo split 3:2.", "warning");
+          return;
+        }
+        saveWorkflowSplit(left / (left + right));
+        return;
+      }
       const pinMode = input.match(/^pin\s+(auto|on|off)$/)?.[1] as PlanDisplayMode | undefined;
       if (pinMode) {
         setDisplayMode(pinMode);
         ctx.ui.notify(`Todo display: ${pinMode}.`, "info");
         return;
       }
-      ctx.ui.notify("Usage: /todo [clear|hide|show|expand|collapse|pin auto|pin on|pin off]", "warning");
+      ctx.ui.notify("Usage: /todo [clear|hide|show|expand|collapse|split LEFT:RIGHT|pin auto|pin on|pin off]", "warning");
     },
   });
 
@@ -987,7 +1032,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             request.ledgerBlocker = error instanceof Error ? error.message : String(error);
           }
         }
-        if (sessionContext && !workflowPlanOwner(sessionContext) && !rushBinding) {
+        if (!request.workflowOwnsPlan) {
           request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
         }
       }
@@ -1004,14 +1049,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       return;
     }
     if (request.action === "inspect") {
-      const goal = sessionContext ? reconstructGoalSnapshot(sessionContext.sessionManager.getBranch()) : null;
+      request.display = false;
+      if (!sessionContext?.hasUI || displayMode === "hidden" || !request.goalId ||
+          typeof request.width !== "number" || !Number.isFinite(request.width) || request.width <= 0) return;
       const run = !displayedWorkflowOwner && !rushBinding ? dynamic.run() : undefined;
-      const displayedGoal = run ? run.goalId : outcome?.goalId;
-      request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && displayMode !== "hidden" &&
-        request.goalId === displayedGoal && goal?.goalId === request.goalId && typeof request.width === "number" &&
-        canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
+      if (request.goalId !== (run ? run.goalId : outcome?.goalId)) return;
+      const entries = sessionContext.sessionManager.getBranch();
+      const goal = reconstructGoalSnapshot(entries);
+      request.display = goal?.goalId === request.goalId && canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) &&
+        displayedWorkflowOwner === workflowPlanOwner(sessionContext, entries);
+      return;
     }
-    if (request.action === "inspect") return;
     if (request.action === "bind") {
       if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
         saveOutcome({ ...outcome, goalId: request.goalId });
@@ -1096,6 +1144,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (typeof unsubscribeWorkflow === "function") unsubscribeWorkflow();
     if (typeof unsubscribeSettings === "function") unsubscribeSettings();
     if (typeof unsubscribeTask === "function") unsubscribeTask();
+    invalidateWidget?.();
+    invalidateWidget = undefined;
     refreshWidget = undefined;
     sessionContext = undefined;
     try {

@@ -135,7 +135,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
       }
     };
-    if (controlStore.store.resultSupervisions(true).length || controlStore.store.listAssignmentCleanupOperations(1).length) {
+    if (controlStore.store.resultSupervisions(true).length || controlStore.store.serverAssignmentCleanup(1).length) {
       resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
     }
     resultPorts.set(resultRoot, resultPort);
@@ -687,6 +687,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           // No create/open can slip between this check and the synchronous admission fence.
           if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || resultSupervision?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          // An assignment can end after startup or between two asynchronous stops.
+          const cleanupRevision = controlStore.store.serverAssignmentCleanupRevision();
+          if (!resultSupervision && controlStore.store.serverAssignmentCleanup(1).length) {
+            resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+          }
+          if (resultSupervision?.hasCleanupAtIdle(cleanupRevision) || resultSupervision?.livenessReasons().length) return;
+          if (controlStore.store.serverAssignmentCleanupRevision() !== cleanupRevision) return;
           draining = true;
           idleStopping = true;
           idleEvidence = { at: now(), deadline: hostedUsed ? zeroSince! + config.daemonIdleMs : runtimeZeroSince! + config.runtimeIdleMs,
