@@ -4,6 +4,7 @@ import type { PlanRenderTheme } from "./plan-presentation.js";
 export interface CompactTaskHeader {
   subtitle?: string;
   disclosure?: string;
+  onStartButton?: (row: number, left: number, right: number) => void;
   runtime?: { status: string; clock?: string; subject?: "workflow" };
   /** Preformatted high-level ledger counts shown in the existing Todo surface. */
   ledger?: string;
@@ -47,6 +48,16 @@ export function renderCompactTaskHeader(summary: string | undefined, width: numb
     const text = header.ledger.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
     details.push(" ".repeat(indent) + theme.fg("dim", truncateToWidth(text, size - indent)));
   }
-  if (details.length > 0) lines.push(...details, "");
+  if (details.length > 0) {
+    lines.push(...details);
+    const fullLabel = "[Start Goal · Alt+G]";
+    const label = indent + fullLabel.length <= size ? fullLabel : "[Start]";
+    if (header.onStartButton && size >= indent + label.length) {
+      header.onStartButton(lines.length, indent, indent + label.length);
+      lines.push(" ".repeat(indent) + theme.fg("accent", label));
+    } else {
+      lines.push("");
+    }
+  }
   return lines;
 }

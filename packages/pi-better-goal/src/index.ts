@@ -46,7 +46,7 @@ import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
-import { canStartGoalFromOutcome, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
+import { canStartGoalFromOutcome, GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -1062,9 +1062,11 @@ export default function (pi: ExtensionAPI): void {
 
   // Explicit controls can attach execution to a saved Goal or legacy checklist.
   // Pausing writes a paused snapshot directly, so it cannot queue a kickoff.
-  const controlGoal = (action: "pause" | "resume", ctx: ExtensionContext): void => {
+  const controlGoal = (action: "pause" | "resume", ctx: ExtensionContext, expectedSavedObjective?: string): void => {
     const current = getGoal(ctx);
     const { savedGoal, handoffOwner } = requestTaskContext(pi, "saved");
+    if (expectedSavedObjective !== undefined &&
+        (savedGoal?.objective !== expectedSavedObjective || savedGoal.status !== "active" || savedGoal.goalId)) return;
     const warn = (message: string) => ctx.ui.notify(message, "warning");
     if (savedGoal && (!current || current.goalId !== savedGoal.goalId)) {
       if (current && current.status !== "complete") {
@@ -1098,6 +1100,17 @@ export default function (pi: ExtensionAPI): void {
     if (action === "pause" && isForegroundBusy(ctx)) ctx.abort?.();
     notifyGoal(ctx, action === "pause" ? "Goal paused." : "Goal resumed.");
   };
+
+  const unsubscribePanelStart = pi.events.on(GOAL_PANEL_START_EVENT, value => {
+    const request = value as GoalPanelStartRequest | undefined;
+    if (request?.action === "probe") {
+      request.available = true;
+      return;
+    }
+    const ctx = currentCtx;
+    if (request?.action !== "start" || !ctx?.hasUI || request.sessionId !== ctx.sessionManager.getSessionId()) return;
+    if (typeof request.objective === "string") controlGoal("resume", ctx, request.objective);
+  });
 
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
     const previous = preferences;
@@ -1791,6 +1804,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
     if (typeof unsubscribeOperationAdmission === "function") unsubscribeOperationAdmission();
+    if (typeof unsubscribePanelStart === "function") unsubscribePanelStart();
     if (typeof unsubscribeOutcomeAccepted === "function") unsubscribeOutcomeAccepted();
 
     executionGeneration += 1;

@@ -22,7 +22,8 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 
 The Goal records what the user wants to achieve. Its Todo lists the steps. The
 panel shows checklist progress on the left and Goal status on the right. A
-saved Goal starts running with `/goal resume`. Use `/goal pause` to interrupt
+saved Goal has a **Start Goal** button. Click it or press **Alt+G** to start work
+with the existing checklist. Use `/goal pause` to interrupt
 foreground work and hold continuation. Both commands use the current Todo,
 including checklists saved before a Goal was attached.
 

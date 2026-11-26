@@ -8,6 +8,12 @@ export type TaskContextAction = "saved" | "adopt" | "inspect" | "audit" | "start
 
 export const OUTCOME_ACCEPTED_EVENT = "pi-better-harness:outcome-accepted";
 
+/** The Todo panel probes once on installation and requests a start only on a user click. */
+export const GOAL_PANEL_START_EVENT = "pi-better-goal:panel-start";
+export type GoalPanelStartRequest =
+  | { action: "probe"; available?: boolean }
+  | { action: "start"; sessionId: string; objective: string };
+
 export interface OutcomeAcceptedEvent {
   sessionId: string;
   reopenedGoalId?: string;

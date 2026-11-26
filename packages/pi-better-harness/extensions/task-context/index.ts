@@ -17,7 +17,7 @@ import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outc
 import { changeLedgerPreference, parseOutcomeTodoPreferences } from "./preferences.js";
 import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
-import { OUTCOME_ACCEPTED_EVENT, type TaskContextRequest } from "pi-better-goal/src/task-context.ts";
+import { GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, type TaskContextRequest } from "pi-better-goal/src/task-context.ts";
 
 import {
   completedPlanClearDelay,
@@ -508,6 +508,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
+    const startControl: GoalPanelStartRequest = { action: "probe" };
+    pi.events.emit(GOAL_PANEL_START_EVENT, startControl);
     setNavigatorPanel(ctx,
       EXTENSION_NAME,
       (tui, theme) => {
@@ -516,9 +518,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         let dynamicFrame: WorkflowFrame | undefined;
         let renderedRun: string | undefined;
         let selectedStep: string | undefined;
+        let startButton: { y: number; left: number; right: number; task: Outcome } | undefined;
         const widget = createPlanWidget(
           (width: number, disclosure?: string): string[] => {
             dynamicFrame = undefined;
+            startButton = undefined;
             if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
             const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
             const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
@@ -528,15 +532,19 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
                 : outcome ? { status: outcome.status === "active" ? "saved" : outcome.status } : undefined,
               ledger: ledgerHeaderText(),
             };
-            const heading = outcome || (ledgerEnabled && (ledger || ledgerId))
+            const saved = outcome;
+            if (startControl.available && saved?.status === "active" && !saved.goalId && (!goal || goal.status === "complete")) {
+              header.onStartButton = (y, left, right) => { startButton = { y, left, right, task: saved }; };
+            }
+            const heading = () => outcome || (ledgerEnabled && (ledger || ledgerId))
               ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
             if (displayedWorkflowOwner || rushBinding) {
               if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
-                  !workflowBinding(ctx.sessionManager.getBranch())) return heading;
+                  !workflowBinding(ctx.sessionManager.getBranch())) return heading();
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
                 : undefined;
-              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading;
+              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading();
             }
             const run = dynamic.run();
             if (run) {
@@ -547,7 +555,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               }, selectedStep);
               return dynamicFrame.lines;
             }
-            return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading;
+            return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading();
           },
           () => {
             const run = dynamic.run();
@@ -557,6 +565,14 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           () => expanded,
           () => setExpanded(!expanded),
           (x, y) => {
+            const button = startButton;
+            if (button && button.y === y && x >= button.left && x < button.right) {
+              return () => {
+                if (button.task !== outcome || displayMode === "hidden") return;
+                const sessionId = ctx.sessionManager.getSessionId();
+                pi.events.emit(GOAL_PANEL_START_EVENT, { action: "start", sessionId, objective: button.task.objective } satisfies GoalPanelStartRequest);
+              };
+            }
             const step = dynamicFrame?.stepAt(x, y);
             if (!step || dynamic.run()?.id !== renderedRun) return undefined;
             return () => { selectedStep = selectedStep === step ? undefined : step; };
@@ -565,6 +581,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         return {
           ...widget,
           dispose() {
+            startButton = undefined;
             if (refreshWidget === localRefresh) refreshWidget = undefined;
           },
         };

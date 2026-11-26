@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import goalExtension from "../../../pi-better-goal/src/index.js";
 import { reconstructGoalSnapshot, goalSetEntry, goalWithStatus } from "../../../pi-better-goal/src/goal-state.js";
-import { OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
+import { GOAL_PANEL_START_EVENT, OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
 import { EXTENSION_NAME } from "../../../pi-better-goal/src/types.js";
 import { currentWorkflowOwner, workflowEntry, WORKFLOW_ENTRY_TYPE } from "../../../pi-better-goal/src/workflow.js";
 import { boundPlanPath } from "../../../pi-better-goal/src/workflow-gates.js";
@@ -121,6 +121,23 @@ for (const first of ["pause", "resume"] as const) {
     assert.equal(h.goal()?.goalId, id);
   });
 }
+
+test("the panel starts only its current saved objective and ignores repeat clicks", async t => {
+  const h = await fixture(t, { autoStart: false });
+  h.ctx.hasUI = true;
+  const sessionId = h.ctx.sessionManager.getSessionId();
+  await h.update({ goal: accepted, todo: [{ step: "Check payments", status: "pending" }] });
+  const before = await h.getTodo();
+  const click = { action: "start", sessionId, objective: accepted.objective };
+  h.events.emit(GOAL_PANEL_START_EVENT, { ...click, sessionId: "another-session" });
+  h.events.emit(GOAL_PANEL_START_EVENT, { ...click, objective: "Earlier task" });
+  assert.equal(h.goal(), null);
+  h.events.emit(GOAL_PANEL_START_EVENT, click);
+  h.events.emit(GOAL_PANEL_START_EVENT, click);
+  assert.equal(h.goal()?.objective, accepted.objective);
+  assert.deepEqual((await h.getTodo()).plan, before.plan);
+  assert.equal(h.messages.length, 1);
+});
 
 test("manual controls preserve a checklist without an objective and ignore an empty session", async t => {
   const h = await fixture(t);
