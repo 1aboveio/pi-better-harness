@@ -235,6 +235,12 @@ export class RuntimeResultSupervision {
     this.closed = true; if (this.timer) clearTimeout(this.timer); this.watcher?.close();
     for (const watcher of this.taskWatchers.values()) watcher.close();
     this.taskWatchers.clear();
-    return this.closing = Promise.resolve(this.assignmentCleanup).then(() => this.releaseStore());
+    if (this.assignmentCleanup) {
+      this.closing = this.assignmentCleanup.then(() => this.releaseStore());
+    } else {
+      this.releaseStore();
+      this.closing = Promise.resolve();
+    }
+    return this.closing;
   }
 }
