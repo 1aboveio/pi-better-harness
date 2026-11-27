@@ -93,6 +93,29 @@ test("valid empty shards succeed without running scripts but still validate work
   assert.match(invalid.stderr, /Expected exactly one pi-better-server workspace; found 0/);
 });
 
+test("the five-way CI split runs the Background suite only on its assigned shard", (t) => {
+  const root = fixture(t);
+  workspace(root, "pi-better-server", {});
+  workspace(root, "pi-better-background-tasks", { scripts: { test: "node -p '42'" } });
+  for (const index of [1, 2, 3, 4, 5]) {
+    const result = run(root, ["--shard", `${index}/5`]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(/^42$/m.test(result.stdout), index === 3);
+  }
+});
+
+test("all CI shards run a distinct subagent partition through npm", (t) => {
+  const root = fixture(t);
+  workspace(root, "pi-better-server", {});
+  workspace(root, "pi-better-subagents", { scripts: { test: "node record.cjs", "test:shard": "node record.cjs" } });
+  writeFileSync(join(root, "packages/pi-better-subagents/record.cjs"), "console.log('partition=' + process.argv.slice(2).join(','))");
+  for (const [args, expected] of [[[], ""], [["--shard", "1/2"], "--test-shard=1/2,tests/*.test.mjs"], [["--shard", "2/2"], "--test-shard=2/2,tests/*.test.mjs"]]) {
+    const result = run(root, args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.trimEnd().endsWith(`partition=${expected}`));
+  }
+});
+
 test("invalid arguments fail closed before running any workspace", (t) => {
   const root = fixture(t);
   workspace(root, "alpha", { scripts: { test: "node -e \"console.log('SHOULD_NOT_RUN')\"" } });

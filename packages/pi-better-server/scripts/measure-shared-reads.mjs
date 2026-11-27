@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir, cpus, release, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { performance } from 'node:perf_hooks';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 assert.ok(['darwin', 'linux'].includes(process.platform), 'This measurement requires macOS or Linux');
@@ -26,9 +26,9 @@ function waitMessage(child, check, timeout = 20000) {
     child.on('message', message); child.once('exit', exit);
   });
 }
-async function sample(child) {
+async function sample(child, timeout) {
   const id = ++requestId;
-  const result = waitMessage(child, m => m.type === 'resource-sample' && m.id === id);
+  const result = waitMessage(child, m => m.type === 'resource-sample' && m.id === id, timeout);
   child.send({ type: 'resource-sample', id });
   return result;
 }
@@ -54,9 +54,11 @@ function distribution(values) {
   return { samples: sorted.length, p50: percentile(.5), p95: percentile(.95), p99: percentile(.99), max: sorted.at(-1) };
 }
 const report = { source: sourceProvenance(workspace), machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
-  sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', scenarios: [] };
+  sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', rebuilds: [], scenarios: [] };
 const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
 const phase = (step, history, clients = 0) => { report.phase = { step, history, clients }; };
+const clientLag = monitorEventLoopDelay({ resolution: 10 });
+clientLag.enable();
 try {
   for (const history of [4416, 10000]) {
     phase('seed-history', history);
@@ -87,7 +89,9 @@ try {
     const ready = await waitMessage(server, m => m.type === 'ready');
     const control = new WorkClient(ready.socket, agent); await control.ready;
     const pis = [];
-    const rebuildLatencies = [];
+    const rebuildBudgetMs = 250;
+    const rebuildLatencies = [], slowStatusRequests = [];
+    clientLag.reset();
     const rebuildStarted = performance.now();
     phase('initial-snapshot', history);
     const initial = control.get({ cwd: root, active: true });
@@ -95,11 +99,25 @@ try {
     while (indexed.status !== 'ready') {
       phase('rebuild-status', history);
       assert.ok(performance.now() - rebuildStarted < 30000, `Rebuild did not recover: ${indexed.reason}`);
-      const began = performance.now(); await control.request('runtime_get_status'); rebuildLatencies.push(performance.now() - began);
+      const began = performance.now();
+      await control.request('runtime_get_status');
+      const latencyMs = performance.now() - began;
+      rebuildLatencies.push(latencyMs);
+      if (latencyMs >= rebuildBudgetMs) slowStatusRequests.push({ afterMs: began - rebuildStarted, latencyMs });
       await delay(20); phase('rebuild-snapshot', history); indexed = await control.get({ cwd: root, active: true });
     }
-    const rebuildMs = performance.now() - rebuildStarted;
-    assert.ok(rebuildLatencies.every(ms => ms < 250), 'status RPC must respond within 250 ms during index rebuild');
+    const rebuild = { ms: performance.now() - rebuildStarted, controlRpcMs: distribution(rebuildLatencies) };
+    const rebuildEvidence = { history, ...rebuild, budgetMs: rebuildBudgetMs, slowStatusRequests, clientEventLoopMaxMs: clientLag.max / 1e6 };
+    report.rebuilds.push(rebuildEvidence);
+    if (slowStatusRequests.length > 0) {
+      phase('rebuild-status-budget', history);
+      try {
+        rebuildEvidence.daemonEventLoopSinceStartMs = (await sample(server, 1000)).lag;
+      } catch (error) {
+        rebuildEvidence.daemonSampleError = String(error);
+      }
+      assert.fail(`status RPC must respond within ${rebuildBudgetMs} ms during index rebuild: ${JSON.stringify(rebuildEvidence)}`);
+    }
     assert.equal(indexed.activity.active, 2);
     phase('history-count', history);
     assert.equal((await control.get({ cwd: root, active: false, limit: 1 })).totalMatching, history);
@@ -140,7 +158,7 @@ try {
       report.lastMetrics = before;
       phase('measurement-window', history, count);
       const subjects = [...pis, server, work];
-      const start = await Promise.all(subjects.map(sample));
+      const start = await Promise.all(subjects.map(child => sample(child)));
       const began = performance.now(), latencies = [];
       const windowMs = count === 10 && history === 10000 ? 60000 : 3000;
       while (performance.now() - began < windowMs) {
@@ -148,7 +166,7 @@ try {
         await delay(100);
       }
       const elapsedMs = performance.now() - began;
-      const end = await Promise.all(subjects.map(sample));
+      const end = await Promise.all(subjects.map(child => sample(child)));
       for (let i = 0; i < pis.length; i++) {
         assert.equal(end[i].fileCalls.archiveReads, start[i].fileCalls.archiveReads, 'unchanged actual provider must not reread archives');
         assert.equal(end[i].fileCalls.markerStats, start[i].fileCalls.markerStats, 'unchanged actual provider must not stat per-archive markers');
@@ -174,7 +192,7 @@ try {
         totalCpuMs: resources.reduce((sum,r) => sum+r.cpuMs, 0), totalRss: resources.reduce((sum,r) => sum+r.rss, 0),
         rpcMs: distribution(latencies), inventoryDelta: after.inventories-before.inventories,
         metadataReadDelta: after.metadataReads-before.metadataReads, projectionDelta: after.projections-before.projections,
-        sqlite: after.sqlite, rebuild: { ms: rebuildMs, controlRpcMs: distribution(rebuildLatencies) } };
+        sqlite: after.sqlite, rebuild };
       report.scenarios.push(entry);
       phase('event-publication', history, count);
       entry.eventPublication = await measureEventPublication({ socketPath: ready.socket, agentDir: agent,
@@ -193,6 +211,7 @@ try {
   report.failure = { message: String(error).slice(0, 2048) };
   throw error;
 } finally {
+  clientLag.disable();
   try {
     writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
     console.log(`Resource report: ${output}`);
