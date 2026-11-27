@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { acquireMutationStore } from "../src/runtime/mutation-store.ts";
 import { DaemonClient } from "../src/client.ts";
 import { inspectDaemonOwner } from "../src/daemon-owner.ts";
 import { hasActivationReservations, readActivationJournal } from "../src/startup/activation.ts";
@@ -352,6 +353,33 @@ for (const publicationRace of [false, true]) {
     assert.match(JSON.stringify(snapshot.data.messages), /answer:keep this answer/);
   });
 }
+
+test("a terminal lost task defers activation until its queued cleanup is verified", { timeout: 45000 }, async t => {
+  const env = fixture(t);
+  const before = staged(env, "cleanup-before"), after = staged(env, "cleanup-after");
+  const lease = acquireMutationStore(env.agentDir);
+  t.after(() => lease.release());
+  const owner = { kind: "worker-conversation", sessionId: "worker", workspace: env.cwd };
+  const recipient = { kind: "parent-session", sessionId: "parent", workspace: env.cwd };
+  const operationId = "lost-operation", launchToken = "lost-token";
+  lease.store.registerAssignment({ assignmentId: "assignment", attemptId: "attempt", owner, recipient });
+  lease.store.registerOperation({ operationId, taskId: "bgs_0123456789abcdef0123", launchToken, owner,
+    assignmentAttemptId: "attempt", observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "original" } });
+  lease.store.handoffResultSupervision({ operationId, expectedHostId: "original", directory: join(env.root, "supervisor"),
+    hostId: "server:previous", epoch: "previous",
+    capability: { adapter: "background-results-v1", captured: { authorized: true }, current: { authorized: true } } });
+  lease.store.publishSupervisedResult({ operationId, epoch: "previous", publication: {
+    operationId, eventId: "terminal", owner, outcome: "lost", reason: "Runner exited without terminal evidence", evidence: [],
+  } });
+  lease.store.recordAssignmentOutcome({ assignmentId: "assignment", revision: 1, owner, recipient, outcome: "succeeded",
+    reason: "Done", processUncertain: false, evidence: [], waits: [] });
+
+  await activate(env, before, "initial");
+  assert.equal((await activate(env, after, "cleanup-upgrade")).status, "deferred");
+  await waiting(env, /assignment-cleanup/);
+  assert.equal(lease.store.verifyAssignmentCleanup(operationId, launchToken, 1), true);
+  await successor(t, env, after);
+});
 
 test("pending background observation and active background work protect the owner without holding admission", { timeout: 45_000 }, async t => {
   const env = fixture(t);

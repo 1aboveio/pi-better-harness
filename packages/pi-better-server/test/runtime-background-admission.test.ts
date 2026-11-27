@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { createServer } from 'node:net';
+import { createInterface } from 'node:readline';
+import { WorkReadModel } from '../src/runtime/read-model.ts';
+import { WorkQueries, queryEncodingMetrics } from '../src/runtime/queries.ts';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createBackgroundTools } from '../src/runtime/background-tools.ts';
 import { acquireMutationStore } from '../src/runtime/mutation-store.ts';
@@ -138,6 +142,90 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
             delete process.env.PI_CODING_AGENT_DIR;
         else
             process.env.PI_CODING_AGENT_DIR = previous;
+    }
+});
+
+for (const unrelated of [1, 16]) test('one task publication with ' + unrelated + ' unrelated warm Background sessions', { timeout: 30000 }, async t => {
+    const root = realpathSync(mkdtempSync('/tmp/bg-views-'));
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = root;
+    const { createManagedBackgroundFrontend } = await import(String('../../pi-better-background-tasks/src/managed-frontend.ts'));
+    const { closeBackgroundObservation } = await import(String('../../pi-better-background-tasks/src/work-observation.ts'));
+    const lease = acquireMutationStore(root);
+    const model = new WorkReadModel(root, 'views', { baseDir: root, durableDir: root, intervalMs: 60000 });
+    const snapshot = model.snapshot.bind(model);
+    const service = await createBackgroundTools(root, 'views', () => false, async scope => snapshot(scope));
+    const counts = { snapshots: 0, polls: 0, notifications: 0 };
+    let handlingQuery = false;
+    let rpcError: unknown;
+    t.mock.method(model, 'snapshot', (scope: Parameters<typeof snapshot>[0]) => {
+        if (!handlingQuery) counts.snapshots++;
+        return snapshot(scope);
+    });
+    const server = createServer(async socket => {
+        const queries = new WorkQueries(model, socket);
+        for await (const line of createInterface({ input: socket })) {
+            const command = JSON.parse(line);
+            try {
+                let data;
+                if (command.type === 'hello') data = { instanceId: 'views', capabilities: ['runtime-background-admission-v2'] };
+                else if (command.type === 'runtime_background_tool') {
+                    const admission = join(root, 'background-tool-admission', command.authority.id + '.json');
+                    if (JSON.parse(readFileSync(admission, 'utf8')).tool === '__background_poll') counts.polls++;
+                    data = await service.handle(command);
+                } else {
+                    handlingQuery = true;
+                    try { data = queries.handle(command); } finally { handlingQuery = false; }
+                }
+                socket.write(JSON.stringify({ id: command.id, success: true, data }) + '\n');
+            } catch (error) { rpcError = error; socket.write(JSON.stringify({ id: command.id, success: false, error: String(error) }) + '\n'); }
+        }
+    });
+    const closeViews: Array<() => void> = [];
+    try {
+        server.listen(join(root, 'pi-server.sock'));
+        await once(server, 'listening');
+        writeFileSync(join(root, 'server-registration-v1.json'), JSON.stringify({ version: 1, agentDir: root, serverDir: root }));
+        const owner = { kind: 'parent-session', sessionId: 'owner', workspace: root };
+        const id = 'bgs_0123456789abcdef0123';
+        lease.store.registerOperation({ operationId: id, taskId: id, launchToken: id, owner,
+            observer: { kind: 'local-supervisor', version: '1' }, supervision: { hostId: 'fixture' } });
+        await model.reconcile();
+        let delivered = false;
+        for (let index = 0; index <= unrelated; index++) {
+            const sessionId = index === 0 ? owner.sessionId : 'quiet-' + index;
+            const pi = { events: new EventEmitter(), registerTool() {} };
+            const { host } = createManagedBackgroundFrontend(pi);
+            closeViews.push(() => { host.close(); closeBackgroundObservation(pi); });
+            let warm = false;
+            host.onDurableTaskChange(() => {
+                counts.notifications++;
+                warm = true;
+                if (host.listDurableTasks({ cwd: root, sessionId }).some((row: any) => row.id === id && row.status === 'succeeded')) delivered = true;
+            });
+            host.start({ cwd: root, isProjectTrusted: () => true, sessionManager: {
+                getSessionId: () => sessionId, getBranch: () => [{ id: 'branch-' + index }],
+            } });
+            await t.waitFor(() => assert.ok(warm, String(rpcError ?? "Expected initial UI notification for " + sessionId)), { timeout: 5000, interval: 5 });
+        }
+        const frames = queryEncodingMetrics.frames, reconciles = service.metrics().reconciles;
+        counts.snapshots = counts.polls = counts.notifications = 0;
+        lease.store.recordTerminalOutcome({ operationId: id, eventId: 'task-exit', owner, outcome: 'succeeded',
+            evidence: [{ kind: 'terminal-record', ref: id, summary: 'exit 0' }] });
+        await model.reconcile();
+        assert.equal(queryEncodingMetrics.frames - frames, 1, 'only the owning subscription receives a frame');
+        await t.waitFor(() => assert.ok(delivered, String(rpcError ?? "Expected terminal row")), { timeout: 5000, interval: 5 });
+        assert.deepEqual(counts, { snapshots: 1, polls: 1, notifications: 1 });
+        assert.equal(service.metrics().reconciles - reconciles, 1);
+    } finally {
+        for (const close of closeViews) close();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        await service.close();
+        await model.close();
+        lease.release();
+        if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previous;
+        rmSync(root, { recursive: true, force: true });
     }
 });
 

@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
 import { commandAvailable } from "pi-better-goal/src/command-binding.ts";
-import { restoredWorkflowMatches, workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
+import { currentWorkflowOwner, restoredWorkflowMatches, workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
@@ -491,8 +491,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     scheduleCompletedPlanClear();
   };
 
+  const inheritedChecklist = (ctx: ExtensionContext): PlanSnapshot | null => {
+    if (!currentPlan || !outcome?.goalId) return null;
+    const entries = ctx.sessionManager.getBranch();
+    const goal = reconstructGoalSnapshot(entries);
+    if (goal?.goalId !== outcome.goalId || goal.status !== "active" || goal.command?.source !== "skill") return null;
+    const owner = currentWorkflowOwner(entries);
+    const binding = goal.workflowBinding === undefined ? currentWorkflowOwner(entries, goal.goalId) : goal.workflowBinding;
+    return owner && binding?.name === owner.name && binding.path === owner.path ? currentPlan : null;
+  };
+
   const persistPlan = (plan: PlanSnapshot): void => {
-    clearWorkflowPlan();
     currentPlan = plan;
     pi.appendEntry(EXTENSION_NAME, planSetEntry(plan));
     refresh(true);
@@ -702,8 +711,17 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         const prior = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
         if (prior?.goalId === reopenedGoalId) todoOwner = reopeningPlanOwner(pi, ctx, prior);
       }
-      if (input.todo !== undefined && todoOwner) throw new Error(`${todoOwner} owns the task plan. Send workflow instead of todo.`);
-      const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
+      const inherited = input.todo && owner && !input.newTask && !input.goal ? inheritedChecklist(ctx) : null;
+      let steps = input.todo;
+      if (steps && todoOwner) {
+        if (!inherited || steps.length !== inherited.steps.length || !steps.every((step, i) => {
+          const saved = inherited.steps[i]!;
+          return step.step === saved.step && (step.id === undefined || step.id === saved.id)
+            && (step.dependsOn === undefined || JSON.stringify(step.dependsOn) === JSON.stringify(saved.dependsOn ?? []));
+        })) throw new Error(`${todoOwner} owns the task plan. Send workflow instead of todo.`);
+        steps = steps.map((step, i) => ({ ...inherited.steps[i]!, status: step.status }));
+      }
+      const replacement = steps?.length ? replacePlan(input.newTask ? null : currentPlan, steps, input.explanation ?? inherited?.explanation) : null;
       const detachOnCommit = input.newTask && ledgerId !== null;
       // Commit task memory only after the requested checklist or workflow operation succeeds.
       const commitOutcome = (): void => {
@@ -777,15 +795,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           },
         };
       }
-      if (owner) {
-        throw new Error(`${owner} owns the task plan. Send workflow instead of plan; include path and revision to bind its persisted task plan.`);
-      }
       if (input.todo === undefined) throw new Error("todo is required: send the full list of steps.");
       if (!replacement) {
         clearWorkflowPlan(); clearPlan(); commitOutcome();
         return { content: [{ type: "text", text: "Todo cleared." }], details: { ok: true, goal: outcome, outcome } };
       }
       const plan = replacement;
+      if (!inherited) clearWorkflowPlan();
       persistPlan(plan);
       commitOutcome();
       const progress = planProgress(plan);
@@ -858,6 +874,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}${ledgerText ? `\n${ledgerText}` : ""}` }],
           details: { goal: outcome, outcome, hasPlan: true, plan: currentPlan, progress, ...ledgerFields },
         };
+      }
+      const inherited = owner && inheritedChecklist(ctx);
+      if (inherited) {
+        view.content[0]!.text += `\nOutcome checklist (use todo to update step status)\n${formatPlan(inherited)}`;
+        view.details.inheritedTodo = inherited;
       }
       if (input.ledger === undefined) return view;
       const query = executeLedgerQuery(input.ledger, ctx.cwd, ledgerId);
@@ -1032,9 +1053,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             request.ledgerBlocker = error instanceof Error ? error.message : String(error);
           }
         }
-        if (!request.workflowOwnsPlan) {
-          request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
-        }
+        request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
       }
       const state = request.goalId && sessionContext && readDynamic(sessionContext.sessionManager.getBranch(), request.goalId);
       if (state && "run" in state) {
