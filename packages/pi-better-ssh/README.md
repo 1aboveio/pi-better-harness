@@ -18,17 +18,11 @@ pi -e npm:pi-better-ssh
 
 ## Sandboxed Subagents
 
-Open `/sandbox` and expand **Subagents · Tools → Trusted → pi-better-ssh**.
-Toggle `ssh_profile`, `remote_bash`, and/or `ssh_mux` with Space, or toggle the
-group to select all three. They are off by default and require Subagents Network
-access On (profile operations can probe mux state too). Ctrl+S saves defaults.
-
-Enabling a tool automatically loads the `pi-better-ssh` extension into new
-sandboxed subagents and admits only the selected tools. No separate
-`toolExtensions` mapping is needed. Default launches include ticked tools; when
-passing an explicit spawn `tools` list, include the tools the task needs, for
-example `read,bash,ssh_profile,remote_bash`. Do not use `clean:true`, which is
-builtins-only. The parent's active SSH profile is not inherited; provide a host
+Select `ssh_profile`, `remote_bash` or `ssh_mux` in the subagent role, defaults
+or spawn request. For example, use `tools: "read,bash,ssh_profile,remote_bash"`.
+The worker can load the active user-installed SSH provider or an explicit
+`toolExtensions` mapping. In `/sandbox`, enable Subagents Network access for
+these operations. A clean worker uses only builtins. The parent's active SSH profile is not inherited; provide a host
 or select a profile in the child.
 
 These are **trusted**, not guarded, tools: they run outside local task file,
@@ -93,11 +87,13 @@ A profile sets defaults for later `remote_bash` calls. `use` accepts a configure
 }
 ```
 
-Call `ssh_profile` with `status` to inspect the active profile or `clear` to remove it. A footer chip shows the active target, workdir, and whether its mux is up or down. An explicit `host`, `workdir`, or environment entry on `remote_bash` takes precedence over the corresponding profile default.
+Call `ssh_profile` with `status` to inspect the active profile or `clear` to remove it. An explicit `host`, `workdir`, or environment entry on `remote_bash` takes precedence over the corresponding profile default.
 
 ## ControlMaster
 
-`remote_bash` checks for a reusable ControlMaster and opens one when needed. Its ControlPath lives under the harness-owned `~/.pi/agent/ssh-control` directory, which is forced to mode `0700`; the socket key includes the connection identity and Pi session. A stale socket is removed and reopened once. Repeated commands for the same target and session reuse the master.
+On Windows, commands use independent SSH connections because native Windows OpenSSH does not support working ControlMaster sockets. Mux options from callers and SSH config are overridden. `ssh_mux status` reports mux down with an explanation, and `stop` has no master to stop. Linux and macOS retain connection reuse.
+
+`remote_bash` checks for a reusable ControlMaster and opens one when needed. It places the ControlPath under `ssh-control` in the Pi agent directory (usually `~/.pi/agent`). If the full socket path would exceed 100 bytes, it uses the per-user directory `/tmp/pi-ssh-<uid>`. The socket directory uses mode `0700`, and the socket key includes the connection identity and Pi session. A stale socket is removed and reopened once. Repeated commands for the same target and session reuse the master.
 
 Use `ssh_mux` with `status` or `stop` and either a target, the active profile, or `all:true` for masters observed in the current Pi process and session:
 

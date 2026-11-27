@@ -55,6 +55,34 @@ function recordingHost() {
   return { host, messages };
 }
 
+for (const urgent of [false, true]) for (const succeeds of [false, true]) {
+  test(`cancelled canonical batcher awaits ${urgent ? "urgent" : "ordinary"} ${succeeds ? "accepted" : "refused"} in-flight handoff`, async () => {
+    let accept!: () => void, refuse!: (error: Error) => void;
+    const handoff = new Promise<void>((resolve, reject) => { accept = resolve; refuse = reject; });
+    let sends = 0, receipts = 0;
+    const batcher = createCallbackBatcher({ sendMessage() { sends++; return handoff; } });
+    const notification = event("owned", { onDelivered: () => { receipts++; } });
+    let pending: boolean | Promise<boolean>;
+    if (urgent) pending = batcher.deliverUrgent({ ...notification, customType: "health", content: "attention" });
+    else { batcher.enqueue(notification); pending = batcher.flush(); }
+    assert.equal(sends, 1);
+    batcher.cancel();
+    let quiescent = false;
+    const completion = batcher.settled().then(() => { quiescent = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(quiescent, false, "cancel and a released owner cannot overtake a started handoff");
+    assert.equal(receipts, 0, "receipt cannot precede actual handoff acceptance");
+    if (succeeds) accept(); else refuse(new Error("recipient refused"));
+    assert.equal(await pending, succeeds);
+    await completion;
+    assert.equal(quiescent, true);
+    assert.equal(receipts, succeeds ? 1 : 0, "refused handoff cannot manufacture a receipt");
+    batcher.cancel();
+    await batcher.settled();
+    assert.equal(sends, 1, "settlement is observation, not a retry or fresh delivery");
+  });
+}
+
 function preferencesFixture(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), "callback-settings-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -945,6 +973,47 @@ test("successful handoffs retry failed receipt hooks without sending again", asy
   assert.equal(receipts, 2, "the urgent receipt is persisted after storage recovers");
   assert.equal(messages.length, 2);
   batcher.cancel();
+});
+
+test("one ordinary completion per run id, even when the status snapshot changes before delivery (#624)", async () => {
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 25, retryMs: 50 });
+
+  // The status is a snapshot of the enqueue moment (failure notes, observation gaps).
+  assert.equal(batcher.enqueue(event("sa_once", { status: "completed", onDelivered: () => delivered.push("first") })), true);
+  assert.equal(
+    batcher.enqueue(event("sa_once", { status: "completed; observation incomplete", onDelivered: () => delivered.push("second") })),
+    false,
+    "the same run id cannot be queued twice",
+  );
+  assert.equal(batcher.pendingCount(), 1);
+
+  assert.equal(await batcher.flush(), true);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]!.message.content.match(/id=sa_once \|/g)?.length, 1);
+  assert.match(messages[0]!.message.content, /^1 background completion is ready:/);
+  assert.deepEqual(delivered, ["first"]);
+
+  // A delivered run id stays receipted for every later status wording.
+  batcher.enqueue(event("sa_once", { status: "completed; action required" }));
+  assert.equal(await batcher.flush(), true);
+  assert.equal(messages.length, 1, "a delivered completion is never restated");
+});
+
+test("urgent notifications keep their transition in the identity key", async () => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 25, retryMs: 50 });
+  const urgent = (status: string) => ({
+    source: "subagent" as const, id: "sa_states", label: "worker", status,
+    customType: "subagent-health", content: `${status} transition`,
+  });
+
+  assert.equal(await batcher.deliverUrgent(urgent("orphaned")), true);
+  assert.equal(await batcher.deliverUrgent(urgent("lost")), true);
+  assert.equal(messages.length, 2, "distinct transitions of one run are distinct notifications");
+  assert.equal(await batcher.deliverUrgent(urgent("orphaned")), true);
+  assert.equal(messages.length, 2, "a repeated transition is receipted, not re-sent");
 });
 
 test("coalesces callback-enabled completions in stable enqueue order", async () => {

@@ -222,7 +222,18 @@ export class ForegroundSandboxController {
 
     /** The current effective status, recomputed from live runtime evidence. */
     status(): ForegroundSandboxStatus {
+        return this.#status("main");
+    }
+
+    /** Background launches use their own switch and the same safety checks as Main. */
+    backgroundStatus(): ForegroundSandboxStatus {
+        return this.#status("background");
+    }
+
+    #status(profile: "main" | "background"): ForegroundSandboxStatus {
         const support = describeSandboxSupport(this.#seams);
+        const permissions = this.#permissions?.[profile];
+        const enabled = profile === "main" ? this.isUserEnabled() : permissions?.enabled ?? this.isUserEnabled();
         const base = {
             projectRoot: this.#projectRoot,
             denyWrite: this.#permissions
@@ -232,10 +243,10 @@ export class ForegroundSandboxController {
                     ...(this.#projectRoot ? [join(this.#projectRoot, ".pi")] : []), ...this.#runtimePaths])
                 : this.#denyWrite,
             platform: support.platform,
-            readPolicy: this.isUserEnabled() && this.#permissions && (this.#permissions.main.projectFiles === "off" || this.#permissions.main.outsideProject === "off" || this.#permissions.main.storedCredentials === "off") ? "restricted" as const : "unrestricted" as const,
-            networkPolicy: this.isUserEnabled() && this.#permissions?.main.network === false ? "blocked" as const : "unrestricted" as const,
+            readPolicy: enabled && permissions && (permissions.projectFiles === "off" || permissions.outsideProject === "off" || permissions.storedCredentials === "off") ? "restricted" as const : "unrestricted" as const,
+            networkPolicy: enabled && permissions?.network === false ? "blocked" as const : "unrestricted" as const,
             ...(this.#permissions ? {
-                permissions: Object.freeze({ ...this.#permissions.main, enabled: this.isUserEnabled() }),
+                permissions: Object.freeze({ ...this.#permissions[profile], enabled }),
                 subagentPermissions: Object.freeze({ ...this.#permissions.subagents }),
                 subagentTools: Object.freeze({ applyPatch: this.#permissions.subagentTools.applyPatch,
                     trusted: Object.freeze(this.#permissions.subagentTools.trusted.map((tool) => Object.freeze({ ...tool }))) }) as Readonly<SubagentToolSettings>,
@@ -260,15 +271,17 @@ export class ForegroundSandboxController {
             });
         }
 
-        if (!this.isUserEnabled()) {
-            const explicitlyDisabled = this.#sessionOverride === false;
+        if (!enabled) {
+            const explicitlyDisabled = profile === "background" || this.#sessionOverride === false;
             return Object.freeze({
                 ...base,
                 state: explicitlyDisabled ? "disabled" : "inactive",
                 writableRoot: undefined,
                 backend: support.supported ? support.backend : undefined,
                 executable: support.supported ? support.executable : undefined,
-                reason: explicitlyDisabled
+                reason: profile === "background"
+                    ? "The Background tasks sandbox is off. Change it in /sandbox."
+                    : explicitlyDisabled
                     ? "A human turned the foreground sandbox off for this session with /sandbox off."
                     : support.supported
                       ? "The foreground sandbox is available but inactive by default. Use /sandbox on for this session or /sandbox default on to persist opt-in."
@@ -283,7 +296,6 @@ export class ForegroundSandboxController {
                 reason: this.#unsafeRootReason });
         }
         const projectRoot = this.#projectRoot;
-        const permissions = this.#permissions?.main;
         let runtimeAlias: string | undefined;
         try {
             runtimeAlias = permissions && [getAgentDir(), tmpdir(), getPackageDir()]
@@ -308,7 +320,8 @@ export class ForegroundSandboxController {
                 writableRoot: undefined,
                 backend: undefined,
                 executable: undefined,
-                reason: `${support.reason} ${FOREGROUND_SANDBOX_REMEDY}`,
+                reason: `${support.reason} ${profile === "main" ? FOREGROUND_SANDBOX_REMEDY
+                    : "Turn Background tasks off in /sandbox to run unconfined, or use a session that has a backend."}`,
             });
         }
 

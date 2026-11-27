@@ -61,8 +61,8 @@ function nextCursorOf(content) {
 }
 
 function incidentCursorOf(content) {
-    return String(content ?? "").match(/incidentCursor=(i1\.\S+)/)?.[1]
-        ?? String(content ?? "").match(/cursor=(i1\.\S+)/)?.[1];
+    return String(content ?? "").match(/incidentCursor=(i2\.\S+)/)?.[1]
+        ?? String(content ?? "").match(/cursor=(i2\.\S+)/)?.[1];
 }
 
 /** The answer text of one subagent_result page: after the header line, before the continuation. */
@@ -106,6 +106,8 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const bgLogs = await import("../../packages/pi-better-background-tasks/src/logs.ts");
     const bgFailures = await import("../../packages/pi-better-background-tasks/src/failures.ts");
     const { registerTools } = await import("../../packages/pi-better-background-tasks/src/tools.ts");
+    const { closeBackgroundObservation } = await import("../../packages/pi-better-background-tasks/src/work-observation.ts");
+    const { stopWorkObservation } = await import("../../packages/pi-better-subagents/work-observation.ts");
     const { createCallbackBatcher } = await import("../../packages/callback-batcher/index.ts");
 
     const origin = { cwd: fixtures.SYNTHETIC_CWD, sessionId: fixtures.SYNTHETIC_SESSION };
@@ -122,16 +124,19 @@ export async function collectBaseline({ phase = "before" } = {}) {
 
     const bgRegistered = {};
     const bgMessages = [];
-    registerTools({
-        on() {},
+    let shutdownBackground;
+    const backgroundApi = {
+        on(event, handler) { if (event === "session_shutdown") shutdownBackground = handler; },
         registerTool(tool) { bgRegistered[tool.name] = tool; },
         sendMessage(message, options) { bgMessages.push({ message, options }); },
-    });
+    };
+    registerTools(backgroundApi);
     const ctx = {
         cwd: fixtures.SYNTHETIC_CWD,
         sessionManager: { getSessionId: () => fixtures.SYNTHETIC_SESSION },
     };
 
+    try {
     const seeded = {
         success: fixtures.seedSubagentSuccess(subagentRegistry),
         failed: fixtures.seedSubagentFailed(subagentRegistry),
@@ -336,7 +341,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         const historyPages = [textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, history: true }, undefined, undefined, ctx))];
         for (let i = 0; i < 16; i += 1) {
             const last = historyPages.at(-1);
-            const next = last.includes("hasMore=true") ? last.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+            const next = last.includes("hasMore=true") ? last.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
             if (!next) break;
             historyPages.push(textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, cursor: next }, undefined, undefined, ctx)));
         }
@@ -592,7 +597,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
                 for (let i = 0; i < 32 && next; i += 1) {
                     const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.manyFailures.id, cursor: next }, undefined, undefined, ctx));
                     count(page);
-                    next = page.includes("hasMore=true") ? page.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+                    next = page.includes("hasMore=true") ? page.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
                 }
                 many.facts.omittedIncidentsRetrievable = seen.size === 12 && [...seen.values()].every((value) => value === 1);
             }
@@ -624,6 +629,14 @@ export async function collectBaseline({ phase = "before" } = {}) {
         cases,
         limitations: LIMITATIONS,
     };
+    } finally {
+        // Reviewed755 fixture lifetime, using this source's real SDK boundary.
+        try { await shutdownBackground?.({ type: "session_shutdown" }, ctx); }
+        finally {
+            try { closeBackgroundObservation(backgroundApi); }
+            finally { stopWorkObservation(); }
+        }
+    }
 }
 
 /** Where the committed BEFORE/AFTER captures live (#324 moved them out of the docs/ root). */

@@ -1,0 +1,26 @@
+Agents / Fixture Agent
+[Settings]   Instructions   Files
+Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list
+
+    Model     openai/gpt-4o-mini                                              inherited
+    Effort    medium                                                          inherited
+  > Skills    1 selected · /private/var/folders/hh/j9d9ym9d1n3b_lks9_4b5zx40  override
+              000gn/T/pi-scripts-test-8sxhO0/pi-agents-skills-8IERbb/skills/
+              review/SKILL.md
+
+  Model and effort are session edits. Skills save to the definition.
+
+  ID       agent.fixture
+  Scope    user
+  Role     role.fixture
+  Tier     (unset)
+  Actual   openai/gpt-4o-mini · off
+
+  Launch resolution
+  Preferred role-default model openai/gpt-4o-mini is in the foreground available set.
+
+Showing 1-16 of 16 lines
+
+Ctrl+S Save defaults
+
+Skills saved (user): agent.fixture · 1 selected

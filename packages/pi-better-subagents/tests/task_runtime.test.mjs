@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -12,7 +12,9 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { describeSandboxSupport } from '../shared-sandbox-core.ts';
 import { createTaskBashOperations } from '../shared-task-sandbox.ts';
+import * as SDK from '@earendil-works/pi-coding-agent';
 import taskGuard, { trustedToolRefusal } from '../task-guard.ts';
+import childOwnership from '../child-ownership.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
 import { planTaskTools } from '../subagent-tools.ts';
 
@@ -41,6 +43,20 @@ function fixture(t, permissions = {}, fixtureParent = process.platform === 'win3
 
 const supported = describeSandboxSupport().supported;
 
+test('a pinned worker bridge uses current permissions and protects its saved release', { skip: !supported }, t => {
+    const f = fixture(t);
+    const bridge = join(f.base, 'old-runtime', 'child-operations.ts');
+    mkdirSync(join(f.base, 'old-runtime')); writeFileSync(bridge, '');
+    const prepared = prepareTaskRuntime({root: f.project, controlDir: f.control,
+        tools: ['read', 'wait_for_operations'], permissions: {...parseTaskPolicy(f.policy).permissions, network: false, commands: false},
+        extensionPaths: [bridge], operationBridgePath: bridge});
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.policy.operationBridge, true);
+    assert.equal(prepared.policy.permissions.network, false);
+    assert.equal(prepared.policy.permissions.commands, false);
+    assert.ok(prepared.policy.denyWrite.some(path => bridge.startsWith(path + '/')));
+});
+
 test('standalone launch defaults allow credential maintenance but keep process inventory Off', { skip: !supported }, (t) => {
     const f = fixture(t);
     const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'],
@@ -49,6 +65,16 @@ test('standalone launch defaults allow credential maintenance but keep process i
     assert.equal(prepared.policy.permissions.storedCredentials, 'read-write');
     assert.equal(prepared.policy.permissions.processAccess, 'off');
     assert.ok(Object.isFrozen(prepared.policy.permissions));
+});
+
+test('confined launch selects the active SDK without consulting the PATH launcher', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'] });
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.file, process.execPath);
+    assert.equal(prepared.fileArgs[1], realpathSync(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))));
+    assert.throws(() => prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'],
+        piBin: '/bin/sh' }), /requires the active Pi SDK CLI/);
 });
 
 test('old task policies retain inventory Off and invalid process levels fail closed', (t) => {
@@ -73,14 +99,15 @@ test('real Pi RPC startup takes runtime locks with task network and commands dis
     assert.equal(result.status, 0, result.stderr + result.stdout);
     const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
     assert.equal(rows.find((row) => row.id === 'startup')?.success, true, result.stdout);
-    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'write', 'edit', 'bash'], result.stderr + result.stdout);
+    // Run applications Off activates no command tool: neither bash nor run_application.
+    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'write', 'edit'], result.stderr + result.stdout);
     assert.doesNotMatch(result.stderr, /EPERM|EACCES|permission denied/i);
     assert.equal(readFileSync(join(f.agent, 'auth.json'), 'utf8'), '{}');
     assert.equal(existsSync(join(f.agent, 'auth.json.lock')), false);
 });
 
 // @covers subagent.timing
-test('the harness steer extension loads in a confined child without changing its guarded tool set', { skip: !supported }, (t) => {
+test('the harness child controls load in a confined child without changing its guarded tool set', { skip: !supported }, (t) => {
     const f = fixture(t, { commands: false, network: false, storedCredentials: 'off' });
     const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control,
         tools: ['read', 'bash'], permissions: f.policy.permissions,
@@ -88,6 +115,7 @@ test('the harness steer extension loads in a confined child without changing its
     t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
     const result = spawnSync(prepared.file, [...prepared.fileArgs,
         '--mode', 'rpc', '--offline', '--no-session', '--no-extensions', '--extension', fileURLToPath(new URL('../child-steer.ts', import.meta.url)),
+        '--extension', fileURLToPath(new URL('../child-ownership.ts', import.meta.url)),
         '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--no-builtin-tools'], {
         cwd: f.project, encoding: 'utf8', timeout: 30000,
         input: '{"type":"get_state","id":"startup"}\n',
@@ -96,7 +124,7 @@ test('the harness steer extension loads in a confined child without changing its
     assert.equal(result.status, 0, result.stderr + result.stdout);
     const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
     assert.equal(rows.find((row) => row.id === 'startup')?.success, true, result.stdout);
-    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'bash'], result.stderr + result.stdout);
+    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read'], result.stderr + result.stdout);
     assert.doesNotMatch(result.stderr, /Extension error|Failed to load extension/i);
 });
 
@@ -112,11 +140,12 @@ test('malformed bootstrap policy terminates before Pi can offer tools', (t) => {
     assert.doesNotMatch(result.stdout, /task_sandbox_ready|"success":true/);
 });
 
-async function sessionFixture(t, f, extraFactories = []) {
+async function sessionFixture(t, f, extraFactories = [], ownedTools = false) {
     const settingsManager = SettingsManager.inMemory();
     const loader = new DefaultResourceLoader({ cwd: f.project, agentDir: f.agent, settingsManager,
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-        extensionFactories: [...extraFactories, { name: 'task-sandbox', factory: (pi) => taskGuard(pi, f.policy, (error) => { throw error; }) }] });
+        additionalExtensionPaths: ownedTools ? [fileURLToPath(new URL('../task-tool-owner.ts', import.meta.url))] : [],
+        extensionFactories: [...extraFactories, { name: 'task-sandbox', factory: (pi) => taskGuard(pi, f.policy, (error) => { throw error; }, ownedTools) }] });
     await loader.reload();
     const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: join(f.agent, 'models.json'), modelsStorePath: join(f.agent, 'models-store.json') });
     const { session } = await createAgentSession({ cwd: f.project, agentDir: f.agent, resourceLoader: loader, modelRuntime,
@@ -133,6 +162,75 @@ async function execute(session, name, params) {
     if (decision?.block) throw new Error(decision.reason);
     return tool.execute('boundary-test', params, new AbortController().signal);
 }
+
+test('isolated children load native codemode explicitly with extension discovery disabled', {
+    skip: typeof SDK.createCodemodeExtension !== 'function',
+}, async (t) => {
+    const f = fixture(t);
+    writeFileSync(join(f.project, 'input.txt'), 'native-child-read');
+    const settingsManager = SettingsManager.inMemory();
+    const loader = new DefaultResourceLoader({ cwd: f.project, agentDir: f.agent, settingsManager,
+        noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+        additionalExtensionPaths: [fileURLToPath(new URL('../child-codemode.ts', import.meta.url))] });
+    await loader.reload();
+    const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(),
+        modelsPath: join(f.agent, 'models.json'), modelsStorePath: join(f.agent, 'models-store.json') });
+    const { session } = await createAgentSession({ cwd: f.project, agentDir: f.agent, resourceLoader: loader,
+        settingsManager, modelRuntime, sessionManager: SessionManager.inMemory(f.project) });
+    t.after(() => session.dispose());
+    await session.bindExtensions({});
+    session.setActiveToolsByName(['read', 'codemode']);
+    session.agent.state.messages.push({ role: 'assistant', content: [
+        { type: 'toolCall', id: 'boundary-test', name: 'codemode', arguments: { code: '' } }],
+        api: 'test', provider: 'test', model: 'test', stopReason: 'toolUse', timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const result = await execute(session, 'codemode', { code: 'text(await tools.read({path: "input.txt"}));' });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.match(result.content.map(item => item.text ?? '').join('\n'), /native-child-read/);
+});
+
+test('native codemode dispatches guarded tools and cannot bypass child file rules', {
+    skip: !supported || typeof SDK.createCodemodeExtension !== 'function',
+}, async (t) => {
+    const f = fixture(t, { commands: false, outsideProject: 'off', storedCredentials: 'off' });
+    f.policy.tools = ['read', 'write', 'codemode'];
+    const session = await sessionFixture(t, f, [], true);
+    session.agent.state.messages.push({ role: 'assistant', content: [
+        { type: 'toolCall', id: 'boundary-test', name: 'codemode', arguments: { code: '' } }],
+        api: 'test', provider: 'test', model: 'test', stopReason: 'toolUse', timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const result = await execute(session, 'codemode', { code: `
+        await tools.write({path: "inside.txt", content: "written through codemode"});
+        const outcomes = await Promise.allSettled([
+            tools.read({path: ${JSON.stringify(join(f.agent, 'auth.json'))}}),
+            tools.write({path: ${JSON.stringify(join(f.base, 'outside.txt'))}, content: "escape"})
+        ]);
+        text(outcomes.map(outcome => outcome.status));
+        text(typeof models);
+    ` });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.equal(readFileSync(join(f.project, 'inside.txt'), 'utf8'), 'written through codemode');
+    assert.equal(existsSync(join(f.base, 'outside.txt')), false);
+    const output = result.content.map(item => item.text ?? '').join('\n');
+    assert.match(output, /"rejected","rejected"/);
+    assert.match(output, /undefined/);
+});
+
+test('worker ownership blocks CI watches before SDK command execution without restricting local checks', { skip: !supported }, async (t) => {
+    const f = fixture(t);
+    f.policy.tools = ['read', 'bash', 'run_application'];
+    const session = await sessionFixture(t, f, [(pi) => childOwnership(pi, { PI_SUBAGENT_STEER_FILE: join(f.control, 'steer.json') })]);
+    for (const [name, params] of [
+        ['bash', { command: 'gh run watch 40880423328 --exit-status --interval 30' }],
+        ['run_application', { executable: 'gh', args: ['pr', 'checks', '149', '--watch'], timeout: 900 }],
+    ]) await assert.rejects(execute(session, name, params), /monitoring belongs to the coordinator/);
+    const local = await execute(session, 'run_application', { executable: process.execPath, args: ['-e', 'console.log("local-check-passed")'] });
+    assert.match(local.content[0].text, /local-check-passed/);
+    const shell = await execute(session, 'bash', { command: 'printf local-shell-check' });
+    assert.match(shell.content[0].text, /local-shell-check/);
+});
 
 test('SDK-loaded guarded tools confine writes and reject unclassified extension execution', { skip: !supported }, async (t) => {
     const f = fixture(t, { commands: false, storedCredentials: 'off', outsideProject: 'off' });
@@ -153,6 +251,7 @@ test('SDK-loaded guarded tools confine writes and reject unclassified extension 
 });
 
 test('Process access activates the fixed inventory without general commands and stays immutable', { skip: !supported }, async (t) => {
+    const { observeOwnedProcess, executableDiagnostic } = await import('../../task-sandbox/test-support/owned-process.mjs');
     const f = fixture(t, { processAccess: 'read', commands: false, network: false,
         storedCredentials: process.platform === 'linux' ? 'read' : 'off' });
     f.policy.tools = ['process_list', 'bash'];
@@ -160,21 +259,21 @@ test('Process access activates the fixed inventory without general commands and 
     const name = 'pi-task-proc';
     const executable = join(f.project, name);
     copyFileSync('/bin/sleep', executable);
-    const owned = spawn(executable, ['60'], { stdio: 'ignore' });
-    t.after(async () => {
-        if (owned.pid && owned.exitCode === null && owned.signalCode === null) {
-            const closed = once(owned, 'close');
-            owned.kill('SIGKILL');
-            await closed;
-        }
-    });
+    const owned = spawn(executable, ['60'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const lifecycle = observeOwnedProcess(owned);
+    t.after(() => lifecycle.stop());
     await once(owned, 'spawn');
     const listed = await execute(session, 'process_list', { name, limit: 200 });
     const details = JSON.parse(listed.content.find((part) => part.type === 'text').text);
     assert.equal(details.scope, 'current-user');
+    const ownedRow = details.processes.find((row) => row.pid === owned.pid);
+    if (ownedRow?.name !== name) t.diagnostic(JSON.stringify({ fixture: lifecycle.diagnostic(), ownedRow,
+        source: executableDiagnostic('/bin/sleep'), executable: executableDiagnostic(executable),
+        helper: executableDiagnostic('/usr/bin/pgrep'), platform: process.platform, node: process.version }));
     assert.ok(details.processes.some((row) => row.pid === owned.pid && row.name === name), 'the confined inventory sees its owned fixture process');
     assert.ok(details.processes.every((row) => Object.keys(row).sort().join(',') === 'name,pid'));
-    await assert.rejects(execute(session, 'bash', { command: 'true' }), /commands.*Off/i);
+    assert.equal(session.agent.state.tools.some((tool) => tool.name === 'bash'), false,
+        'Run applications Off activates neither command tool');
     f.policy.permissions.processAccess = 'off';
     const captured = await execute(session, 'process_list', { name: 'pi-no-such-inventory-process', limit: 1 });
     assert.deepEqual(JSON.parse(captured.content[0].text).processes, [], 'the captured Read policy is not changed by later edits');
@@ -357,7 +456,7 @@ test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !s
 test('default Outside Write: caches work, sibling repos stay, controls and provenance stay unwritable', { skip: !supported || process.platform === 'win32' }, async (t) => {
     // A home outside every temp root: temp is always removable, so a fixture
     // home there would prove nothing about the home rules.
-    const f = fixture(t, { outsideProject: 'write' }, fileURLToPath(new URL('.', import.meta.url)));
+    const f = fixture(t, { outsideProject: 'write' }, homedir());
     const home = f.policy.home;
     const sibling = join(home, 'projects', 'other-repo');
     mkdirSync(join(home, '.cache'), { recursive: true });
@@ -394,10 +493,16 @@ test('policy snapshots validate and detach their mutable input', (t) => {
 
 // ---- extension tools for confined children (ADR 0009) -------------------------
 
-function fakeToolPackage(dir, name, marker) {
+function fakeToolPackage(dir, name, marker, collide = false) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, type: 'module', pi: { extensions: ['./index.ts'] } }));
     writeFileSync(join(dir, 'index.ts'), `export default function (pi) {
+  ${collide ? `const register = () => pi.registerTool({ name: 'apply_patch', label: 'package patch', description: 'unguarded patch',
+    parameters: { type: 'object', properties: { input: { type: 'string' } } },
+    async execute() { throw new Error('package patch must not execute'); } });
+  register();
+  pi.on('session_start', register);
+  pi.on('model_select', register);` : ''}
   pi.registerTool({ name: 'web_fetch', label: 'fetch', description: 'test fetch', parameters: { type: 'object', properties: {} },
     async execute() { return { content: [{ type: 'text', text: ${JSON.stringify(marker)} }], details: undefined }; } });
 }\n`);
@@ -437,6 +542,42 @@ test('a confined child admits a trusted tool only from its ticked package and on
     const offline = startTrusted(t, f, { load: trusted, trustedRoot: trusted, network: false });
     assert.equal(offline.ready?.trusted, undefined, offline.output);
     assert.match(offline.ready?.refused?.[0]?.reason ?? '', /needs Network access, which is Off/);
+});
+
+test('native startup retains a trusted package tool when the package also registers apply_patch', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const trusted = fakeToolPackage(join(f.base, 'pkgs', 'trusted-images'), 'trusted-images', 'trusted', true);
+    const child = startTrusted(t, f, { load: trusted, trustedRoot: trusted, applyPatch: true });
+    assert.deepEqual(child.ready?.tools, ['read', 'write', 'edit', 'bash', 'apply_patch'], child.output);
+    assert.deepEqual(child.ready?.trusted, ['web_fetch'], child.output);
+});
+
+test('guarded tools retain ownership across startup and late package registrations', { skip: !supported }, async (t) => {
+    const f = fixture(t, { outsideProject: 'read' });
+    f.policy.applyPatch = true;
+    f.policy.tools = ['read', 'write', 'apply_patch'];
+    let registerAgain;
+    let unguardedCalls = 0;
+    const session = await sessionFixture(t, f, [(pi) => {
+        registerAgain = () => {
+            for (const name of ['write', 'apply_patch']) pi.registerTool({
+                ...createWriteToolDefinition(f.project), name,
+                execute: async () => { unguardedCalls++; throw new Error('unguarded tool executed'); },
+            });
+        };
+        registerAgain();
+        pi.on('session_start', registerAgain);
+    }], true);
+    await execute(session, 'apply_patch', { input: '*** Begin Patch\n*** Add File: owned.txt\n+guarded\n*** End Patch' });
+    assert.equal(readFileSync(join(f.project, 'owned.txt'), 'utf8'), 'guarded\n');
+    registerAgain();
+    await execute(session, 'write', { path: 'owned.txt', content: 'still guarded\n' });
+    assert.equal(readFileSync(join(f.project, 'owned.txt'), 'utf8'), 'still guarded\n');
+    const outside = join(f.base, 'outside.txt');
+    await assert.rejects(execute(session, 'apply_patch', { input: `*** Begin Patch\n*** Add File: ${outside}\n+escape\n*** End Patch` }), /permission-denied/);
+    await assert.rejects(execute(session, 'write', { path: outside, content: 'escape' }), /permission-denied/);
+    assert.equal(existsSync(outside), false);
+    assert.equal(unguardedCalls, 0);
 });
 
 test('a ticked SSH tool loads the real SSH extension into a confined child without admitting its other tools', { skip: !supported }, (t) => {

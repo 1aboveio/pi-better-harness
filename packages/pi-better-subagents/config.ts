@@ -6,22 +6,34 @@
  *
  * `defaultModel: null` / absent → inherit the foreground model.
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
+ * `defaultSkills` absent → the child discovers the user-level skills catalog.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { toolPackage, supportsChildProvider } from "./shared-task-tools.ts";
 import { SELF_SPEC } from "./extensions.ts";
+import { installedPackage, packageRoot } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
-import type { TimingSettings } from "./timing.ts";
+import { normalizeSkillExposure } from "./skills.ts";
+import { validatedTimingMinutes, type TimingSettings } from "./timing.ts";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
 export interface SubagentConfig extends TimingSettings {
     /** Foreground delegation policy; /subagents mode overrides this for the current session. */
     delegationMode?: DelegationMode | null;
+    gitWorkspace?: "clone" | "worktree";
     defaultModel?: string | null;
     defaultTools?: string | null;
+    /**
+     * Skill exposure when neither the launch nor a catalog role/agent chooses
+     * one: absent/null keeps discovery, `[]` loads no skills, and absolute
+     * paths load exactly those skills. See `skills.ts`.
+     */
+    defaultSkills?: string[] | null;
     /** Default concurrency cap; /subagents cap overrides it for the current session. */
     maxConcurrent?: number | null;
     /**
@@ -33,6 +45,7 @@ export interface SubagentConfig extends TimingSettings {
     /**
      * Provider → extension package(s) that authenticate it. Model auth is not
      * tool-shaped: `xai/grok-4.5` needs pi-xai-oauth loaded whatever the tools.
+     * Entries here override built-in mappings, including Ollama Cloud and LiteLLM.
      */
     providerExtensions?: Record<string, string | string[]> | null;
     /**
@@ -73,7 +86,7 @@ export interface SubagentConfig extends TimingSettings {
 }
 
 /** Concurrency cap when config.json sets none. */
-export const DEFAULT_MAX_CONCURRENT = 4;
+export const DEFAULT_MAX_CONCURRENT = 6;
 
 export function isConcurrencyCap(value: unknown): value is number {
     return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -84,7 +97,7 @@ export function normalizeConcurrencyCap(value: unknown): number {
 }
 
 /** Built-in default tool set when config.json sets nothing. */
-export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch";
+export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch, codemode";
 /** Safe default for a hermetic (clean) child where extension tools don't exist. */
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
@@ -181,10 +194,56 @@ export function writeDelegationMode(mode: DelegationMode, path = configPath()): 
 }
 
 /** Save human-facing defaults together, preserving unrelated configuration. */
-export function writeSubagentSettings(settings: { delegationMode: DelegationMode; maxConcurrent: number }, path = configPath()): void {
+export function writeSubagentSettings(
+    settings: {
+        delegationMode: DelegationMode;
+        maxConcurrent: number;
+        gitWorkspace?: "clone" | "worktree";
+        maxMinutes?: number;
+        /** Omit to preserve the saved value; `null` explicitly records discovery. */
+        defaultSkills?: string[] | null;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        toolWaitMinutes?: number;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        stuckMinutes?: number;
+    },
+    path = configPath(),
+): void {
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
-    writeConfigSettings(settings, path);
+    const next: {
+        delegationMode: DelegationMode; maxConcurrent: number; maxMinutes?: number; defaultSkills?: string[] | null;
+        toolWaitMinutes?: number; stuckMinutes?: number; gitWorkspace?: "clone" | "worktree";
+    } = {
+        delegationMode: settings.delegationMode,
+        maxConcurrent: settings.maxConcurrent,
+    };
+    if (settings.gitWorkspace !== undefined) {
+        if (settings.gitWorkspace !== "clone" && settings.gitWorkspace !== "worktree") throw new Error("Unknown Git workspace mode.");
+        next.gitWorkspace = settings.gitWorkspace;
+    }
+    if (settings.maxMinutes !== undefined) {
+        next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
+    }
+    if (Object.hasOwn(settings, "defaultSkills")) {
+        if (settings.defaultSkills === null) {
+            next.defaultSkills = null;
+        } else {
+            const skills = normalizeSkillExposure(settings.defaultSkills, "defaultSkills");
+            if (skills === undefined) throw new Error("defaultSkills must be an array of paths or null for discovery.");
+            if (skills.some((entry) => !isAbsolute(entry))) {
+                throw new Error("defaultSkills paths must be absolute so every child resolves the same files.");
+            }
+            next.defaultSkills = skills;
+        }
+    }
+    if (settings.toolWaitMinutes !== undefined) {
+        next.toolWaitMinutes = validatedTimingMinutes(settings.toolWaitMinutes, "toolWaitMinutes");
+    }
+    if (settings.stuckMinutes !== undefined) {
+        next.stuckMinutes = validatedTimingMinutes(settings.stuckMinutes, "stuckMinutes");
+    }
+    writeConfigSettings(next, path);
 }
 
 function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
@@ -198,6 +257,48 @@ function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): v
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */
 export function normalizeTools(list: string): string {
     return list.split(",").map((t) => t.trim()).filter(Boolean).join(",");
+}
+
+export const ORDINARY_TOOL_PROVIDERS: Readonly<Record<string, string>> = {
+    apply_patch: join(selfDir(), "child-apply-patch.ts"),
+    process_list: join(selfDir(), "child-process-list.ts"),
+};
+
+/** Check the owning package even when a mapping points directly to one of its files. */
+export function supportedChildEntrypoint(name: string, pkg: string, path: string): boolean {
+    return supportsChildProvider(name, pkg, packageRoot(path) ?? path);
+}
+
+/** Capture exact user-installed entrypoints already active in the foreground. */
+export function activeChildProviders(pi: Pick<ExtensionAPI, "getActiveTools" | "getAllTools">): Record<string, string> {
+    const active = new Set(pi.getActiveTools?.() ?? []);
+    const paths = new Map<string, string>();
+    const seen = new Set<string>();
+    for (const tool of pi.getAllTools?.() ?? []) {
+        if (!active.has(tool.name)) continue;
+        // The SDK reports active names. Conflicting registrations have no unique owner.
+        if (seen.has(tool.name)) { paths.delete(tool.name); continue; }
+        seen.add(tool.name);
+        if (tool.sourceInfo?.scope !== "user") continue;
+        const owner = toolPackage(tool);
+        if (!owner || !supportsChildProvider(tool.name, owner.package, owner.root)) continue;
+        try {
+            const path = realpathSync(tool.sourceInfo.path);
+            if (!statSync(path).isFile() || !supportedChildEntrypoint(tool.name, owner.package, path)) continue;
+            paths.set(tool.name, path);
+        } catch { /* An unavailable entrypoint cannot supply a new worker. */ }
+    }
+    return Object.fromEntries(paths);
+}
+
+export function ordinaryChildConfig(config: SubagentConfig, activeProviders: Record<string, string> = {}): SubagentConfig {
+    const packaged = config.toolExtensions === null ? undefined : bundledConfig().toolExtensions;
+    return { ...config, toolExtensions: { ...activeProviders, ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
+}
+
+export function addEditablePatch(names: string[], excluded: ReadonlySet<string>): void {
+    const editable = names.some(name => (name === "edit" || name === "write") && !excluded.has(name));
+    if (editable && !excluded.has("apply_patch") && !names.includes("apply_patch")) names.push("apply_patch");
 }
 
 /** This package's own root — the extension dir, which is also `self`. */
@@ -221,10 +322,13 @@ function piAgentDir(): string {
  * a missing dependency instead of silently launching a child without it.
  * (`-e` accepts either a package directory or an entrypoint file — verified.)
  */
-export function resolveExtensionPath(spec: string): string | undefined {
+export function resolveExtensionPath(spec: string, declaringRoot?: string): string | undefined {
     if (spec === SELF_SPEC) return selfDir();
     const path = spec.startsWith("npm:")
-        ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
-        : spec;
-    return existsSync(path) ? path : undefined;
+        ? (declaringRoot && installedPackage(spec.slice(4), [declaringRoot])) ?? (existsSync(join(piAgentDir(), "npm", "node_modules", spec.slice(4)))
+            ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
+            : installedPackage(spec.slice(4), [declaringRoot, join(piAgentDir(), "npm"), selfDir(),
+                join(piAgentDir(), "npm", "node_modules", "pi-better-harness")]))
+        : declaringRoot && !spec.startsWith("/") ? join(declaringRoot, spec) : spec;
+    return path && existsSync(path) ? path : undefined;
 }

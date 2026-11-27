@@ -1,0 +1,386 @@
+/**
+ * pi-better-sandbox - an opt-in write sandbox for foreground tool execution.
+ *
+ * Installing this package loads an extension; it ships no launcher, so users
+ * keep starting Pi with plain `pi`. While enabled, the built-in `bash` tool and
+ * user-entered `!` / `!!` commands run under macOS Seatbelt or Linux Bubblewrap
+ * with one writable root — the canonical directory Pi was launched from — and
+ * the packaged write-denied paths carved back out of it. Selected file,
+ * credential-file, command, and network permissions apply to protected tools.
+ * File-tool syscalls and shell commands run under the same kernel policy.
+ *
+ * This is a tool-execution sandbox. Pi's own process, `pi.exec` calls, and
+ * unrelated third-party extension code are not confined by it.
+ */
+
+import { dirname, isAbsolute, join } from "node:path";
+
+import { fileURLToPath } from "node:url";
+import {
+    SettingsManager,
+    type ExtensionAPI,
+    type ExtensionCommandContext,
+    type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+
+import {
+    createSandboxCommandHandler,
+    SANDBOX_COMMAND_DESCRIPTION,
+    SANDBOX_COMMAND_NAME,
+    sandboxArgumentCompletions,
+} from "./commands.ts";
+import { createBackgroundAdmission, isBackgroundLaunch } from "./background-admission.ts";
+import { DenyRuleManager } from "./deny-rules.ts";
+import {
+    FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
+    publishForegroundSandboxPolicy,
+} from "./events.ts";
+import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
+import { toolPackage } from "./shared-task-tools.ts";
+import { writeSandboxDefault } from "./preferences.ts";
+import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
+import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
+import { openPermissionsPage } from "./permissions-page.ts";
+import { appendSessionPermissions, readSessionPermissions } from "./session-permissions.ts";
+import { createSubagentExecutionAdmission } from "./subagent-admission.ts";
+
+import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
+import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
+
+export default function piBetterSandbox(pi: ExtensionAPI): void {
+    const controller = new ForegroundSandboxController();
+    let permissionSource: ReturnType<typeof loadPermissionSettings>["source"] | "this session branch" | "settings load failed" | "session not started" = "session not started";
+    const mainProcessAccess = () => {
+        const main = controller.permissionSettings()?.main;
+        return main && !main.enabled ? "read" : main?.processAccess ?? "off";
+    };
+    const mainProcessSummary = () => {
+        const main = controller.permissionSettings()?.main;
+        const setting = main?.processAccess === "read" ? "Read" : "Off";
+        if (main && !main.enabled) {
+            return `Main process_list: allowed by policy (Main confinement Off; retained Process access: ${setting}, from ${permissionSource}).`;
+        }
+        return `Main process_list: Process access is ${setting} (${permissionSource}).`;
+    };
+    const mainProcessOffHelp = () => permissionSource === "session not started"
+        ? "Wait for Pi to finish starting the session."
+        : "Set Main > Process access to Read in /sandbox; edits here apply without a restart. Subagents settings do not control this tool.";
+    let diagnosticsWarning: ((error: unknown) => void) | undefined;
+    const diagnostics = new SandboxDiagnostics({ context: "foreground",
+        version: diagnosticPackageVersion(new URL("./package.json", import.meta.url)),
+        policy: () => controller.status(), backend: () => controller.status().backend,
+        onError: (error) => diagnosticsWarning?.(error),
+    });
+
+    // Pi's shell setting is only readable once a session directory is known, so
+    // it is resolved lazily and re-read on every session start.
+    let shellPath: string | undefined;
+    const ownEntry = fileURLToPath(import.meta.url);
+    const backgroundAdmission = createBackgroundAdmission(pi, () => {
+        const profile = controller.backgroundStatus().permissions;
+        return profile?.enabled === true && (profile.shell === false || profile.commandTimeoutSeconds != null);
+    });
+    const subagentExecutionAdmission = createSubagentExecutionAdmission(pi);
+    const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        admitExtensionTool: (name, input, sourcePath) => backgroundAdmission(name, input, sourcePath) !== undefined,
+        processAccess: mainProcessAccess,
+        processAccessDenied: () => `Sandbox: ${mainProcessSummary()} ${mainProcessOffHelp()}`,
+        diagnostics,
+        trustedSources: [ownEntry,
+            join(dirname(ownEntry), "../../extensions/sandbox/index.ts"),
+            join(dirname(ownEntry), "../pi-better-harness/extensions/sandbox/index.ts")],
+    });
+
+    pi.on("tool_call", (event, ctx) => {
+        const block = (reason: string, resource: "command-execution" | "network-access" | "tool-admission" | "project-files") => {
+            diagnostics.observe({ tool: event.toolName, operation: { input: event.input, cwd: ctx?.cwd ?? controller.status().projectRoot }, resource, basis: "policy-refusal", outcome: "denied" });
+            return { block: true, reason };
+        };
+        const status = controller.status();
+        const name = event.toolName;
+        const backgroundLaunch = isBackgroundLaunch(name, event.input);
+        const admission = backgroundAdmission(name, event.input);
+        const child = status.subagentPermissions;
+        if ((name === "subagent_spawn" || name === "subagent_spawn_batch") && child?.enabled && child.commands &&
+            (child.shell === false || child.commandTimeoutSeconds != null) && !subagentExecutionAdmission(name)) {
+            return block("Sandbox: subagent launch has no compatible application execution adapter. Update pi-better-subagents before using Shell scripts or Command time limit restrictions.", "tool-admission");
+        }
+        // Main Off must not let an old consumer ignore the independent Background profile.
+        if (backgroundLaunch && controller.backgroundStatus().permissions?.enabled && admission !== "local-launch") {
+            return block("Sandbox: background launch has no verified compatible local adapter. Update the background extension; structured SSH is not a confined execution surface.", "tool-admission");
+        }
+        if (status.state === "inactive" || status.state === "disabled") return;
+        const permissions = status.permissions;
+        if (!permissions) return;
+        const launch = ["bash", "run_application", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch"].includes(name) || backgroundLaunch;
+        if (!permissions.commands && ((launch && admission !== "local-launch") || name === "grep" || name === "find")) {
+            return block("Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.", "command-execution");
+        }
+        if (!permissions.network && (["web_search", "web_fetch", "firecrawl_scrape", "firecrawl_extract", "remote_bash", "mcp", "mcpScript"].includes(name) || name.startsWith("mcp__") ||
+            (launch && Boolean((event.input as { ssh?: unknown }).ssh)))) {
+            return block("Sandbox: Network access is Off.", "network-access");
+        }
+        if (name === "powershell" || name === "remote_bash") {
+            return block(`Sandbox: ${name} is not a confined execution surface; use bash (including ssh through bash).`, "tool-admission");
+        }
+        if (status.readPolicy === "restricted" && ["grep", "find", "ls"].includes(name)) {
+            return block("Sandbox: use the guarded read tool or a confined bash command for restricted file access.", "project-files");
+        }
+    });
+
+    const announce = (status: ForegroundSandboxStatus): void => {
+        publishForegroundSandboxPolicy(pi.events, status, controller.backgroundStatus());
+    };
+
+    // A consumer that loaded after the last publication can ask for the current
+    // policy instead of waiting for the next change.
+    pi.events.on(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => {
+        publishForegroundSandboxPolicy(pi.events, controller.status(), controller.backgroundStatus());
+    });
+
+    // The one validation and persistence path for write-deny rules, shared by
+    // `/sandbox deny ...` and the `/sandbox rules` page.
+    const denyRules = new DenyRuleManager({ controller, onStateChange: announce });
+
+    const restorePermissions = (ctx: ExtensionContext): void => {
+        // Session policy takes precedence over global defaults. Never skip an
+        // invalid latest entry to recover an older, potentially broader policy.
+        let settings = defaultSandboxPermissions();
+        let hasSessionPolicy = false;
+        try {
+            const sessionPermissions = readSessionPermissions(ctx);
+            hasSessionPolicy = sessionPermissions !== undefined;
+            if (sessionPermissions) {
+                settings = sessionPermissions;
+                permissionSource = "this session branch";
+            } else {
+                const loaded = loadPermissionSettings();
+                settings = loaded.settings;
+                permissionSource = loaded.source;
+            }
+        } catch (error) {
+            permissionSource = "settings load failed";
+            controller.beginSession(ctx.cwd, true);
+            const message = `Sandbox permissions could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
+            settings.main.enabled = true;
+            settings.main.commands = false;
+            settings.background.enabled = true;
+            settings.background.commands = false;
+            settings.subagents.commands = false;
+            settings.subagentTools = { applyPatch: true, trusted: [] };
+            controller.setPermissionSettings(settings);
+            announce(controller.block(message));
+            ctx.ui.notify(message, "error");
+            return;
+        }
+        controller.beginSession(ctx.cwd, settings.main.enabled);
+        controller.protectRuntimePaths((pi.getAllTools?.() ?? [])
+            .map((tool) => tool.sourceInfo?.path).filter((path): path is string => typeof path === "string" && isAbsolute(path))
+            .map(runtimeCodeRoot));
+        controller.setPermissionSettings(settings);
+        if (!hasSessionPolicy) controller.applyDefault(settings.main.enabled);
+
+        // Then the rules are re-read and re-resolved, because the same global
+        // template set means different absolute paths in a different project.
+        // Loading announces the session's first policy, so consumers never see
+        // the pre-rule state.
+        const report = denyRules.load();
+        const status = report.status;
+
+        if (report.overrideProblem !== undefined) {
+            ctx.ui.notify(report.overrideProblem, "warning");
+        }
+        for (const rule of report.inert) {
+            ctx.ui.notify(
+                `Write-deny rule ${rule.template} is not applied in this project: ${rule.reason}`,
+                "warning",
+            );
+        }
+        if (status.state !== "enabled" && status.state !== "inactive") {
+            ctx.ui.notify(
+                `Foreground sandbox ${status.state}: ${status.reason}`,
+                status.state === "disabled" ? "info" : "warning",
+            );
+        }
+    };
+
+    pi.on("session_start", (_event, ctx) => {
+        let warned = false;
+        diagnosticsWarning = () => {
+            if (warned) return;
+            warned = true;
+            ctx.ui.notify("Sandbox diagnostics could not be recorded; collection has a gap. Enforcement is unchanged.", "warning");
+        };
+        shellPath = resolveShellPath(ctx.cwd);
+        boundary.register(ctx.cwd);
+        restorePermissions(ctx);
+    });
+    pi.on("session_tree", (_event, ctx) => restorePermissions(ctx));
+
+    const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+        await openPermissionsPage(ctx, {
+            getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+            toolLoading: () => {
+                const active = new Set(pi.getActiveTools());
+                const main = pi.getAllTools().filter(tool => active.has(tool.name))
+                    .map(tool => ({ name: tool.name, provider: toolPackage(tool)?.package ?? tool.sourceInfo?.source ?? "Pi" }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                let subagents: { name: string; provider: string }[] | undefined;
+                pi.events.emit("pi-better-subagents:default-tool-loading", {
+                    reply: (rows: { name: string; provider: string }[]) => { subagents = rows; },
+                });
+                return subagents === undefined ? { main } : { main, subagents };
+            },
+            change: (settings) => {
+                appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
+                announce(controller.setPermissionSettings(settings));
+            },
+            save: (settings) => writePermissionSettings(settings),
+            // Report every capability loosened by saving these defaults.
+            loosening: (settings) => {
+                let previous: SandboxPermissionSettings;
+                try { previous = readPermissionSettings(); } catch { previous = defaultSandboxPermissions(); }
+                return describeLoosening(previous, settings);
+            },
+        });
+    };
+    const contribution = { id: "sandbox", label: "Sandbox", command: "/sandbox", open: openSettings };
+    const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+    const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
+    registerSettings();
+
+    pi.on("session_shutdown", () => {
+        diagnosticsWarning = undefined;
+        if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
+        controller.dispose();
+    });
+
+    pi.registerCommand(SANDBOX_COMMAND_NAME, {
+        description: SANDBOX_COMMAND_DESCRIPTION,
+        getArgumentCompletions: sandboxArgumentCompletions,
+        handler: createSandboxCommandHandler({
+            controller,
+            denyRules,
+            onStateChange: announce,
+            setSessionEnabled: (enabled) => {
+                const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
+                settings.main.enabled = enabled;
+                appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
+                return enabled ? controller.enable() : controller.disable();
+            },
+            setDefault: (enabled) => {
+                const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
+                settings.main.enabled = enabled;
+                writePermissionSettings(settings);
+                writeSandboxDefault(enabled ? "on" : "off");
+                appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
+                return controller.setPermissionSettings(settings);
+            },
+            describeProcessAccess: (status) => [
+                mainProcessSummary(),
+                status.state === "unavailable" || status.state === "failed" ? "Main sandbox cannot launch the inventory helper." : undefined,
+                mainProcessAccess() === "off" ? mainProcessOffHelp() : undefined,
+                status.state === "enabled" && status.backend === "macos-seatbelt" ? "macOS Seatbelt can deny absolute /bin/ps even with Process Read." : undefined,
+                "Edits in this session apply immediately. Saved defaults from another session apply to new sessions; a saved branch policy survives reload.",
+            ].filter(Boolean).join("\n"),
+            openPermissions: openSettings,
+        }),
+    });
+}
+
+function resolveShellPath(cwd: string): string | undefined {
+    try {
+        return SettingsManager.create(cwd).getShellPath();
+    } catch {
+        // A malformed or unreadable settings file must not decide whether the
+        // sandbox runs; fall back to Pi's own shell resolution.
+        return undefined;
+    }
+}
+
+export { footerTone, formatFooterStatus, formatSandboxReport } from "./status.ts";
+export {
+    FOREGROUND_SANDBOX_REMEDY,
+    ForegroundSandboxBlockedError,
+    ForegroundSandboxController,
+    type ForegroundSandboxLaunchPlan,
+    type ForegroundSandboxSeams,
+    type ForegroundSandboxState,
+    type ForegroundSandboxStatus,
+} from "./state.ts";
+export {
+    FOREGROUND_SANDBOX_POLICY_CHANNEL,
+    FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
+    type ForegroundSandboxPolicyEvent,
+    type BackgroundSandboxPolicy,
+    freezePolicy,
+    publishForegroundSandboxPolicy,
+    requestForegroundSandboxPolicy,
+    subscribeForegroundSandboxPolicy,
+} from "./events.ts";
+export {
+    clearDenyRuleOverride,
+    DENY_RULES_FILE_NAME,
+    DENY_RULES_FORMAT_VERSION,
+    type DenyRule,
+    DenyRuleError,
+    type DenyRuleErrorKind,
+    DenyRuleManager,
+    type DenyRuleManagerDeps,
+    type DenyRuleReport,
+    denyRuleOverridePath,
+    type DenyRuleSeams,
+    type DenyRuleStoreSeams,
+    describeDenyRules,
+    formatDenyRuleReport,
+    type InertDenyRule,
+    normalizeDenyRuleTemplate,
+    partitionDenyRules,
+    planDenyRuleAddition,
+    planDenyRuleRemoval,
+    readDenyRuleOverride,
+    writeDenyRuleOverride,
+} from "./deny-rules.ts";
+export {
+    readSandboxDefault,
+    SANDBOX_PREFERENCES_FILE_NAME,
+    SANDBOX_PREFERENCES_FORMAT_VERSION,
+    SandboxPreferenceError,
+    sandboxPreferencesPath,
+    type SandboxDefaultMode,
+    type SandboxPreferenceSeams,
+    writeSandboxDefault,
+} from "./preferences.ts";
+export { openSandboxRulesPage, RULES_PAGE_NO_UI_REJECTION } from "./rules-page.ts";
+export {
+    describeUnsafeProjectRoot,
+    PACKAGED_DENY_WRITE_TEMPLATES,
+    resolveDenyWriteTemplate,
+    resolveDenyWriteTemplates,
+    unsafeProjectRoots,
+} from "./policy.ts";
+export {
+    createForegroundWriteGuard,
+    createSandboxedEditOperations,
+    createSandboxedWriteOperations,
+    type DeniedWriteAccess,
+    ForegroundSandboxWriteDeniedError,
+    type ForegroundWriteGuard,
+    type MutationKind,
+    type SandboxedEditOperationsOptions,
+    type SandboxedWriteOperationsOptions,
+} from "./files.ts";
+export {
+    buildSandboxedShellCommand,
+    createSandboxedBashOperations,
+    quoteForPosixShell,
+} from "./shell.ts";
+export {
+    createSandboxCommandHandler,
+    SANDBOX_COMMAND_DESCRIPTION,
+    SANDBOX_COMMAND_NAME,
+    sandboxArgumentCompletions,
+} from "./commands.ts";

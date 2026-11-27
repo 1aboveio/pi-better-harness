@@ -1,6 +1,6 @@
 # pi-better-harness
 
-Meta package for the core Pi Better Harness extensions.
+Harness-owned task context and Todo, alongside the core Pi Better Harness extensions.
 
 Use it to manage the tools used most often in Pi:
 
@@ -8,14 +8,14 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
-- `pi-better-goal` for current-goal tracking and background-aware continuation
-- `pi-better-plan` for persistent structured plans and explicit checklist progress
+- `pi-better-goal` for explicit triggers and background-aware continuation
+- Harness Goal & Todo for persistent Goals, optional checklists, and context reminders
 
 `pi-better-read-aloud` is intentionally not included yet.
 
 ## Install
 
-Install every harness extension as a standalone Pi package:
+Install the component packages and the Harness-owned runtime:
 
 ```sh
 npx pi-better-harness install
@@ -27,7 +27,122 @@ Use project-local Pi settings:
 npx pi-better-harness install --local
 ```
 
-For backward-compatible bundled loading, use `pi install npm:pi-better-harness`.
+The installer keeps component identities, loads only Harness-owned extensions from
+its bundle, and removes a retired Plan registration in the selected scope.
+Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
+
+Normal bundle installs and updates mask a separately installed `pi-better-plan`
+whenever Harness is loaded. Its tools, `/plan`,
+widget, and prompt hooks are not registered with the session. Both load orders
+are covered; its factory listeners are cleaned up before Todo starts. The old
+registration and cached files can remain, but settings and saved histories are
+untouched. Removing or excluding Harness allows the standalone package to load
+again. The explicit installer removes the selected registration instead.
+
+<a id="outcome--todo"></a>
+## Goal & Todo
+
+Save a Goal using `update_todo` with a `goal` object containing an `objective`,
+optional `doneWhen` criteria and `boundaries`. Supply `todo` to record the steps.
+Use `newTask: true` when switching to unrelated work. The previous `outcome`
+field remains an alias for `goal`. Old sessions and settings work without migration.
+
+The panel shows the objective and task progress. `goal saved` means work is
+recorded and ready to start. `/goal resume` starts or resumes it, including
+an existing Todo that has never run as a Goal. `/goal pause` pauses the current
+Goal and keeps the checklist. `/todo expand` and `/todo collapse` control
+how many steps are visible. Use **Auto-start Goals** in `/harness-settings` to enable automatic execution. It defaults to Off.
+
+The compact widget has one Todo heading, a caret after Todo, and the completion
+count on the left. Matching Goal status and its existing active-time clock appear
+on the right. The Goal objective appears as a single muted, truncated subtitle. The
+collapsed view shows up to five relevant rows; the expanded view shows all rows.
+Click to toggle. `/todo` reveals the compact overview and
+returns it to automatic display; `/todo expand`, `/todo collapse`, `/todo hide`,
+and `/todo show` control its display. Use `get_todo` to read the full objective, acceptance criteria, boundaries and plan. A Goal can exist without a
+checklist. A finished or cleared checklist does not complete or remove the Goal.
+
+When the Goal changes, Harness records a hidden update on the next agent turn.
+Updates are deduplicated against the current branch. Checking off a Todo step
+updates the checklist without sending another Goal message.
+
+Click a subagent or background-task row to open its existing navigator details.
+Enter and keyboard controls remain available, and editor input stays passive.
+Harness packages do not write to Pi's status bar. Goal holds and resume
+instructions remain available through `/goal`; permission checks are unchanged.
+
+Workflow task plans retain their own schema, revision checks and source requirements.
+Use `newTask: true` with a Goal when switching to unrelated work; omit it for
+corrections to the current task. Session state follows the active branch and survives
+compaction and reload. Existing Plan histories remain readable as Todo.
+
+### Durable work ledgers
+
+**Project work ledger** is a separate setting, default Off. When enabled, the same `update_todo` / `get_todo` interface keeps a
+high-level work record that is independent of session history:
+
+- `update_todo` with a `ledger` payload creates or updates a ledger, or attaches
+  and detaches the session reference.
+- `get_todo` with a `ledger` selector lists this project's ledgers or reads one by
+  id. Without a selector, `get_todo` returns the common work-plan view and, when
+  associated, the current ledger summary.
+- A ledger update requires the revision last read and changes only the named items
+  and fields. A stale revision is refused atomically. Omitted items, completed
+  evidence, and history entries are preserved.
+
+Items carry a stable id, status, completion conditions, progress, next step,
+blocker and recovery condition, and completion evidence. Completed items keep
+their evidence, and every accepted revision adds a history entry. Completing an
+item requires evidence; marking one blocked requires both a blocker and a
+recovery condition. The overall ledger cannot complete while items remain open.
+
+Ledgers are stored under the Pi agent directory, keyed by the canonical project
+directory, not in the session or repository. Listing or creating one does not
+associate it with the session, inject old work, start a Goal, or change the
+session Goal and Todo, workflow plan, or display mode. Session association
+and recovery reminders are separate work. Turning the ledger setting off removes
+ledger views, queries, mutations, and hints, but never deletes records or changes
+Goal pause/authorization state. Re-enabling restores the association and hints
+from the stored record.
+
+Workflow-owned rows stay canonical: their stage, status, and delivery projection
+continue to come from `workflow-plan.ts` and task-plan.json. The ledger adds the
+overall goal and continuity context without mirroring or replacing those rows.
+Ordinary Todo items do not acquire implement/review/CI stages.
+
+### Associate a ledger with a session
+
+Use `/ledger` to inspect and explicitly select a durable record:
+
+- `/ledger list` shows this project's ledgers and marks the associated one.
+- `/ledger attach <id>` selects an existing ledger for this session.
+- `/ledger switch <id>` replaces the current selection with another ledger.
+- `/ledger detach` removes the session reference but keeps the ledger.
+- `/ledger show` prints the associated ledger while the ledger setting is on.
+
+Attaching stores only a reference. It does not copy the ledger, start a Goal,
+authorize old work, or alter permissions. Resuming the same session restores the
+reference and reads the current record again. A clean new session in the same
+project starts unassociated even when ledgers exist; `/ledger list` discovers
+them but does not adopt one. A fork or clone follows its copied branch and keeps
+the same reference without copying the ledger. Selecting a different ledger
+continues that same id, history, completed evidence, and revision sequence.
+
+With the ledger setting on, Harness adds a bounded reminder built from
+the durable record after compaction, resume, branch restoration, explicit attach,
+or enabling the setting. It lists the overall outcome, totals, and only a few
+unfinished items. Detaching or switching removes stale ledger reminders from the
+next model request. The reminder is context, not permission: confirm the current
+human request and the Goal's pause state before acting. Turning the ledger off stops its reminders. Hiding the Todo hides the ledger count and keeps the reference.
+
+The existing Todo surface gains one compact ledger line when an association
+exists, for example `ledger 1/3 complete · 2 open · next: Ship API`. It is not a
+second checklist or widget; workflow rows remain canonical. Completing the
+session Goal is refused while the associated ledger is active and has open
+high-level items. Closing those items does not complete the ledger automatically,
+and completing a Todo or workflow plan never completes an unfinished high-level
+outcome. While the ledger setting is off, `/ledger list` and `/ledger show`
+disclose no ledger content; `/ledger detach` can still clear the reference.
 
 ## Ordinary Startup
 
@@ -43,6 +158,27 @@ resume, fork, and reload. It ships no launcher. See
 [the sandbox package](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
 for the full policy.
 
+## Linked Worktrees
+
+When the working directory is inside a linked Git worktree (`git worktree add`),
+the worktree is the project context root. Pi sends the global `AGENTS.md` from the
+agent directory and context files at or below the worktree root, and leaves out
+files loaded from the main checkout or from any ancestor above the worktree. A
+worktree without its own context file therefore starts without the main checkout's
+file instead of inheriting it.
+
+Ordinary repositories keep every ancestor context file. `--no-context-files` still
+loads nothing, because the extension filters the loaded list and adds no rules of
+its own. Subagents keep the same boundary, including a worker launched inside a
+worktree.
+
+The boundary follows where Pi selected a file, not what a filename symlink points
+at: a worktree `AGENTS.md` that links to the main checkout stays local, an
+inherited main `AGENTS.md` that links into the worktree stays out, and the global
+file survives even when it links outside the agent directory. This needs a Pi host
+that rebuilds the prompt from `systemPromptOptions` after the hook (Pi 1.x). An
+older host keeps the prompt it loaded and stays unchanged.
+
 ## Included Tools
 
 After installation, Pi can use these model-callable tools:
@@ -54,13 +190,13 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| `pi-better-plan` | `update_plan`, `get_plan` |
+| Harness Goal & Todo | `update_todo`, `get_todo` — optional ledger payload/selector when Long-term work ledger is on |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
 ## Coordinated Execution
 
-For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
+For substantial work, Harness Todo can track the foreground coordinator's milestones. Workflows with their own records can continue to use them. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
 
 Use foreground tools for small, tightly coupled, or interactive work. Use `subagent_spawn` or `subagent_spawn_batch` only as permitted by the active `manual`, `adaptive`, or `coordinator` delegation mode. Manual forbids proactive subagents, not parallel foreground or background execution; an explicit user request or active workflow requirement may still authorize delegation. Use `bg_task_spawn` or `bg_task_watch` for independent long-running commands or waits. Continue unblocked foreground work after launch instead of polling workers.
 
@@ -102,7 +238,6 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
 ```
 
 ## Update Or Remove

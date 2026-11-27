@@ -2,8 +2,13 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
     existsSync,
+    lchmodSync,
+    lstatSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
+    readlinkSync,
+    realpathSync,
     rmSync,
     symlinkSync,
     utimesSync,
@@ -28,12 +33,15 @@ const {
     baseDir,
     logPathFor,
     orphanedTaskRuntimeProvenance,
+    recordLaunchAttempt,
     recordTaskRuntimeProvenance,
     runDir,
     sessionsDir,
     taskRuntimeProvenancePath,
     writeMeta,
 } = await import("../registry.ts");
+const { resultDir } = await import("../session-store.ts");
+const { readRetainedResult } = await import("../retained-result.ts");
 
 const DAY = new Date("2026-07-30T12:00:00").getTime();
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -60,8 +68,9 @@ function meta(id, overrides = {}) {
 }
 
 function writeSessionFile(name, mtimeMs) {
-    mkdirSync(sessionsDir(), { recursive: true });
-    const path = join(sessionsDir(), name);
+    const legacySessionDir = join(baseDir(), "sessions");
+    mkdirSync(legacySessionDir, { recursive: true });
+    const path = join(legacySessionDir, name);
     writeFileSync(path, "session\n");
     const seconds = mtimeMs / 1000;
     utimesSync(path, seconds, seconds);
@@ -69,6 +78,17 @@ function writeSessionFile(name, mtimeMs) {
 }
 
 describe("daily cleanup", () => {
+    it("keeps an old metadata-less directory while its launcher still owns it", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const id = "sa_preparing_1";
+        mkdirSync(runDir(id), { recursive: true });
+        recordLaunchAttempt(id);
+        const old = new Date(DAY - 10 * DAY_MS);
+        utimesSync(runDir(id), old, old);
+        runDailyCleanupOnce({ now: DAY, terminalRunRetentionMs: RETENTION });
+        assert.ok(existsSync(runDir(id)));
+    });
+
     it("runs at most once per local day and removes only old terminal tmp artifacts", () => {
         rmSync(baseDir(), { recursive: true, force: true });
 
@@ -201,17 +221,20 @@ describe("enforceRegistrySizeCapOnce", () => {
         assert.equal(entries.length, 3, "every run measured");
         assert.ok(entries.every((e) => e.bytes >= 4000), "bytes counted from disk");
 
-        // 12 KB of logs against a 9 KB cap, with the live run untouchable.
+        // Fit the newer and live directories, including path-dependent metadata.
         // spawnPid is this process, so own-run protection must be overridden to
         // observe the byte bound at all — which is itself the protection's proof.
+        const maxBytes = entries.filter((entry) => entry.id !== old).reduce((sum, entry) => sum + entry.bytes, 0);
         const result = enforceRegistrySizeCapOnce({
             now: DAY,
-            maxBytes: 9000,
+            maxBytes,
             force: true,
             protectedIds: new Set(),
         });
         assert.equal(result.ran, true);
         assert.deepEqual(result.removed, [old], "oldest terminal run retired");
+        assert.equal(result.overBudget, false);
+        assert.ok(result.keptBytes <= maxBytes, "retained directories satisfy the measured byte bound");
         assert.equal(existsSync(runDir(recent)), true, "newer terminal run kept");
         assert.equal(existsSync(runDir(live)), true, "live run kept");
         assert.deepEqual(result.errors, []);
@@ -229,6 +252,47 @@ describe("enforceRegistrySizeCapOnce", () => {
             protectedIds: new Set(),
         });
         assert.equal(later.ran, true, "runs again once the interval has passed");
+    });
+
+    it("counts only successful removals when a result cannot be retained", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const blocked = "sa_cap_blocked";
+        const removable = "sa_cap_removable";
+        writeMeta(meta(blocked, { status: "killed", timing: { stopReason: "deadline" } }));
+        writeMeta(meta(removable));
+        // An incomplete retained result prevents deletion of its original run.
+        mkdirSync(resultDir(blocked), { recursive: true });
+        const sizes = new Map(collectSizeCapEntries().map(entry => [entry.id, entry.bytes]));
+        const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1, protectedIds: new Set() });
+        assert.deepEqual(result.removed, [removable]);
+        assert.ok(existsSync(runDir(blocked)));
+        assert.ok(result.errors.some(error => error.includes("Retained result identity changed")));
+        assert.equal(result.reclaimedBytes, sizes.get(removable));
+        assert.equal(result.keptBytes, sizes.get(blocked));
+        assert.equal(result.overBudget, true);
+    });
+
+    it("preserves scratch file and link modes before reclaiming the run", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        const id = "sa_scratch_links";
+        const scratch = realpathSync(mkdtempSync(join(RUNTIME, "pi-task-scratch-")));
+        mkdirSync(join(scratch, "nested"), { mode: 0o750 });
+        writeFileSync(join(scratch, "nested", "artifact"), "kept", { mode: 0o640 });
+        symlinkSync("nested/artifact", join(scratch, "link"));
+        symlinkSync("missing", join(scratch, "dangling"));
+        lchmodSync?.(join(scratch, "link"), 0o700);
+        lchmodSync?.(join(scratch, "dangling"), 0o755);
+        const names = ["", "nested", "nested/artifact", "link", "dangling"];
+        const modes = names.map(name => lstatSync(join(scratch, name)).mode);
+        writeMeta(meta(id, { taskRuntime: true, taskScratch: scratch }));
+        const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1, protectedIds: new Set() });
+        assert.deepEqual(result.errors, []);
+        assert.deepEqual(result.removed, [id]);
+        assert.equal(existsSync(scratch), false);
+        const saved = readRetainedResult(id).taskScratch;
+        assert.deepEqual(names.map(name => lstatSync(join(saved, name)).mode), modes);
+        assert.equal(readFileSync(join(saved, "link"), "utf8"), "kept");
+        assert.equal(readlinkSync(join(saved, "dangling")), "missing");
     });
 
     it("protects this pi's own runs by default", () => {

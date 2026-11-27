@@ -1,0 +1,334 @@
+/**
+ * User config overrides the shipped `config.json` defaults for every subagent,
+ * each overridable per `subagent_spawn` call. Saves never edit installed files.
+ *
+ *   { "defaultModel": "xai/grok-4.5", "defaultTools": "read, bash, web_fetch" }
+ *
+ * `defaultModel: null` / absent → inherit the foreground model.
+ * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
+ * `defaultSkills` absent → the child discovers the user-level skills catalog.
+ */
+
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { toolPackage, supportsChildProvider } from "./shared-task-tools.ts";
+import { SELF_SPEC } from "./extensions.ts";
+import { installedPackage, packageRoot } from "./child-dependencies.mjs";
+import { isDelegationMode, type DelegationMode } from "./delegation.ts";
+import { normalizeSkillExposure } from "./skills.ts";
+import { validatedTimingMinutes, type TimingSettings } from "./timing.ts";
+import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
+
+export interface SubagentConfig extends TimingSettings {
+    /** Foreground delegation policy; /subagents mode overrides this for the current session. */
+    delegationMode?: DelegationMode | null;
+    gitWorkspace?: "clone" | "worktree";
+    defaultModel?: string | null;
+    defaultTools?: string | null;
+    /**
+     * Skill exposure when neither the launch nor a catalog role/agent chooses
+     * one: absent/null keeps discovery, `[]` loads no skills, and absolute
+     * paths load exactly those skills. See `skills.ts`.
+     */
+    defaultSkills?: string[] | null;
+    /** Default concurrency cap; /subagents cap overrides it for the current session. */
+    maxConcurrent?: number | null;
+    /**
+     * Tool name → extension package(s) that provide it. Drives which extension
+     * CODE loads in a child: only packages backing a requested tool are loaded.
+     * Builtins (read/bash/edit/write) need no entry.
+     */
+    toolExtensions?: Record<string, string | string[]> | null;
+    /**
+     * Provider → extension package(s) that authenticate it. Model auth is not
+     * tool-shaped: `xai/grok-4.5` needs pi-xai-oauth loaded whatever the tools.
+     * Entries here override built-in mappings, including Ollama Cloud and LiteLLM.
+     */
+    providerExtensions?: Record<string, string | string[]> | null;
+    /**
+     * OPERATOR-ONLY escape hatch: load every globally-installed extension in
+     * children (pre-#17 behavior). Never model-selectable. Re-exposes the
+     * mid-turn exit-0 drain if any installed package breaks process lifetime.
+     */
+    inheritExtensions?: boolean | null;
+    /**
+     * Optional health-observation thresholds (issue #66). Milliseconds.
+     * Override the defaults used by `resolveHealthThresholds` /
+     * `loadHealthThresholdsFromConfig` without expanding the spawn tool API.
+     */
+    healthQuietMs?: number | null;
+    healthStaleMs?: number | null;
+    healthLongToolMs?: number | null;
+    healthLongCompactionMs?: number | null;
+    /** Retention for terminal run directories during once-daily cleanup. Default: 7 days. */
+    cleanupTerminalRunRetentionMs?: number | null;
+    /** Retention for child pi session files during once-daily cleanup. Default: 7 days. */
+    cleanupSessionRetentionMs?: number | null;
+    /**
+     * Total registry byte budget. Enforced between daily sweeps, oldest terminal
+     * run first — age alone cannot bound a directory that can grow by gigabytes
+     * in an afternoon. Default: 2 GiB. See cleanup.ts.
+     */
+    maxRegistryBytes?: number | null;
+    /**
+     * Catalog tier membership and ordered fallback candidates. Omitted tiers
+     * keep the built-in membership. Candidate lists stay empty until set here;
+     * names are not inferred substitutes. Cross-provider candidates need
+     * `{ model, crossProvider: true }` and must also be tier members.
+     */
+    tierPolicy?: Readonly<Record<string, {
+        members?: readonly string[];
+        candidates?: readonly (string | { model: string; crossProvider?: boolean })[];
+    }>> | null;
+}
+
+/** Concurrency cap when config.json sets none. */
+export const DEFAULT_MAX_CONCURRENT = 6;
+
+export function isConcurrencyCap(value: unknown): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+export function normalizeConcurrencyCap(value: unknown): number {
+    return isConcurrencyCap(value) ? value : DEFAULT_MAX_CONCURRENT;
+}
+
+/** Built-in default tool set when config.json sets nothing. */
+export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch, codemode";
+/** Safe default for a hermetic (clean) child where extension tools don't exist. */
+export const SAFE_CLEAN_TOOLS = "read, bash";
+
+let cached: SubagentConfig | undefined;
+let cachedIdentity: string | undefined;
+let configOverrideForTests = false;
+let configPathForTests: string | undefined;
+let bundledConfigPathForTests: string | undefined;
+
+/** Test seam. Pass undefined to reload config.json on the next loadConfig call. */
+export function setConfigForTests(next: SubagentConfig | undefined): void {
+    cached = next;
+    cachedIdentity = undefined;
+    configOverrideForTests = next !== undefined;
+}
+
+/** Test seam. Isolate user config, optionally supplying a package fallback. */
+export function setConfigPathForTests(path: string | undefined, bundledPath?: string): void {
+    configPathForTests = path;
+    bundledConfigPathForTests = bundledPath;
+    setConfigForTests(undefined);
+}
+
+export function configPath(): string {
+    return harnessSettingsPath(configSeams());
+}
+
+function configSeams() {
+    return { agentDir: () => configPathForTests ? dirname(configPathForTests) : piAgentDir() };
+}
+
+function readConfig(path: string): SubagentConfig {
+    return parseConfig(JSON.parse(readFileSync(path, "utf-8")));
+}
+
+function parseConfig(parsed: unknown): SubagentConfig {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config must be a JSON object.");
+    return parsed as SubagentConfig;
+}
+
+function savedConfig(): SubagentConfig {
+    const user = readHarnessSetting("subagents", configSeams(), configPathForTests ? undefined : {
+        path: join(piAgentDir(), "extensions", "pi-better-subagents-config.json"), parse: parseConfig,
+    });
+    return user === undefined ? {} : parseConfig(user);
+}
+
+function bundledConfigPath(): string | undefined {
+    return bundledConfigPathForTests ?? (configPathForTests ? undefined : join(selfDir(), "config.json"));
+}
+
+function bundledConfig(): SubagentConfig {
+    const path = bundledConfigPath();
+    if (!path) return {};
+    try {
+        return readConfig(path);
+    } catch {
+        return {};
+    }
+}
+
+function configIdentity(): string {
+    const paths = [configPath(), bundledConfigPath(),
+        configPathForTests ? undefined : join(piAgentDir(), "extensions", "pi-better-subagents-config.json")];
+    return JSON.stringify(paths.map(path => {
+        if (!path) return null;
+        try {
+            const stat = statSync(path, { bigint: true });
+            return [path, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String);
+        } catch (error) {
+            return [path, (error as NodeJS.ErrnoException).code];
+        }
+    }));
+}
+
+/** Saved user choices take precedence; missing/invalid files contribute no keys. */
+export function loadConfig(): SubagentConfig {
+    if (configOverrideForTests) return cached!;
+    const identity = configIdentity();
+    if (cached && cachedIdentity === identity) return cached;
+    let user: SubagentConfig = {};
+    try { user = savedConfig(); } catch { /* retain package fallback */ }
+    cached = { ...bundledConfig(), ...user };
+    // Keep the pre-read identity: migration or a concurrent replacement must
+    // trigger another read rather than label an older value with a newer stat.
+    cachedIdentity = identity;
+    return cached;
+}
+
+/** Save the navigator's mode-only default without replacing the saved cap. */
+export function writeDelegationMode(mode: DelegationMode, path = configPath()): void {
+    if (!isDelegationMode(mode)) throw new Error(`Invalid delegation mode: ${String(mode)}`);
+    writeConfigSettings({ delegationMode: mode }, path);
+}
+
+/** Save human-facing defaults together, preserving unrelated configuration. */
+export function writeSubagentSettings(
+    settings: {
+        delegationMode: DelegationMode;
+        maxConcurrent: number;
+        gitWorkspace?: "clone" | "worktree";
+        maxMinutes?: number;
+        /** Omit to preserve the saved value; `null` explicitly records discovery. */
+        defaultSkills?: string[] | null;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        toolWaitMinutes?: number;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        stuckMinutes?: number;
+    },
+    path = configPath(),
+): void {
+    if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
+    if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
+    const next: {
+        delegationMode: DelegationMode; maxConcurrent: number; maxMinutes?: number; defaultSkills?: string[] | null;
+        toolWaitMinutes?: number; stuckMinutes?: number; gitWorkspace?: "clone" | "worktree";
+    } = {
+        delegationMode: settings.delegationMode,
+        maxConcurrent: settings.maxConcurrent,
+    };
+    if (settings.gitWorkspace !== undefined) {
+        if (settings.gitWorkspace !== "clone" && settings.gitWorkspace !== "worktree") throw new Error("Unknown Git workspace mode.");
+        next.gitWorkspace = settings.gitWorkspace;
+    }
+    if (settings.maxMinutes !== undefined) {
+        next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
+    }
+    if (Object.hasOwn(settings, "defaultSkills")) {
+        if (settings.defaultSkills === null) {
+            next.defaultSkills = null;
+        } else {
+            const skills = normalizeSkillExposure(settings.defaultSkills, "defaultSkills");
+            if (skills === undefined) throw new Error("defaultSkills must be an array of paths or null for discovery.");
+            if (skills.some((entry) => !isAbsolute(entry))) {
+                throw new Error("defaultSkills paths must be absolute so every child resolves the same files.");
+            }
+            next.defaultSkills = skills;
+        }
+    }
+    if (settings.toolWaitMinutes !== undefined) {
+        next.toolWaitMinutes = validatedTimingMinutes(settings.toolWaitMinutes, "toolWaitMinutes");
+    }
+    if (settings.stuckMinutes !== undefined) {
+        next.stuckMinutes = validatedTimingMinutes(settings.stuckMinutes, "stuckMinutes");
+    }
+    writeConfigSettings(next, path);
+}
+
+function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
+    if (path === configPath()) savedConfig();
+    updateHarnessSetting("subagents", previous => ({
+        ...(previous === undefined ? {} : parseConfig(previous)), ...settings,
+    }), { agentDir: () => dirname(path) });
+    if (path === configPath()) setConfigForTests(undefined);
+}
+
+/** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */
+export function normalizeTools(list: string): string {
+    return list.split(",").map((t) => t.trim()).filter(Boolean).join(",");
+}
+
+export const ORDINARY_TOOL_PROVIDERS: Readonly<Record<string, string>> = {
+    apply_patch: join(selfDir(), "child-apply-patch.ts"),
+    process_list: join(selfDir(), "child-process-list.ts"),
+};
+
+/** Check the owning package even when a mapping points directly to one of its files. */
+export function supportedChildEntrypoint(name: string, pkg: string, path: string): boolean {
+    return supportsChildProvider(name, pkg, packageRoot(path) ?? path);
+}
+
+/** Capture exact user-installed entrypoints already active in the foreground. */
+export function activeChildProviders(pi: Pick<ExtensionAPI, "getActiveTools" | "getAllTools">): Record<string, string> {
+    const active = new Set(pi.getActiveTools?.() ?? []);
+    const paths = new Map<string, string>();
+    const seen = new Set<string>();
+    for (const tool of pi.getAllTools?.() ?? []) {
+        if (!active.has(tool.name)) continue;
+        // The SDK reports active names. Conflicting registrations have no unique owner.
+        if (seen.has(tool.name)) { paths.delete(tool.name); continue; }
+        seen.add(tool.name);
+        if (tool.sourceInfo?.scope !== "user") continue;
+        const owner = toolPackage(tool);
+        if (!owner || !supportsChildProvider(tool.name, owner.package, owner.root)) continue;
+        try {
+            const path = realpathSync(tool.sourceInfo.path);
+            if (!statSync(path).isFile() || !supportedChildEntrypoint(tool.name, owner.package, path)) continue;
+            paths.set(tool.name, path);
+        } catch { /* An unavailable entrypoint cannot supply a new worker. */ }
+    }
+    return Object.fromEntries(paths);
+}
+
+export function ordinaryChildConfig(config: SubagentConfig, activeProviders: Record<string, string> = {}): SubagentConfig {
+    const packaged = config.toolExtensions === null ? undefined : bundledConfig().toolExtensions;
+    return { ...config, toolExtensions: { ...activeProviders, ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
+}
+
+export function addEditablePatch(names: string[], excluded: ReadonlySet<string>): void {
+    const editable = names.some(name => (name === "edit" || name === "write") && !excluded.has(name));
+    if (editable && !excluded.has("apply_patch") && !names.includes("apply_patch")) names.push("apply_patch");
+}
+
+/** This package's own root — the extension dir, which is also `self`. */
+export function selfDir(): string {
+    return dirname(fileURLToPath(import.meta.url));
+}
+
+/** Where pi installs npm packages (honors PI_CODING_AGENT_DIR). */
+function piAgentDir(): string {
+    return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Materialize an extension spec to an on-disk path pi's `-e` accepts.
+ *
+ *   "self"                 → this package's dir
+ *   "npm:<pkg>"            → <agentDir>/npm/node_modules/<pkg>
+ *   "/abs/path"            → as-is
+ *
+ * Returns undefined when the package is not installed, so the caller can report
+ * a missing dependency instead of silently launching a child without it.
+ * (`-e` accepts either a package directory or an entrypoint file — verified.)
+ */
+export function resolveExtensionPath(spec: string, declaringRoot?: string): string | undefined {
+    if (spec === SELF_SPEC) return selfDir();
+    const path = spec.startsWith("npm:")
+        ? (declaringRoot && installedPackage(spec.slice(4), [declaringRoot])) ?? (existsSync(join(piAgentDir(), "npm", "node_modules", spec.slice(4)))
+            ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
+            : installedPackage(spec.slice(4), [declaringRoot, join(piAgentDir(), "npm"), selfDir(),
+                join(piAgentDir(), "npm", "node_modules", "pi-better-harness")]))
+        : declaringRoot && !spec.startsWith("/") ? join(declaringRoot, spec) : spec;
+    return path && existsSync(path) ? path : undefined;
+}

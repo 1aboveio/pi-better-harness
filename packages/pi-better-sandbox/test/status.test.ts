@@ -73,7 +73,7 @@ test("the report lists the effective policy and states what is not confined", ()
     assert.match(report, /\/work\/acme-api\/\.env/);
     assert.match(
         report,
-        /Confined: the built-in bash, write, and edit tools, and user-entered ! \/ !! commands\./,
+        /Confined: run_application, the built-in bash, write, and edit tools, and user-entered ! \/ !! commands\./,
     );
     assert.match(report, /Not confined: pi's own process, pi\.exec calls/);
 });

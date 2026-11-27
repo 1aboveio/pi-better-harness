@@ -1,0 +1,17 @@
+# Manual Add skill path remains available
+# width: 60
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Add skill path
+  Absolute SKILL.md or skill directory · Enter add · Esc can
+  >                                                         
+  [ ] better-review
+    Review the change before handoff.
+  [ ] test-quality
+    Write tests that catch real bugs.
+  ✓ Apply selection (0 checked)
+> + Add skill path…                                         
+  0 checked
+  0 checked applies No skill catalog, not discovery.

@@ -2,9 +2,11 @@
  * Real-kernel proof that locally launched background tasks honor the foreground
  * sandbox policy.
  *
- * Every case here drives the actual extension through its registered tools,
+ * Every case here drives the canonical mechanical runtime through its registered tools,
  * spawns real processes, and checks the real filesystem. Nothing about the
  * sandbox mechanism, the task runtime, or the process layer is stubbed; the only
+ * These are manager-domain kernel tests; native frontend acceptance lives in
+ * server/test/runtime-background-frontend.test.ts. The
  * stand-in is the publishing half of the `pi.events` policy contract, which
  * belongs to `pi-better-sandbox`.
  *
@@ -23,13 +25,19 @@ import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+
+let stopRuntime: () => Promise<void>;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import backgroundTasksExtension from "./index.js";
+import { registerTools } from "./tools.js";
 import { baseDir, metaPathFor, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
-import { resumeRunningTask, stopTask } from "./runtime.js";
+import { createBackgroundTaskRuntime, resumeRunningTask, stopTask } from "./runtime.js";
 import {
+  observeForegroundSandboxPolicy,
   FOREGROUND_SANDBOX_POLICY_CHANNEL,
   FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "./sandbox.js";
@@ -182,7 +190,10 @@ function createHarness(options: { announceBeforeLoad?: Record<string, unknown> }
     sendMessage() {},
   } as unknown as ExtensionAPI;
 
-  backgroundTasksExtension(pi);
+  // Explicit manager-domain fixture: no native frontend owns this runtime.
+  const runtime = createBackgroundTaskRuntime();
+  observeForegroundSandboxPolicy(pi);
+  registerTools(pi, runtime, () => undefined, { resumeLocal: false });
 
   return {
     pi,
@@ -292,8 +303,8 @@ describe.skipIf(!support.supported)(
   () => {
     // @covers background-task.sandbox-local-spawn
     // @level integration
-    it("confines a spawned task's writes while leaving reads alone", async () => {
-      const harness = createHarness({ announceBeforeLoad: enabledPolicy() });
+    it("confines a spawned task's writes while Main is off and Background tasks is on", async () => {
+      const harness = createHarness({ announceBeforeLoad: { ...disabledPolicy(), background: enabledPolicy() } });
 
       const id = taskIdIn(await harness.execute("bg_task_spawn", {
         command: probeCommand(),
@@ -308,6 +319,7 @@ describe.skipIf(!support.supported)(
       expect(existsSync(outsideProbe)).toBe(false);
       expectDenialsHeld();
       expect(meta.launchArgv?.[0]).toBe(support.executable);
+      expect(meta.sandbox).toMatchObject({ confinement: "confined", policySource: "background", backend: support.backend, changesAffectTask: false });
     });
 
     // @covers background-task.sandbox-local-spawn
@@ -406,8 +418,26 @@ describe.skipIf(!support.supported)(
         callback: false,
       }));
       await waitForMeta(id, () => existsSync(marker));
-      const childPid = Number(readFileSync(marker, "utf8").trim());
-      expect(processAlive(childPid)).toBe(true);
+      // The shell creates the file with its redirect before `printf` writes the pid to
+      // it, so an existing marker can still be empty, and the pid it names is not
+      // necessarily resolvable on the first look. Wait for a pid that really is alive
+      // instead of sampling once.
+      const readChildPid = () => {
+        try {
+          const pid = Number(readFileSync(marker, "utf8").trim());
+          return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      await waitForCondition(
+        () => {
+          const pid = readChildPid();
+          return pid !== undefined && processAlive(pid);
+        },
+        () => `child.pid ${JSON.stringify(existsSync(marker) ? readFileSync(marker, "utf8") : null)} never named a live process`,
+      );
+      const childPid = readChildPid()!;
       // The kernel's group for the child, read before the stop: a vanished group only
       // proves the child stopped if it is the group the child really belonged to.
       const childPgid = processGroupOf(childPid);

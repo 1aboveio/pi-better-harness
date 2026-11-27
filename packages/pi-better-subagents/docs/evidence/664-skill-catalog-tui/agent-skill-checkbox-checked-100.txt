@@ -1,0 +1,12 @@
+Space checks one skill; Enter applies the selection.
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Search >                                                                                          
+> [x] review                        Review a change before handoff.                                 
+  [ ] test-quality                  Write tests that catch real bugs.
+  ✓ Apply selection (1 checked)
+  + Add skill path…
+  1 checked
+  0 checked applies No skill catalog, not discovery.

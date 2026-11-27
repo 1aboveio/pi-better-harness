@@ -10,6 +10,8 @@ import { failure, type DialogAnswer, type ServerMessage } from "./protocol.ts";
 export class ConnectionControl {
   private readonly subscriptions = new Map<string, () => void>();
   private readonly leases = new Set<HostedSession>();
+  /** True once this connection took a lease as the attach companion. */
+  companion = false;
   private readonly send: (message: ServerMessage) => void;
 
   constructor(send: (message: ServerMessage) => void) {
@@ -19,9 +21,9 @@ export class ConnectionControl {
   /** Stream a session's events to this connection, replaying after `sinceSeq` first. Replaces an earlier subscription. */
   subscribe(sessionId: string, hosted: HostedSession, sinceSeq: number | undefined): { summary: Record<string, unknown>; events: LoggedEvent[] } {
     this.unsubscribe(sessionId);
-    const { replay, unsubscribe } = hosted.subscribe(sinceSeq, (logged) => this.send({ type: "event", sessionId, seq: logged.seq, event: logged.event }));
+    const { replay, unsubscribe } = hosted.subscribe(sinceSeq, (logged) => this.send({ type: "event", sessionId, generation: hosted.generation, seq: logged.seq, event: logged.event }));
     this.subscriptions.set(sessionId, unsubscribe);
-    const summary = { lastSeq: hosted.lastSeq, firstSeq: replay.firstSeq, replayed: replay.events.length, truncated: replay.truncated };
+    const summary = { generation: hosted.generation, lastSeq: hosted.lastSeq, firstSeq: replay.firstSeq, replayed: replay.events.length, truncated: replay.truncated };
     return { summary, events: replay.events };
   }
 
@@ -43,12 +45,13 @@ export class ConnectionControl {
       if (since !== undefined && (typeof since !== "number" || !Number.isInteger(since) || since < 0)) return refuse("sinceSeq must be a non-negative integer");
       const { summary, events } = this.subscribe(sessionId, hosted, since as number | undefined);
       reply(summary);
-      for (const logged of events) this.send({ type: "event", sessionId, seq: logged.seq, event: logged.event });
+      for (const logged of events) this.send({ type: "event", sessionId, generation: hosted.generation, seq: logged.seq, event: logged.event });
       return;
     }
     if (type === "acquire_control") {
       if (!hosted.acquireControl(this)) return refuse("Another connection holds the controller lease for this session");
       this.leases.add(hosted);
+      if (command.companion === true) this.companion = true;
       return reply({ needsInput: hosted.needsInput });
     }
     if (type === "release_control") {

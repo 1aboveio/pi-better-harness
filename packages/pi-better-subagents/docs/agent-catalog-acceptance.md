@@ -29,13 +29,13 @@ Without `PI_CATALOG_REAL_PI=1` the test skips and default `npm test` does not ca
 
 | ID | Executable-path tests (not coordinator reasoning) | Real Pi in this harness |
 | --- | --- | --- |
-| T01 | `catalog.test.mjs` six bundled defaults | `/agents list` must show all six role ids |
+| T01 | `catalog.test.mjs` bundled defaults | `/agents list` must show all bundled role ids |
 | T02 | `catalog.test.mjs` two agents, role unchanged | one personal create; not a second independent agent |
 | T03 | `catalog-lifecycle.test.mjs` navigator detail fields | `catalog-navigator-live-row.acceptance.test.mjs`: same-parent running row for `Live Row Agent` |
 | T04 | `catalog-identity.test.mjs` concurrent numeric labels | one fresh registry numeric label; not a second process |
 | T05 | identity + lifecycle alias collision | one `developer-checkout` label; collision suffix not repeated |
 | T06 | lifecycle repeated runs / rename snapshot | not re-run here |
-| T07 | `model-resolution.test.mjs` six defaults | not launched (would call gpt-6) |
+| T07 | `model-resolution.test.mjs` bundled defaults | not launched (would call gpt-6) |
 | T08 | model-resolution precedence | not a separate real launch |
 | T09 | model-resolution same-tier | real role `role.acceptance-same-tier` if the coordinator omits model |
 | T10 | model-resolution foreground | real role `role.acceptance-foreground` if the coordinator omits model |

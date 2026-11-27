@@ -91,8 +91,76 @@ export interface MinimalOutputHook {
 
 const HOOK = Symbol.for("pi-better-harness.minimal-output-hook");
 const emptyResult = () => ({ render: () => [] as string[], invalidate() {} });
+interface CompactCallSnapshot {
+  version: number;
+  argsKey: string;
+  renderer: Component | undefined;
+  hasCallRenderer: boolean;
+  hasResult: boolean;
+  isPartial: boolean;
+  failed: boolean;
+  headerWidth: number;
+  text: string;
+  detail: string;
+}
+const compactCallVersions = new WeakMap<ToolComponent, number>();
+const compactCallSnapshots = new WeakMap<ToolComponent, CompactCallSnapshot>();
+const compactCallLines = new WeakMap<ToolComponent, {
+  snapshot: CompactCallSnapshot;
+  theme: Theme | undefined;
+  width: number;
+  indent: number;
+  line: string;
+}>();
+function invalidateCompactCall(component: ToolComponent): void {
+  compactCallVersions.set(component, (compactCallVersions.get(component) ?? 0) + 1);
+  compactCallSnapshots.delete(component);
+  compactCallLines.delete(component);
+}
+function compactArgsKey(args: unknown): string {
+  try { return JSON.stringify(args) ?? ""; } catch { return String(args); }
+}
+function compactCallSnapshot(component: ToolComponent, width: number): CompactCallSnapshot {
+  const version = compactCallVersions.get(component) ?? 0;
+  const argsKey = compactArgsKey(component.args);
+  const renderer = component.callRendererComponent;
+  const hasCallRenderer = Boolean(component.getCallRenderer?.());
+  const hasResult = Boolean(component.result);
+  const isPartial = component.isPartial === true;
+  const failed = component.result?.isError === true;
+  const headerWidth = Math.max(4096, width + 1);
+  const cached = compactCallSnapshots.get(component);
+  if (cached && cached.version === version && cached.argsKey === argsKey && cached.renderer === renderer
+    && cached.hasCallRenderer === hasCallRenderer && cached.hasResult === hasResult
+    && cached.isPartial === isPartial && cached.failed === failed && cached.headerWidth === headerWidth) {
+    return cached;
+  }
+  // Rendering the native call at a wide fixed width is the expensive part of a
+  // compact row. Keep its stripped text until an argument, renderer, result or
+  // explicit invalidate changes the visible call.
+  const header = hasCallRenderer && renderer?.render(headerWidth)
+    .map((line) => stripVTControlCharacters(line).trim())
+    .find((line) => line.length > 0);
+  let text = header;
+  if (!text) {
+    const args = component.args as Record<string, unknown> | undefined;
+    const hint = args?.command ?? args?.path ?? args?.pattern;
+    const detail = typeof hint === "string" ? hint.replace(/\r?\n/g, " ") : JSON.stringify(component.args);
+    text = `${component.toolName}${detail && detail !== "{}" ? ` ${detail}` : ""}`;
+  }
+  const detail = (hasCallRenderer ? undefined : harnessCallDetail(component.toolName, component.args)) ??
+    (text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
+      : text === component.toolName ? "" : text);
+  const snapshot = {
+    version, argsKey, renderer, hasCallRenderer, hasResult, isPartial, failed, headerWidth, text, detail,
+  };
+  compactCallSnapshots.set(component, snapshot);
+  return snapshot;
+}
+
 const TOOL_ICONS: Record<string, string> = {
   bash: "\u2318",
+  run_application: "\u2318",
   read: "\u25a4",
   write: "\u2710",
   edit: "\u270e",
@@ -107,6 +175,8 @@ const TOOL_ICONS: Record<string, string> = {
   update_goal: "\u25ce",
   get_goal: "\u25ce",
   goal_resume: "\u25ce",
+  update_todo: "\u2261",
+  get_todo: "\u2261",
   update_plan: "\u2261",
   get_plan: "\u2261",
   remote_bash: "\u2318",
@@ -121,6 +191,8 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
     return text(ssh.host) ? `${text(ssh.user) ? `${text(ssh.user)}@` : ""}${text(ssh.host)}` : "";
   };
   switch (name) {
+    case "run_application":
+      return joinDetails(args.executable, Array.isArray(args.args) ? args.args.map((arg) => JSON.stringify(arg)).join(" ") : undefined);
     case "subagent_spawn":
       return joinDetails(args.agent ?? args.role, args.alias ?? args.name, args.prompt);
     case "subagent_spawn_batch":
@@ -140,7 +212,7 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
       return text(args.status);
     case "goal_resume":
       return text(args.reason);
-    case "get_goal": case "get_background_activity": case "release_workflow": case "get_plan":
+    case "get_goal": case "get_background_activity": case "release_workflow": case "get_plan": case "get_todo":
       return "";
     case "remote_bash":
       return joinDetails(host(), args.command);
@@ -153,22 +225,15 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
 
 function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3, animationTime?: number): string[] {
   if (width <= 0) return [];
-  // Render the call alone at a wider width so terminal wrapping becomes truncation.
-  const header = Boolean(component.getCallRenderer?.()) && component.callRendererComponent?.render(Math.max(4096, width + 1))
-    .map((line) => stripVTControlCharacters(line).trim())
-    .find((line) => line.length > 0);
-  let text = header;
-  if (!text) {
-    const args = component.args as Record<string, unknown> | undefined;
-    const hint = args?.command ?? args?.path ?? args?.pattern;
-    const detail = typeof hint === "string" ? hint.replace(/\r?\n/g, " ") : JSON.stringify(component.args);
-    text = `${component.toolName}${detail && detail !== "{}" ? ` ${detail}` : ""}`;
+  const snapshot = compactCallSnapshot(component, width);
+  const failed = snapshot.failed;
+  const running = !snapshot.hasResult || snapshot.isPartial;
+  const detail = snapshot.detail;
+  const cachedLine = compactCallLines.get(component);
+  if (animationTime === undefined && cachedLine && cachedLine.snapshot === snapshot
+    && cachedLine.theme === theme && cachedLine.width === width && cachedLine.indent === indent) {
+    return [cachedLine.line];
   }
-  const failed = component.result?.isError === true;
-  const running = !component.result || component.isPartial;
-  const detail = (component.getCallRenderer?.() ? undefined : harnessCallDetail(component.toolName, component.args)) ??
-    (text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
-      : text === component.toolName ? "" : text);
   const label = component.toolName === "bash" ? "Shell"
     : component.toolName.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase());
   const suffix = failed ? " (failed)" : running ? " (running)" : "";
@@ -179,7 +244,9 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
   const styled = theme
     ? ` ${toolIdentity(icon, label, failed ? "error" : running ? "accent" : "muted", theme, animationTime, visibleDetail)}${theme.fg(failed ? "error" : "dim", suffix)}`
     : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
-  return [truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width)];
+  const line = truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width);
+  if (animationTime === undefined) compactCallLines.set(component, { snapshot, theme, width, indent, line });
+  return [line];
 }
 
 function toolParent(component: ToolComponent): TranscriptComponent | undefined {
@@ -273,6 +340,19 @@ function sdkEntry(require: ReturnType<typeof createRequire>): string {
 }
 
 /** Internal TUI adapter: no tools are replaced and no result content is changed. */
+const FRAME_MS = 80;
+const IDLE_FRAME_MS = 1000;
+const STALE_RENDER_MS = 400;
+
+/**
+ * Shimmer cadence for the next frame. Fast while any animated row rendered recently, one frame
+ * a second once none has, and never off: an unfocused window can stop repainting without the row
+ * being gone, and stopping the timer would latch the animation until an unrelated render restarted it.
+ */
+export function shimmerFrameDelay(lastRenderMs: number, nowMs: number): number {
+  return nowMs - lastRenderMs <= STALE_RENDER_MS ? FRAME_MS : IDLE_FRAME_MS;
+}
+
 export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme, compactionPrototype?: CompactionPrototype, customMessagePrototype?: CustomMessagePrototype): MinimalOutputHook {
   for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "invalidate", "render"] as const) {
     if (typeof prototype[name] !== "function") {
@@ -286,6 +366,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       getResultRenderer: prototype.getResultRenderer,
       getTextOutput: prototype.getTextOutput,
       setExpanded: prototype.setExpanded,
+      invalidate: prototype.invalidate,
       render: prototype.render,
       ...(typeof prototype.handleMouse === "function" ? { handleMouse: prototype.handleMouse } : {}),
     };
@@ -314,10 +395,16 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     const animationReferences = new WeakMap<ToolComponent, WeakRef<ToolComponent>>();
     const animated = new Map<WeakRef<ToolComponent>, number>();
     const settled = new WeakSet<ToolComponent>();
-    let animationTimer: ReturnType<typeof setInterval> | undefined;
+    // Frame while the transcript paints, then one frame a second once it stops. An unfocused
+    // window may stop repainting, and clearing the timer outright would latch the animation off
+    // until an unrelated render happened to restart it. Slowing keeps the saving without the latch.
+    let animationTimer: ReturnType<typeof setTimeout> | undefined;
+    let animationIdle = false;
+    let paintingFrame = false;
     const stopAnimation = () => {
-      if (animationTimer !== undefined) clearInterval(animationTimer);
+      if (animationTimer !== undefined) clearTimeout(animationTimer);
       animationTimer = undefined;
+      animationIdle = false;
       animated.clear();
     };
     const canAnimate = (component: ToolComponent) => {
@@ -328,30 +415,57 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         && !settled.has(component);
     };
     const pruneAnimation = () => {
-      for (const [reference, lastRender] of animated) {
+      for (const reference of animated.keys()) {
         const component = reference.deref();
-        if (!component || !canAnimate(component) || Date.now() - lastRender > 400
+        if (!component || !canAnimate(component)
           || toolVisibility(component.ui, component) !== true) animated.delete(reference);
       }
       if (!animated.size) stopAnimation();
+    };
+    const scheduleFrame = (delayMs: number) => {
+      if (animationTimer !== undefined) clearTimeout(animationTimer);
+      animationTimer = setTimeout(paintFrame, Math.max(0, delayMs));
+      animationTimer.unref?.();
+    };
+    const paintFrame = () => {
+      animationTimer = undefined;
+      pruneAnimation();
+      if (!animated.size) return;
+      const uis = new Set<ToolUI>();
+      for (const reference of animated.keys()) {
+        const component = reference.deref();
+        if (!component) continue;
+        uis.add(component.ui);
+      }
+      paintingFrame = true;
+      try {
+        for (const ui of uis) ui.requestRender();
+      } finally {
+        paintingFrame = false;
+      }
+      pruneAnimation();
+      if (!animated.size) return;
+      // Choose the cadence from the timestamps this frame produced. Reading them before the
+      // renders instead would keep seeing the previous idle gap and re-arm the idle period
+      // forever, so painting that resumed on a timer-driven frame could never speed back up.
+      let newestRender = 0;
+      for (const lastRender of animated.values()) {
+        if (lastRender > newestRender) newestRender = lastRender;
+      }
+      const delay = shimmerFrameDelay(newestRender, Date.now());
+      animationIdle = delay === IDLE_FRAME_MS;
+      scheduleFrame(delay);
     };
     const animationTime = (component: ToolComponent, width: number, indent: number) => {
       if (width <= indent + 3 || !canAnimate(component) || toolVisibility(component.ui, component) === false) return undefined;
       let reference = animationReferences.get(component);
       if (!reference) { reference = new WeakRef(component); animationReferences.set(component, reference); }
       animated.set(reference, Date.now());
-      if (animationTimer === undefined) {
-        animationTimer = setInterval(() => {
-          pruneAnimation();
-          const uis = new Set<ToolUI>();
-          for (const reference of animated.keys()) {
-            const component = reference.deref();
-            if (!component) continue;
-            uis.add(component.ui);
-          }
-          for (const ui of uis) ui.requestRender();
-        }, 80);
-        animationTimer.unref?.();
+      // A render outside the clock means painting resumed. Re-arm at the frame cadence rather
+      // than waiting out a pending idle period, which would otherwise cost up to a second.
+      if (!paintingFrame && (animationTimer === undefined || animationIdle)) {
+        animationIdle = false;
+        scheduleFrame(FRAME_MS);
       }
       return toolVisibility(component.ui, component) === true ? Date.now() : undefined;
     };
@@ -550,6 +664,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     }
     const wrappers = {
       updateDisplay(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
         if (typeof this.ui.handleViewportInput === "function" && !inputWrappers.has(this.ui)) {
           const original = this.ui.handleViewportInput;
           const wrapper = function(this: ToolUI, data: string) {
@@ -574,6 +689,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         }
       },
       setExpanded(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
         clearHover();
         const group = groups.get(this);
         const wasExpanded = this.expanded;
@@ -582,6 +698,10 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         if (group) group.expanded += Number(this.expanded) - Number(wasExpanded);
         pruneAnimation();
         return result;
+      },
+      invalidate(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
+        return originals.invalidate.apply(this, args);
       },
       getResultRenderer(this: ToolComponent, ...args: unknown[]) {
         return current.enabled && !this.expanded ? emptyResult : originals.getResultRenderer.apply(this, args);

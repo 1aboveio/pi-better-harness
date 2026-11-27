@@ -22,8 +22,25 @@ export interface CommandSpec {
   command?: string;
   argv?: string[];
   shell?: boolean;
+  /** Run the shell as a login shell (`bash -lc`, the default). False runs `bash -c`, skipping profile sourcing. */
+  loginShell?: boolean;
+  /** Internal executable selected by the host for a Windows shell or log trampoline. */
+  resolvedWindowsShell?: string;
   cwd?: string;
   env?: Record<string, string>;
+}
+
+/**
+ * Evidence from an opt-in step gate (#619): bash reported a failing step inside a
+ * chained shell command, so a later command's exit 0 could not mask it.
+ */
+export interface StepGateFailure {
+  /** Exit code of the first failing step bash reported. */
+  stepExitCode: number;
+  /** The shell's own final status, before the gate turned a masked 0 into a failure. */
+  shellExitCode: number | null;
+  /** The failing step as bash named it, bounded so task metadata stays small. */
+  command: string;
 }
 
 export interface CommandResult {
@@ -78,11 +95,28 @@ export interface ResolvedRemoteTaskMetadata {
 export interface BackgroundTaskCallbackOrigin {
   cwd: string;
   sessionId?: string;
+  branchId?: string | null;
+}
+
+export interface TaskSandboxProvenance {
+  confinement: "confined" | "unconfined" | "unknown";
+  backend?: string;
+  policySource: "background" | "main-legacy" | "no-publisher" | "remote";
+  policySummary: string;
+  changesAffectTask: false;
 }
 
 export interface BackgroundTaskMeta {
   id: string;
   name?: string;
+  /**
+   * Launcher-assigned batch identity, e.g. `bg_batch_<uuid>`, set when this task
+   * was started by a batch launch. Absent for a single spawn. Persisted with the
+   * rest of the metadata, so a reloaded task still says which launch it belonged to.
+   */
+  batchId?: string;
+  /** Operator-facing batch label from the same launch, when one was given. */
+  batchName?: string;
   kind: BackgroundTaskKind;
   status: BackgroundTaskStatus;
   startedAt: number;
@@ -90,8 +124,19 @@ export interface BackgroundTaskMeta {
   deadlineAt?: number;
   intervalMs?: number;
   lastCheckedAt?: number;
-  /** Latest command completion or observed process log output. */
+  /**
+   * Latest meaningful progress. A process advances it on output; a watch only
+   * when its observed outcome changes state (never on the poll itself).
+   */
   lastProgressAt?: number;
+  /**
+   * Watch only: canonical fingerprint of the last observed poll outcome
+   * (stdout content, stderr content, exit code, signal, error). A poll that
+   * reports the same outcome is activity, not progress. Versioned; a value from
+   * another version, or a record without one, is adopted without moving the
+   * state clock so an upgrade or reload can never keep resetting silence.
+   */
+  watchFingerprint?: string;
   lastExitCode?: number | null;
   lastSignal?: NodeJS.Signals | null;
   lastState?: unknown;
@@ -106,20 +151,31 @@ export interface BackgroundTaskMeta {
   command?: string;
   argv?: string[];
   shell?: boolean;
+  /**
+   * Per-command cap captured from the Background tasks profile at launch, in
+   * seconds. Absent means the launch had no cap. Persisted so a resumed task
+   * keeps the cap it started under; it bounds one command (each check for a
+   * watch), never a watch's whole lifetime.
+   */
+  commandTimeoutSeconds?: number;
   cwd: string;
   env?: Record<string, string>;
   /**
    * The executable and argv this task was actually launched with, when that
-   * differs from `command`/`argv` above — today, an OS write-sandbox wrapper
-   * captured from the foreground policy at launch. Re-running a watch poll uses
+   * differs from `command`/`argv` above, such as an OS write-sandbox wrapper
+   * or a Windows watch shell selected at launch. Re-running a watch poll uses
    * it verbatim, which is how a running task keeps the policy it started under
    * even after the foreground policy changes. `command`/`argv` stay the operator's
    * own request, so status, navigator, and goal surfaces read unchanged.
    */
   launchArgv?: string[];
+  /** Launch-time evidence, never inferred from current settings or missing profile files. */
+  sandbox?: TaskSandboxProvenance;
   maxLogBytes?: number;
   logDiscardedBytes?: number;
   logRetentionEvents?: number;
+  /** Own retention writes are not task output. Both fields must still match to ignore them. */
+  logMaintenance?: { mtimeMs: number; size: number };
   /** Incremented on every same-inode compaction so log-page cursors can detect it. */
   logGeneration?: number;
   /** Bytes never captured into watch/command buffers. Distinct from logDiscardedBytes. */
@@ -134,6 +190,14 @@ export interface BackgroundTaskMeta {
   spawnPid: number;
   /** Opaque process-start token used to reject recycled supervisor PIDs. */
   spawnPidStartTime?: string;
+  /**
+   * Launch intent (#619): this shell command runs with the step gate. A failure bash
+   * reports for one step is surfaced even when a later command exits 0. Absent means
+   * ordinary shell semantics: only the command's own exit status is reported.
+   */
+  requireSuccessfulSteps?: boolean;
+  /** Observed step-gate evidence; absent when the gate is off or no step failed. */
+  stepGateFailure?: StepGateFailure;
   successWhen?: Condition;
   failureWhen?: Condition;
   /**
@@ -171,3 +235,4 @@ export interface TerminalResult {
 export function isTerminalStatus(status: BackgroundTaskStatus): boolean {
   return status !== "running";
 }
+export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE — main delegation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --text: #d4d4d4;
+    --accent: #8abeb7;
+    --muted: #808080;
+    --dim: #666;
+    --yellow: #ffff00;
+    --green: #b5bd68;
+    --red: #cc6666;
+    --selected: #3a3a4a;
+    --pending: #282832;
+    --ok: #283228;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #111; color: var(--text); font: 15px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  body { display: grid; place-items: center; padding: 24px 24px 88px; }
+  .frame { width: min(920px, 100%); }
+  .kicker { color: var(--dim); font-size: 12px; letter-spacing: 0.04em; margin-bottom: 8px; }
+  .term {
+    background: var(--bg);
+    border: 1px solid #333;
+    min-height: 520px;
+    padding: 18px 20px 14px;
+    display: flex;
+    flex-direction: column;
+    white-space: pre;
+  }
+  .grow { flex: 1; }
+  .lane { color: var(--yellow); }
+  .dim { color: var(--dim); }
+  .muted { color: var(--muted); }
+  .accent { color: var(--accent); }
+  .green { color: var(--green); }
+  .row { display: grid; grid-template-columns: 18px 16px 1fr auto; gap: 8px; align-items: baseline; }
+  .row.sel { background: var(--selected); margin: 0 -8px; padding: 0 8px; }
+  .rule { color: var(--accent); }
+  .sheet { margin-bottom: 16px; }
+  .meta { display: grid; grid-template-columns: 88px 1fr; }
+  .choices { margin-top: 12px; }
+  .choice { display: grid; grid-template-columns: 16px 140px 1fr; gap: 8px; }
+  .choice.on { background: var(--ok); margin: 0 -8px; padding: 0 8px; }
+  .inline {
+    margin: 2px 0 8px 42px;
+    border-left: 1px solid #3a3a4a;
+    padding-left: 12px;
+  }
+  .chips { display: flex; gap: 8px; margin-top: 6px; }
+  .chip { border: 1px solid #505050; padding: 1px 8px; color: var(--muted); }
+  .chip.on { border-color: var(--accent); color: var(--accent); background: var(--ok); }
+  .takeover { padding-top: 8px; }
+  .big {
+    display: grid;
+    grid-template-columns: 16px 1fr;
+    gap: 10px;
+    padding: 10px 0;
+    border-top: 1px solid #333;
+  }
+  .big.on { background: var(--selected); margin: 0 -8px; padding: 10px 8px; }
+  .editor {
+    margin-top: 12px;
+    border-top: 1px solid #5f87ff;
+    border-bottom: 1px solid #5f87ff;
+    min-height: 36px;
+    color: var(--dim);
+    padding-top: 6px;
+  }
+  .state {
+    margin-top: 10px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .bar {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #f4f1ea;
+    color: #1a1a1a;
+    border-radius: 999px;
+    padding: 8px 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.35);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 13px;
+  }
+  .bar button {
+    width: 32px; height: 32px; border: 0; border-radius: 50%;
+    background: #1a1a1a; color: #f4f1ea; cursor: pointer;
+  }
+  .bar .label { min-width: 280px; text-align: center; }
+  .note { color: #666; font-size: 11px; padding-right: 8px; }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="kicker">PROTOTYPE — wipe me. Three layouts for configuring delegation on the main agent. Not production.</div>
+  <div class="term" id="term"></div>
+  <div class="state" id="state"></div>
+</div>
+<div class="bar" id="bar">
+  <button type="button" id="prev" aria-label="Previous variant">←</button>
+  <div class="label" id="label"></div>
+  <button type="button" id="next" aria-label="Next variant">→</button>
+  <div class="note">[ ] switch layout · arrows navigate</div>
+</div>
+<script>
+const MODES = ["manual", "adaptive", "coordinator"];
+const BLURB = {
+  manual: "only when you or a workflow asks",
+  adaptive: "substantial independent work",
+  coordinator: "every role-owned task",
+};
+const VARIANTS = {
+  A: "Detail sheet",
+  B: "Inline row",
+  C: "Lane takeover",
+};
+const runs = [
+  { id: "review", name: "review", status: "running", elapsed: "4m", summary: "read · 12k tok" },
+  { id: "research", name: "research", status: "done", elapsed: "12m", summary: "done" },
+];
+const state = {
+  variant: new URLSearchParams(location.search).get("variant") || "A",
+  mode: "adaptive",
+  savedDefault: "adaptive",
+  source: "config",
+  selected: "main",
+  open: false,
+  notice: "",
+};
+
+function cycle(delta) {
+  const i = MODES.indexOf(state.mode);
+  state.mode = MODES[(i + delta + MODES.length) % MODES.length];
+  state.source = "session";
+  state.notice = `session override: ${state.mode}. config default remains ${state.savedDefault}.`;
+}
+function saveDefault() {
+  state.savedDefault = state.mode;
+  state.source = "config";
+  state.notice = `saved default: ${state.savedDefault}.`;
+}
+function ids() {
+  return ["main", ...runs.map((run) => run.id)];
+}
+function move(delta) {
+  const list = ids();
+  const i = Math.max(0, list.indexOf(state.selected));
+  state.selected = list[Math.min(list.length - 1, Math.max(0, i + delta))];
+  if (state.variant !== "A") state.open = state.selected === "main";
+}
+function esc(s) {
+  return String(s).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+}
+function row(id, name, mark, summary, elapsed, selected) {
+  return `<div class="row${selected ? " sel" : ""}"><span>${selected ? '<span class="accent">›</span>' : " "}</span><span>${mark}</span><span>${esc(name)}</span><span class="muted">${esc(summary)}  ${esc(elapsed)}</span></div>`;
+}
+function list(includeMain) {
+  const mainSummary = `${state.mode}${state.source === "session" ? " · session" : ""}`;
+  const main = includeMain ? row("main", "main", '<span class="accent">●</span>', `gpt-5.5 high · ${mainSummary}`, "1m", state.selected === "main" && !state.open) : "";
+  const children = runs.map((run) => row(run.id, run.name, run.status === "running" ? '<span class="accent">●</span>' : '<span class="dim">·</span>', run.summary, run.elapsed, state.selected === run.id)).join("");
+  return `<div class="lane">subagents</div>${main}${children}<div class="dim">↑↓ switch · Enter detail · x stop · Esc unfocus</div>`;
+}
+function editor() {
+  return `<div class="editor"> </div><div class="dim">← subagents · 2</div>`;
+}
+function variantA() {
+  if (!state.open) {
+    return `<div class="grow">${list(true)}</div>${editor()}`;
+  }
+  const choices = MODES.map((mode) => {
+    const on = mode === state.mode;
+    const tag = on ? (state.source === "session" ? "session" : "config") : (mode === state.savedDefault ? "config default" : "");
+    return `<div class="choice${on ? " on" : ""}"><span>${on ? "›" : " "}</span><span>${esc(mode)}</span><span class="muted">${esc(tag)}  ${esc(BLURB[mode])}</span></div>`;
+  }).join("");
+  return `<div class="grow"><div class="sheet">
+<span class="rule">── main ${"─".repeat(48)}</span>
+<div class="dim">   ← back · m mode · Esc close</div>
+
+<div class="meta"><span class="muted">status</span><span class="accent">running</span></div>
+<div class="meta"><span class="muted">model</span><span>gpt-5.5 · effort high</span></div>
+<div class="meta"><span class="muted">tool</span><span>read</span></div>
+<div class="meta"><span class="muted">context</span><span>48k tok</span></div>
+<div class="meta"><span class="muted">elapsed</span><span>1m</span></div>
+<div class="choices">
+<div class="muted">delegation</div>
+${choices}
+</div>
+<div class="dim">m cycles this session. x does not stop. S confirms a new config default.</div>
+</div>${list(true)}</div>${editor()}`;
+}
+function variantB() {
+  const chips = MODES.map((mode) => `<span class="chip${mode === state.mode ? " on" : ""}">${esc(mode)}</span>`).join("");
+  const inline = state.selected === "main" ? `<div class="inline"><div class="muted">delegation · ${esc(state.source)}</div><div class="chips">${chips}</div><div class="dim">config default ${esc(state.savedDefault)} · m cycle · S save default · x ignored</div></div>` : "";
+  const main = row("main", "main", '<span class="accent">●</span>', `gpt-5.5 high · ${state.mode}`, "1m", state.selected === "main");
+  const children = runs.map((run) => row(run.id, run.name, run.status === "running" ? '<span class="accent">●</span>' : '<span class="dim">·</span>', run.summary, run.elapsed, state.selected === run.id)).join("");
+  return `<div class="grow"><div class="lane">subagents</div>${main}${inline}${children}<div class="dim">↑↓ switch · m mode on main · x stop children only</div></div>${editor()}`;
+}
+function variantC() {
+  if (state.selected !== "main") {
+    return `<div class="grow">${list(true)}</div>${editor()}`;
+  }
+  const blocks = MODES.map((mode) => `<div class="big${mode === state.mode ? " on" : ""}"><span>${mode === state.mode ? "›" : " "}</span><div><div>${esc(mode)}${mode === state.mode ? ` <span class="accent">${esc(state.source)}</span>` : ""}</div><div class="muted">${esc(BLURB[mode])}</div></div></div>`).join("");
+  return `<div class="grow takeover">
+<span class="rule">── main agent ${"─".repeat(42)}</span>
+<div class="dim">how this session delegates. child runs are hidden.</div>
+${blocks}
+<div class="dim">config default ${esc(state.savedDefault)} · m cycle · S save default · Esc back to runs</div>
+</div>${editor()}`;
+}
+function render() {
+  const view = state.variant === "B" ? variantB() : state.variant === "C" ? variantC() : variantA();
+  document.getElementById("term").innerHTML = view + (state.notice ? `<div class="dim">${esc(state.notice)}</div>` : "");
+  document.getElementById("state").textContent = `state  variant=${state.variant}  selected=${state.selected}  open=${state.open}  mode=${state.mode}  source=${state.source}  savedDefault=${state.savedDefault}`;
+  document.getElementById("label").textContent = `${state.variant} — ${VARIANTS[state.variant] || state.variant}`;
+}
+function setVariant(next) {
+  const keys = Object.keys(VARIANTS);
+  const i = keys.indexOf(state.variant);
+  state.variant = keys[(i + next + keys.length) % keys.length];
+  state.open = false;
+  state.selected = "main";
+  state.notice = "";
+  const url = new URL(location.href);
+  url.searchParams.set("variant", state.variant);
+  history.replaceState(null, "", url);
+  render();
+}
+document.getElementById("prev").onclick = () => setVariant(-1);
+document.getElementById("next").onclick = () => setVariant(1);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "[") { setVariant(-1); return; }
+  if (event.key === "]") { setVariant(1); return; }
+  if (event.key === "ArrowUp") { move(-1); state.notice = ""; }
+  else if (event.key === "ArrowDown") { move(1); state.notice = ""; }
+  else if (event.key === "Enter" && state.variant === "A" && state.selected === "main") state.open = true;
+  else if (event.key === "Enter" && state.variant === "A" && state.selected !== "main") state.notice = `opened ${state.selected}. prototype does not draw child detail.`;
+  else if (event.key === "Escape") {
+    if (state.variant === "C" && state.selected === "main") state.selected = "review";
+    state.open = false;
+  }
+  else if (event.key === "m" || event.key === "M") {
+    if (state.selected === "main" && (state.variant !== "A" || state.open || state.variant === "B")) cycle(event.shiftKey ? -1 : 1);
+    else state.notice = "m only changes the main agent.";
+  }
+  else if (event.key === "s" || event.key === "S") {
+    if (state.selected === "main") saveDefault();
+  }
+  else if (event.key === "x" || event.key === "X") {
+    if (state.selected === "main") state.notice = "x ignored. main is not a stop target.";
+    else state.notice = `x would arm stop for ${state.selected}. not wired.`;
+  }
+  render();
+});
+if (!VARIANTS[state.variant]) state.variant = "A";
+render();
+</script>
+</body>
+</html>

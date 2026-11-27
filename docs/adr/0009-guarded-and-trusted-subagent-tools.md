@@ -1,5 +1,7 @@
 # Guarded and trusted extension tools for confined subagents
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#tool-loading).
+
 ## Status
 
 Accepted. Extends [ADR 0007](0007-trusted-runtime-task-boundary.md) (the task boundary admits only verified tool implementations) and [ADR 0005](0005-sandbox-permission-table.md) (the `/sandbox` table). Issue #351.
@@ -21,6 +23,8 @@ Two kinds of extension tool, chosen by a human in `/sandbox` → Subagents · To
 - Removal (Delete File, and the source of a Move) uses a new guarded remove operation. It checks `evaluateDeleteAccess` on both the resolved target and the entry itself, judged without following its final component (canonical parent plus the literal name), so a link planted in `~/.ssh`, `~/.pi` or a sibling repository is refused even when its target is deletable. It then unlinks inside the kernel-confined file worker. Write levels therefore refuse removal outside the disposable places, as they do for bash. A move is "write the destination, then remove the source", not `rename`.
 - The whole patch is validated before anything is written: syntax, the file rules for every target, and every hunk against current content. Each file is then written whole, so none is ever half-patched. Removals run last. If a write fails part-way, applied files are restored where the rules allow, and the error lists what was restored, what could not be, and what was never applied.
 - It is a task builtin only when ticked (default on), and it is activated for a child that may `edit` or `write`, or asks for it by name.
+
+For confined children, the native launcher loads a harness tool-owner extension before other extensions. The final inline guard uses that extension's registration API to install the guarded tools during its `session_start` handler, after SDK duplicate-name diagnostics and before activation. The SDK resolves duplicate names by extension order, so guarded tools keep their ownership even if a trusted package registers the same name during initialization or a later event. The guard still checks the installed schema identity and the tool-owner's canonical source path. Missing ownership handoff fails startup; no third-party implementation is admitted as a fallback. This fixes #590 without changing which trusted package tools the human enabled.
 
 **Trusted tools run outside the file rules.** An extension tool the human ticks is loaded into the child and runs in the child Pi process with that process's access. The page says so. One Space applies the change immediately to the current session branch; Ctrl+S saves defaults and reports any loosened permissions.
 

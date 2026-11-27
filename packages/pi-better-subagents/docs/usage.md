@@ -18,30 +18,48 @@ Set `delegationMode` in the user config described under
 [Tool scoping](#tool-scoping-allowlist) to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
-`/subagents`) opens the terminal settings page with mode and concurrent-subagent
-cap controls and Reset to defaults. The page uses the same selected-row and
-active-cell styling as `/sandbox`, with one editable value column.
+`/subagents`) opens the terminal settings page. Delegation mode, the concurrency cap, and
+Git workspace appear together. Run timeout and the two alert intervals come next,
+followed by skills, the Agents catalog, and Reset to defaults. As in
+`/harness-settings`, the cursor marks the active row and its help appears
+below the list. On Run timeout, Space selects **24 hours** and Enter edits
+the duration. Each alert has a separate interval in minutes. Enter `0`
+to turn that alert off. Skill exposure cycles between
+Discover automatically and No skill catalog. The Selected skills row opens the
+shared searchable checkbox picker, which lists loaded skills by name and
+description, uses Space to toggle, Enter to apply, and Esc to cancel. Typing
+filters the list without losing checked items. A saved path missing from current
+discovery stays visible as unavailable and survives apply. Zero checked applies
+No skill catalog, never discovery and never an invalid empty Selected skills
+draft. Manual Add skill path remains available inside the picker; a path must be
+absolute and exist. Invalid input stays in the editor with an explanation rather
+than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
-Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
-Ctrl+S saves both settings as defaults. Sandbox permissions remain in `/sandbox`.
+Enter edits the cap as a positive whole number or a timing value in minutes;
+Escape cancels an unfinished edit. Ctrl+S saves the session’s delegation, workspace,
+timing, and skill settings as defaults. Reset to defaults restores them from the saved
+config. Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
 
 ```text
 /subagents mode manual|adaptive|coordinator
 /subagents cap 6
+/subagents tool-wait 5
+/subagents stuck 10
 /subagents save
 /subagents reset
 ```
 
-The cap defaults to 4 and applies to both single and batch launches. Lowering it
+The cap defaults to 6 and applies to both single and batch launches. Lowering it
 below the running count leaves existing work untouched and blocks new admissions
 until capacity becomes available. Slots already reserved by an in-flight launch
 remain admitted. Settings apply to this parent Pi process, not
 all Pi sessions on the machine. Saving preserves unrelated config keys and
-clears both session overrides. The command form asks for confirmation when a UI
-is available. Reset restores saved defaults without changing config.
+clears the mode, cap, timing-alert, and skill session overrides. The command form
+asks for confirmation when a UI is available. Reset restores saved defaults
+without changing config.
 
 `/reload` retains session overrides; new sessions use config, while resuming or
 navigating a branch restores its settings. On the navigator `main` sheet, `m`
@@ -75,10 +93,10 @@ is present; without this extension it uses adaptive guidance.
   completion and **returns a result**. There is no mid-task child→parent blocking
   call for a subagent to waste wall-clock on — a child missing a piece of info
   resolves it from what it was given, or records it unavailable and returns.
-- **Safe by default.** Every subagent is OS-sandboxed — writes confined to its
-  working directory, reads and network open — and scoped to an explicit tool
-  allowlist. It can't corrupt the parent, escape its directory, or recurse into
-  more subagents without opt-in.
+- **Sandboxing is opt-in.** Fresh Subagents settings start Off. Enable the
+  Subagents profile in `/sandbox` or request `sandbox:true` for kernel confinement.
+  An enabled human profile cannot be bypassed with `sandbox:false`. Explicit
+  saved profiles and session choices retain their values.
 - **Observable.** A live status widget and on-demand queries show each run's
   elapsed time and token/cost spend.
 
@@ -95,21 +113,154 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
-| `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
-| `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
-| `subagent_list` | never | Compact current-session list (default 10 rows / 1 KiB page). Params: `all` (machine-global / foreign session), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
-| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
-| `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
-| `subagent_stop` | never | SIGTERM a running run's process group. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `isolation`, `git_clone_workspace`, `recover_in_clone`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-tool-wait-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`. |
+| `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
+| `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, `toolWaitMinutes`, `stuckMinutes`, per-setting `sources`/`timingSources` (`environment`, `session`, `config`, or `default`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. Timing values already account for the same environment precedence a launch uses. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
+| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
+| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `tail` (raw mode: start from the newest retained byte and page backwards; the final step returns an append-ready cursor), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
+| `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `tail` (raw mode: newest bytes first), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
+| `subagent_stop` | never | SIGTERM a running run's process group. The run is terminal, so its completion callback (one per run id) reports `killed`. An abandoned launch record (see below) is removed instead of stopped, and a run a concurrent launch owns is preserved. |
+
+## Finding a saved conversation
+
+`subagent_list()` searches the current folder and its descendants, including runs
+from other foreground sessions. Use `subagent_list({ all: true })` for a global
+search. Each row shows both the attempt id and `session_id`; use the session id
+when continuing work. A continuation keeps that session id while receiving a new
+attempt id.
+
+```javascript
+subagent_list()
+subagent_list({ all: true })
+```
+
+Local name lookup follows the same folder scope. A duplicate name is not resolved
+by choosing the newest conversation; use one of the reported session ids instead.
+
+## Continuing a saved conversation
+
+Use the same spawn tool for new work and follow-up work:
+
+```javascript
+subagent_spawn({ name: "implementation", prompt: "Implement the change." })
+subagent_spawn({ session_id: "<saved-session-id>", prompt: "Fix the review findings." })
+subagent_spawn({ session_name: "implementation", prompt: "Fix the review findings." })
+```
+
+A launch without a session selector starts a new conversation. With a selector,
+`prompt` is the next user turn; the original task and role are already saved.
+Each attempt gets a new run id, log, timing record, and capacity slot while the
+native session id and history stay the same. The launch recipe preserves the
+worker's role, tools, skill exposure, model, and workspace, including uncommitted
+changes. Repeating a launch-only option is accepted only with the saved value;
+a different `skills` list is refused rather than silently dropped. A continuation
+whose frozen tool loadout can no longer be admitted (for example its trusted
+package is gone) is refused before anything is spawned, instead of reopening the
+saved conversation with different tools.
+
+A run stopped with `subagent_stop` (status `killed`) can be continued the same
+way. Stopping ends that execution, not the saved conversation or its
+uncommitted workspace: the next attempt reopens the same history and records
+`resumedFrom`, while the stopped attempt's status, log, and result stay as they
+were. A run that ended `failed` or `lost` is still refused; this path recovers
+interrupted work, it does not retry a failed run. The stopped child must also
+have exited: if the stop signal has not taken effect yet (for example the
+process was suspended), continuation is refused until that recorded child exits.
+The saved history and workspace stay intact while the stop settles.
+
+`session_name` is an exact display-name match within the current folder and its
+descendants. Several attempts of the same conversation count once. If several
+conversations share the name, spawn reports matching session ids and refuses to
+guess. Use `subagent_list({ all: true })` to find conversations elsewhere and
+pass `session_id`. `name` remains a new-launch label.
+
+Single and batch launches save native Pi sessions and completed launch recipes
+durably in the Pi agent directory. No retention flag or release tool is needed.
+Temporary event logs can be cleaned up independently. Missing or manually deleted
+history is never recreated by continuation. Older recipes pointing at temporary
+session files remain usable only while those original files exist.
+
+A different foreground session may continue a conversation. The new attempt's
+callback goes to its caller; previous attempts keep their original evidence.
+Only a completed conversation with an existing workspace and verified saved
+history can continue. One conversation admits one writer: active or orphaned
+attempts and live writer leases refuse competing launches. Continuation requires
+a runtime with `node:sqlite` (Node 24 recommended).
+
+Current mandatory human permissions apply on every attempt. A change that would
+alter confinement or replace recorded tool implementations refuses continuation.
+Only explicit model/effort escalation changes the saved model choice; a continued
+worker does not silently inherit the caller's model or re-resolve its role.
+
+Use per-job `session_id` or `session_name` in `subagent_spawn_batch`. A batch may
+mix fresh and continued jobs. Keep one job per conversation; the writer lease
+rejects competing jobs.
+
+If new parameters are missing after an npm upgrade, run `/reload` in Pi.
+Updating files on disk does not replace extension code already loaded in a live
+session.
+
+## Waiting without occupying a worker slot
+
+When Background Tasks is loaded, eligible workers receive a guarded bridge to
+supervised local commands. The bridge retains the worker's captured permissions
+and applies the current Background Tasks policy as well. Explicit tool exclusions
+and clean loadouts can withhold the bridge.
+
+An explicit tool list containing `wait_for_operations` must also contain
+`acknowledge_operation_result` and either `bg_task_status` or `bg_task_log`.
+The launcher checks this after permission filtering and refuses an incomplete
+combination. A default loadout with no authorized evidence reader withholds
+waiting instead of adding permissions.
+
+A worker starts a long validation command, continues independent work, then calls
+`wait_for_operations` with its owned task ids. Call this tool directly as the only
+tool call in its assistant message. A nested codemode call cannot deliver the
+SDK termination boundary. The SDK must be 0.82.1 or later.
+
+Parking saves the wait result at the end of the native conversation. The attempt
+then exits cleanly and releases its capacity slot. Its attempt status remains
+`completed`, but its park disposition means the assignment is unfinished. The
+navigator shows the wait phase and retains the row while the wait is pending.
+Closing that row cancels automatic resumption.
+
+Once all dependencies are terminal, the same saved conversation can resume with
+a new attempt id. The resumed worker can read operations launched by its earlier
+attempt. It inspects status and logs, then calls `acknowledge_operation_result`
+with the exact revisions and an interpretation note. Success, failure, cancellation,
+timeout and lost execution all settle a dependency; the worker must interpret the
+outcome before proceeding.
+
+Resumption requires the owning parent session and eligible branch to be active.
+Capacity, Goal, workflow, permissions, writer ownership and cancellation are
+checked again. Full capacity leaves the wait ready. Missing or conflicting
+recovery evidence leaves it held with a reason. The runner survives worker and Pi
+exit, but v1 does not run an unattended model after Pi shuts down.
+
+## Reporting completion
+
+Bound assignments use `report_assignment_result` with evidence from inside the
+assigned workspace. A sibling results directory is outside that boundary. An
+existing workspace source file can be evidence; read-only workers need not write
+a new artifact. Use `offset` and `max_bytes` to retain an excerpt from a file
+larger than 65,536 bytes.
+
+Before accepting an unblocked incomplete report with concrete `remaining_work`,
+the child allows one chance to continue that work. A normal model stop without
+an accepted report can use the same correction allowance to submit or correct
+the report. The allowance belongs to the current attempt, survives reload, and
+keeps the original deadline and permissions. Concrete blockers, aborted/error
+stops, parked work and expired deadlines do not trigger correction. Accepted
+reports remain immutable; exhausted correction retains the incomplete or
+unverified result for the coordinator.
 
 ## Codemode batch launches
 
 On Pi 0.99.1 or newer, enable native codemode alongside the existing direct
 tools with `defaultTools: ["+codemode"]` and `codemode.mode: "on"`. SDK sessions
 must also load Pi's `createCodemodeExtension()`. This support is for the
-foreground coordinator; it does not enable codemode in confined children or
-change sandbox admission.
+foreground coordinator. Child codemode is enabled separately by the default
+tool set and preserves sandbox tool admission.
 
 `subagent_spawn_batch` returns the same readable text to direct callers and a
 structured launch receipt to codemode scripts. No text parsing is needed:
@@ -151,38 +302,46 @@ completion callbacks with `subagent_result`; do not poll or keep a script open
 waiting for completion. Callbacks and capacity/catalog guarantees remain owned
 by the existing harness runtime.
 
-## Run timing (deadline, ceiling, stuck)
+## Run timing (deadline, ceiling, tool wait, stuck)
+
+When a limit stops the run, `subagent_result` identifies the limit, the last recorded work, open tool calls and the available files. Unfinished checks remain unverified. The same read works with `callback:false`.
 
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
-progress. Every run gets stall detection by default. Elapsed-time limits are
-opt-in because total runtime does not distinguish a slow agent from a stalled
-one.
+progress. Every run gets a tool-wait alert, stall detection, and a 60-minute hard
+timeout by default. Soft deadlines remain opt-in because total runtime does not
+distinguish a slow agent from a stalled one.
+Choose **Run timeout** in `/subagents settings`. Enter a duration in minutes, type **24 hours**, or press Space to select **24 hours**. Ctrl+S saves the choice for future sessions. Changes apply to
+new attempts, not runs already in progress.
 
 | Control | Default | What happens |
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds everything, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
-| Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
+| Hard ceiling (`max_minutes`) | 60 | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
+| Tool-wait window (`tool_wait_minutes`) | 5 | One tool call that stays open this long sends one factual parent wake for that call, including when it is a normal long test. Parallel calls alert independently. The alert never stops, cancels, or restarts the run, and a later call can alert on its own. |
+| Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. Time inside a running tool call is excluded, so tool waiting and no-progress are reported separately. |
 
-`0` turns a control off. `null` or an omitted value means "inherit": on
+`max_minutes: 0` uses the 24-hour maximum. For other controls, `0` turns the control off. `null` or an omitted value means "inherit": on
 `subagent_spawn` that is the configured default; on a `subagent_spawn_batch` job
 it is the `shared` value, then the configured default. Values are minutes and
 may be fractional. A job's own number (including `0`) wins over `shared`.
 
 **Known limits of the deadline hold.**
 
-- `max_minutes: 0` turns the ceiling off, and the ceiling is the only control
-  that bounds a tool call that never ends. With it off, a steer stuck behind a
-  hung tool call is never delivered, the deadline stop stays held, and the run
-  is never stopped. Opt into a ceiling when a command must have a wall-clock
-  bound.
-- The parent reads at most the last 32 MiB of a child log after `/reload`. If
-  the log is larger and the running tool call started before that window, the
-  parent cannot see the call, so the hold is lost and grace counts from when
-  the steer was sent. The child can be stopped mid-call.
+- Active runs fail when they reach 24 hours, including while waiting for a tool.
+  Progress and daemon restarts preserve the original deadline.
+- The parent reads at most the last 32 MiB of a child log after `/reload`. It
+  also records the calls it last saw open in the run's metadata on each
+  supervision tick, so a reload normally keeps the hold and the not-stuck
+  accounting even when the call's start is outside that window. The record is
+  written by the tick, so a call that started less than one tick (15 s) before
+  the reload is not covered; and a record whose call ended while the window was
+  lost keeps the hold, and keeps the run from being reported stuck, until the
+  next observed turn proves that batch ended (a newer retained message followed
+  by its tool call start). Opt into a ceiling when the run needs a hard
+  wall-clock bound.
 - The child confirms delivery by matching the steer's exact text in its
   conversation. If another extension rewrites user input (an input-transform
   hook), the text no longer matches, no receipt is written, and grace silently
@@ -201,8 +360,12 @@ harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
 name and normalized arguments; past that the oldest is forgotten, so a call from
 long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
-stuck. A command that hangs is bounded only when the caller opts into a deadline
-or ceiling.
+stuck — including after `/reload`: the call the parent saw open is stored in the
+run's metadata, so a bounded log read that no longer contains its start does not
+turn it into "no progress". That same open-call evidence drives the independent
+tool-wait alert: each call alerts once after its configured window, and the
+durable marker survives `/reload`. A hanging command can be bounded by the sandbox command time limit; the run
+ceiling separately bounds the whole run.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
 ([failure observations](failure-observations.md)).
@@ -213,19 +376,22 @@ three times wakes the parent once as an `Action required` incident
 deadline), `deadline: passed` (ended some other way after the deadline, for
 example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The spawn response lists the limits in force.
 
-**Global defaults.** Precedence is spawn parameter, then environment, then
-`config.json`, then the built-in default:
+**Global defaults.** Precedence is spawn parameter, then the session timeout
+choice (for `max_minutes`), then environment, then `config.json`, then the
+built-in default:
 
 | Setting | Environment | `config.json` |
 |---------|-------------|---------------|
 | Soft deadline | `PI_SUBAGENT_DEADLINE_MINUTES` | `deadlineMinutes` |
 | Grace | `PI_SUBAGENT_GRACE_MINUTES` | `graceMinutes` |
 | Hard ceiling | `PI_SUBAGENT_MAX_MINUTES` | `maxMinutes` |
+| Tool-wait window | `PI_SUBAGENT_TOOL_WAIT_MINUTES` | `toolWaitMinutes` |
 | Stuck window | `PI_SUBAGENT_STUCK_MINUTES` | `stuckMinutes` |
 
 **Durability and delivery.** The policy and its one-shot markers (steer
-requested, deadline wake, stuck wake, stop reason) are stored in the run's
-metadata at launch, so `/reload` keeps the deadline and never repeats a wake.
+requested, deadline wake, tool-wait marker per call, stuck wake, stop reason)
+are stored in the run's metadata at launch, so `/reload` keeps the deadline and
+never repeats a wake.
 The parent checks timing on its 15-second supervision tick. The steer travels
 through a request file in the run directory, read by a small harness extension
 loaded into every child (it registers no tools and runs no commands). When the
@@ -262,11 +428,18 @@ given.
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
-- **Optional busy steering.** In `/harness-settings`, set **Completions while
-  busy** to **Steer active run** to receive ordinary completions during
+- **One completion per run.** A run's ordinary notification is identified by
+  its run id, so a terminal run is reported once even if its status wording
+  changes (failure notes, observation gaps) between queueing and delivery.
+  Stopped runs are terminal too: `subagent_stop`, a navigator Close, the reload
+  drain, or cleanup that finalizes an orphaned run from its log records the same
+  pending completion, so the caller receives one `killed`/`completed`/`failed`
+  row instead of discovering the outcome by polling `subagent_list()`. A run
+  stopped while the session is shutting down is recovered by the next session.
+- **Optional busy steering.** In `/harness-settings`, set **Completion delivery** to **During run** to receive ordinary completions during
   foreground work. Changes autosave to the current session branch and apply
   immediately; **Ctrl+S** saves the choice as the user default for future
-  sessions, including standalone callback packages. **Wait until idle** is the
+  sessions, including standalone callback packages. **When idle** is the
   default. The former `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is
   no longer supported. Completions spanning multiple accumulation windows during
   one tool call stay together until the final active tool ends, then share one
@@ -285,20 +458,22 @@ given.
 
 ## Autonomy & safety
 
-Every subagent is confined by default, and the confinement is **self-contained** —
-it does not depend on any other extension being installed.
+Subagents start unconfined in fresh settings. Without published settings, an
+omitted `sandbox` also starts unconfined. Explicit `sandbox:true` enables task
+confinement without requiring another extension; `sandbox:false` cannot bypass
+an enabled human profile. Saved enabled profiles and session choices stay enabled.
 
-- **Task sandbox (default on, macOS and Linux).** Pi startup, authentication,
+- **Task sandbox (opt-in, macOS and Linux).** Pi startup, authentication,
   provider transport, and session persistence run as trusted runtime operations.
   Admitted task tools run under `sandbox-exec` or Linux Bubblewrap. Project files
-  default to Read / write and outside files to Read, including `~/.pi`; runtime
+  default to Write & delete and outside files to Write. Task access to `~/.pi`
+  follows the outside and credential-file rules; runtime
   control files remain protected. Commands use private scratch plus explicit
   runtime exceptions for `/tmp` and the current user's macOS temporary and MDS
   cache directories when Outside is Read or Read/write. Credential and control
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
-  implementations, the guarded `apply_patch`, and the trusted tools ticked in
-  `/sandbox`. The fixed `process_list` adapter is available with Process access
+  implementations, guarded `run_application`, the guarded `apply_patch`, and the selected extension tools with verified providers. The fixed `process_list` adapter is available with Process access
   set to Read. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
   `allow_nested:true` loads nested-agent support only for unconfined children.
@@ -306,7 +481,8 @@ it does not depend on any other extension being installed.
 ### Write sandbox
 
 The shared `sandbox-core` and `task-sandbox` modules enforce task operations in
-both Main and Subagents. The defaults are Main Off and Subagents On. Subagents
+Main, Subagents, and Background tasks. All three sandbox switches default Off.
+When enabled, Subagents
 use Project files = Write & delete and Outside project = **Write**: tasks write
 across home and temp (tool caches such as `~/.gradle` and `~/.npm` just work), but
 outside the workspace they can only remove or rename files in temp, hidden home
@@ -341,14 +517,40 @@ does not start an emulator or allocate test resources. The setting governs
 the fixed adapter only, not every OS process operation available through bash
 or trusted tools. New launches capture changes; running children retain their
 launch-time setting. Raw macOS `/bin/ps` remains subject to setuid execution
-restrictions. See [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
+restrictions. With Process Read and Commands On, the task PATH includes a
+protected non-setuid compatibility entry for exactly
+`ps -p PID -o lstart= -o comm=`. It returns the current-user process's start time
+and executable path, without exposing arguments or environment. The harness
+requires Xcode Command Line Tools to build this fixed helper; failure refuses
+identity queries without disabling other commands. This does not alter absolute
+`/bin/ps` or callers that replace PATH. See [ADR 0024](../../../docs/adr/0024-sandbox-process-identity-compatibility.md)
+and [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
 Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.
 
-`read`, `write`, `edit`, and `bash` have verified adapters. Extension tools are
-chosen in `/sandbox` → Subagents · Tools
-([ADR 0009](../../../docs/adr/0009-guarded-and-trusted-subagent-tools.md)):
+`read`, `write`, `edit`, `bash`, and `run_application` have guarded adapters.
+With Run applications On and Shell scripts Off, a requested `bash` capability is
+replaced by `run_application`, subject to `exclude_tools`; a read-only tool
+selection does not gain application execution. Direct `run_application` takes
+`executable: string`, `args: string[]`, and optional `timeout: number` and
+spawns without a shell inside the OS sandbox. Shell scripts Off also blocks
+explicit shell-interpreter launches, including aliases. Applications such as
+`pnpm` and `pytest` can still invoke scripts internally, so this is not a ban
+on every descendant shell or a guarantee of termination.
+
+The Command time limit is an immutable maximum per command. A smaller requested
+timeout wins; omitting or increasing the request cannot bypass the cap. Cleanup
+covers ordinary process-group descendants, not deliberate daemons. This limit
+is separate from the subagent run ceiling. Shell scripts defaults On and the
+limit defaults to No limit, including for legacy profiles. To opt in, set
+Subagents → Sandbox On, Run applications On, Shell scripts Off, and Command time
+limit to 10 min in `/sandbox`, then press Ctrl+S. New launches capture the policy;
+running children keep theirs. An incompatible older consumer is rejected rather
+than silently dropping these restrictions.
+
+Select tools in the role, worker defaults or spawn request. Loading a tool grants access to call it. Use `/sandbox` to edit the resource rules.
+[Sandbox tool loading and permission to use tools](../../../docs/adr/0027-sandbox-tools-and-permissions.md) defines the contract.
 
 - **Guarded:** `apply_patch`, a harness adapter with the Codex tool's name,
   schema and patch format. Every add, update, move and delete goes through the
@@ -358,18 +560,19 @@ chosen in `/sandbox` → Subagents · Tools
   checked first; no file is left half-patched, and a failure part-way reports
   what was and wasn't applied. It is added for a child that may `edit` or
   `write`, or asks for it.
-- **Trusted:** third-party tools you tick (default `web_fetch` and `web_search`).
-  Their package is loaded into the child and they run in the child Pi process,
-  **outside the file rules**. The child admits one only when both its name and
-  its package match the ticked entry, so another package registering the same
-  name is refused. A single extension file with no package manifest is loaded
-  and admitted by itself, never its directory. Known network tool names
-  (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
-  network sandbox. A ticked tool whose package can't be found is refused at launch. Ticked tools
-  join the default tool list; an explicit `tools` list still decides.
+- **Extension tools:** the child loads the selected provider and checks its
+  canonical source at dispatch. A single user-installed extension entrypoint is
+  loaded by itself. Known network tools require Network access On. The extension
+  runs in the trusted Pi process, outside guarded file operations.
+  If a trusted tool is inherited from the defaults, registers in the child, and
+  is then inactive (for example, because the extension requires a different
+  model), the child logs the omission once and continues without it. Missing
+  registrations and unavailable explicitly requested tools still fail preflight.
 
-Other tools are disabled in confined children and listed in launch output with
-the reason. The launch line shows what was admitted, for example
+Other tools are disabled in confined children. One that only joined the default
+loadout is omitted from the child and listed in launch output with the reason;
+one the caller named in `tools` refuses the launch with the reason. The launch
+line shows what was admitted, for example
 `Runtime: isolated · guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools)`.
 Provider extensions are trusted runtime code; arbitrary extension tools are not
 admitted merely because their names were requested. Confined children disable project
@@ -389,56 +592,104 @@ there but refuse unlink, leaving an empty lock even when status exits zero.
 The default skips optional index refreshes; it does not disable required locks
 for `git add` or commits, grant metadata removal, or remove existing locks.
 
-A sandboxed subagent that will mutate Git should set **`git_clone_workspace:true`**
-on `subagent_spawn`. The parent prepares a fresh, self-contained Git clone whose
-`.git/` directory lives **inside the sandbox writable root**, then runs the child
-in that clone.
+### Git workspaces
 
-Why this matters: a linked Git worktree (created with `git worktree add`) has a
-`.git` file that points back to administrative state under the main repository,
-typically outside the sandbox directory. A sandbox that only allows writes under
-the worktree directory therefore cannot support normal Git producer operations
-such as fetch, rebase, commit, and push — the child stalls or fails when Git
-tries to write metadata it cannot reach. `git_clone_workspace:true` avoids this
-by cloning the repository with a real `.git/` directory inside the writable root.
+Single and batch launches give each Git writer an independent checkout of the
+source HEAD. **Git workspace** in `/subagents settings` selects **Clone** (the
+default) or **Worktree** for new launches. Ctrl+S saves the selection. Clone
+keeps Git metadata inside the checkout. Worktree shares the source object store.
+A read-only launch, an explicit `sandbox_dir`, or `isolation:false` can use the
+supplied directory. The explicit `git_clone_workspace:true` option keeps its
+existing branch and upstream selection.
 
-The clone uses:
+`subagent_result` reports the checkout or its saved result. Inspect and apply the
+changes you want. Cleanup verifies an independent copy before reclaiming an idle
+checkout and its Worktree registration. The saved files include the exact Git
+index, working files, ignored outputs and local commits. Identical file contents
+share storage. After cleanup, use `pi-subagents-recover <run-id> <new-directory>`
+to inspect an independent copy, including an unsuccessful attempt. An eligible
+continuation restores its saved workspace and history.
 
-```
-git clone --reference-if-able <local-reference-repo> --dissociate \
-          <remote-url> <sandbox-workspace>
-```
-
-`--reference-if-able` borrows local objects from the parent repository during
-setup; `--dissociate` removes the alternates link afterwards, so the clone is
-self-contained and safe to delete. The clone source prefers the source
-workspace's upstream remote URL (`origin` when set) so the disposable
-workspace's `origin` points at the real remote rather than the parent working
-tree — pushes therefore target upstream, not the sandboxed parent. The local
-repository is used only as a reference (and as a content fallback when no
-remote is configured). Source remotes are re-synced after clone. The
-checked-out branch/commit matches the source workspace at spawn time.
-Repo-local Git identity settings from the source (`user.name`, `user.email`,
-and `user.signingkey` when set) are copied into the clone so ordinary commits
-work without reconfiguring identity inside the disposable workspace.
-
-If the source workspace is a linked worktree, the clone is prepared from the
-main repository's object database and the requested branch/commit; the child is
-never launched into the structurally broken linked-worktree sandbox. If clone
-preparation fails, the spawn fails fast with a message explaining that the
-linked-worktree Git metadata is outside the sandbox and recommending
-`git_clone_workspace:true`.
+When sandbox rules block a Git metadata update in Worktree, the parent can
+review the existing changes or continue with `session_id` and
+`recover_in_clone:true`. The handoff verifies the copy under the conversation's
+writer lease. The next attempt uses the same sandbox policy. If Git has an open
+transaction or recovery cannot verify the copy, inspect the original directory
+reported in the result.
 
 The mandatory task guard is independent of optional guardrails extensions.
 Adding a package to the tool map does not make its tools safe to execute outside
 the task boundary.
 
+## Skill exposure
+
+A child otherwise inherits the whole user-level skills catalog, which dominates
+its system prompt even when the task already names the one `SKILL.md` it needs.
+`skills` bounds that exposure:
+
+| `skills` | Child argv | Effect |
+| --- | --- | --- |
+| omitted | (no flag) | discover the user catalog |
+| `[]` | `--no-skills` | no skills at all |
+| `["/abs/SKILL.md", …]` | `--no-skills --skill <path>…` | exactly those skills |
+
+Precedence, highest first: the launch option (or the batch job's value, then
+`shared`), a catalog role/agent's `defaults.skills` / `overrides.skills`
+([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), the current
+session's `/subagents settings` choice, saved `defaultSkills`, then discovery.
+Each level distinguishes "not set" from `[]`, so `[]` disables discovery rather
+than falling through to a wider default. The session choice applies to the next
+launch even before Ctrl+S.
+
+`/agents` edits the catalog's own value: the Skills row shows the effective mode
+and whether it comes from the agent override, the base role, the session or
+global default, or discovery, and offers Inherit, No skill catalog, or Selected
+skills. `/subagents` edits the session choice first, then saves it as the global
+`defaultSkills`. Both Selected skills screens use the same checkbox picker. Its
+available entries come from the skills Pi already loaded for the current session
+through `ctx.getSystemPromptOptions().skills`; saved paths that are not in that
+list stay visible as unavailable. If the host reports no loaded skills, the
+picker says so and manual Add skill path remains available. See
+[catalog operations](agent-catalog-operations.md#skill-exposure-edits).
+
+Relative paths resolve against the child's workspace. The effective choice is
+frozen in the launch recipe and printed at launch as
+`Skills: none (--no-skills) · source launch`, so a continuation reproduces it.
+A recipe written before this option existed has no `skills` key and keeps
+discovery. There is no `exclude_skills`: Pi cannot drop single entries from a
+discovered catalog without also taking over discovery.
+
+Discovery and an empty list are different choices. A continuation may repeat
+only the frozen choice: `skills: []` is refused for a conversation launched with
+discovery, including a recipe written before this option. A conversation that
+froze `[]` accepts an identical `[]` and refuses paths.
+
+### Project context in a linked worktree
+
+A child keeps its parent's working directory. When that directory is inside a
+linked Git worktree, the worktree is the project context root: the child receives
+the global `AGENTS.md` from the agent directory and the context files at or below
+the worktree root, not the main checkout's file or any ancestor above it. Ordinary
+repositories keep every ancestor context file. The parent session applies the same
+boundary, so a standalone Subagents install behaves like the bundled one.
+
+The boundary follows where Pi selected a file, not what a filename symlink points
+at. It needs a Pi host that rebuilds the prompt from `systemPromptOptions` after
+the `before_agent_start` hook (Pi 1.x); an older host keeps the prompt it loaded.
+
 ## Tool scoping (allowlist)
 
 Precedence, highest first: the per-call `tools` param → `config.json`
-`defaultTools` → a built-in default (`read, bash, edit, write, web_search,
+`defaultTools` → a built-in default (`read, bash, edit, write, codemode, web_search,
 web_fetch`; just `read, bash` in a `clean` child). `exclude_tools` subtracts on
 top.
+
+On Pi 0.99.1 or newer, default children explicitly load native `codemode` even
+with extension discovery disabled. Custom tool lists must include `codemode`;
+`exclude_tools: "codemode"` removes it. Older SDKs keep their existing tools.
+In confined children, nested tool calls pass through the task guard. Direct
+classifier and image-model globals are disabled there because they bypass tool
+hooks. Unconfined children retain native model globals.
 
 User configuration lives in
 `~/.pi/agent/settings.json` under `piBetterHarness.subagents` (under
@@ -454,10 +705,15 @@ The effective config also sets:
 
 - `defaultModel` — model for spawns that don't specify one (`null` = inherit the
   foreground model).
+- `defaultSkills` — skill exposure when neither the launch nor a catalog role or
+  agent chooses one. Omit it (or set `null`) for discovery, `[]` for no skills,
+  or absolute paths for exactly those skills. `/subagents settings` writes
+  `null` when Discover automatically is saved, so it overrides an older path
+  list. See [skill exposure](#skill-exposure).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
   `/subagents save` saves mode and cap together as config defaults.
-- `maxConcurrent` — positive whole-number concurrency cap (**default 4**).
+- `maxConcurrent` — positive whole-number concurrency cap (**default 6**).
   `/subagents cap <number>` overrides it for this session. Both single and batch
   admissions respect the cap; existing runs are never stopped by a cap change.
   Use `/subagents settings` to edit both controls or `/subagents reset` to return
@@ -465,12 +721,10 @@ The effective config also sets:
 
 ## The allowlist also decides what LOADS
 
-For confined children, the requested list is first restricted to tools with
-verified task adapters and the trusted tools ticked in `/sandbox`; only the
-ticked tools' packages load. `toolExtensions` still chooses which package to
-load for a tool (an override), but the child admits it only if that is the
-ticked package. Provider extensions can still load as trusted runtime
-dependencies. Nested spawning and
+For confined children, the requested list selects verified task adapters and
+extension providers. A worker mapping takes precedence over an active
+user-installed entrypoint. Previously saved trusted-package records can
+identify a provider for a selected tool. Nested spawning and
 inherited extension discovery are currently unavailable under confinement.
 
 The mapping behavior below applies to unconfined children and to admitted
@@ -483,19 +737,27 @@ which extension *code* is loaded into it. A child launches as
 pi -p --mode json --no-extensions -e <package backing a requested tool> ...
 ```
 
-so a package that backs no requested tool never loads. With the default
-allowlist (`read, bash, edit, write, web_search, web_fetch`) exactly one package
-loads — the web-tools one — and `web_fetch` works normally.
+The default editable worker gets the Harness `apply_patch` adapter. An explicit
+`process_list` request loads the bounded current-user inventory adapter. Each
+can use an ordinary provider override. The default web tools load their
+configured package. Both execution modes use the selected tools without an additional permission checkbox.
 
-Two maps in `config.json` drive it:
+Two maps in `config.json` drive it, with a built-in default for provider auth:
 
 - `toolExtensions` — tool name → package(s) providing it. Built-ins (`read`,
   `bash`, `edit`, `write`) need no entry.
 - `providerExtensions` — provider → auth package. Model auth is not tool-shaped:
   `xai/grok-4.5` needs `pi-xai-oauth` loaded whatever tools it was granted.
 
-Ask for a tool with no mapping and the spawn still succeeds, but says so at
-launch — the tool simply will not exist in the child.
+The built-in map loads `pi-ollama-cloud` for `ollama-cloud` models, so a role
+resolved against that provider works without a manual entry. An entry for the
+same provider replaces the built-in one, and an empty list disables it. A mapped
+package that is not installed still fails the launch with the explicit
+missing-extension error rather than starting without provider auth.
+
+A required tool with no possible provider fails admission. If an extension
+could supply the name, the worker checks the active registration during
+startup. Both failures identify the missing tool.
 
 `clean:true` is the narrowest case of the same mechanism: no extensions at all.
 For unconfined children, `allow_nested:true` loads this package into the child;
@@ -516,9 +778,19 @@ mid-turn** — no `tool_execution_end`, no `agent_end`. Historically, exit 0 was
 indistinguishable from a clean finish, so all 17 observed mid-turn exits were
 reported as ✓ completed. Finalization now requires terminal agent evidence and
 no unmatched tool starts. Lifecycle validation classifies runs as `complete`,
-`incomplete_no_terminal_event`, `incomplete_open_tools`, `failed_exit`, or
-`killed`; incoherent exit-0 streams are recorded as failed with named lifecycle
-diagnostics on `subagent_result` and attention wording on completion callbacks.
+`incomplete_no_terminal_event`, `incomplete_open_tools`, `failed_exit`,
+`failed_model_error`, or `killed`; incoherent exit-0 streams are recorded as
+failed with named lifecycle diagnostics on `subagent_result` and attention
+wording on completion callbacks.
+
+A stream whose **last** model request failed - and that no later assistant turn
+superseded - is recorded as `failed_model_error`, never `complete`. Pi ends the
+loop normally after a provider error, so such a child exits 0 with a terminal
+event and used to look like a finished run that had simply produced very little
+text. The result now reports the failure and repeats the provider error verbatim
+(for example a virtual model that could not route: `Model router: no eligible
+Flash model is available.`). An earlier failure that auto-retry recovered does
+not fail the run.
 
 A tool allowlist alone cannot fix this. `--tools` restricts what the model may
 *call*; the package already overrode builtin `bash` at startup, so the `bash` in
@@ -590,10 +862,8 @@ is unchanged in every mode.
   still running, press `←` to focus the main-window subagent list above the
   input line.
 - If the editor contains text, `←` keeps normal cursor-left behavior.
-- While running runs exist, the default footer shows `← subagents · N`. The
-  live widget also includes a secondary `← to navigate` hint on its title line
-  for terminals that do not render the default footer status. The hint clears
-  when no non-dismissed current-parent run is still running.
+- The work list shows a navigation hint while running work is visible. The
+  subagent navigator does not write to the status bar.
 - While the main-window list is focused, the title hint changes to
   `Enter to view · x to stop`; the selected row is marked with `›`. Press
   `↓` from the bottom row to return to the input line.
@@ -635,7 +905,7 @@ is unchanged in every mode.
 ### Two-press `x` stop/dismiss
 
 - First `x` on the selected (list) or viewed (detail) run arms the action for three
-  seconds and shows a footer hint: `x again to stop <name>` while running, or
+  seconds and shows a hint in the navigator: `x again to stop <name>` while running, or
   `x again to dismiss <name>` when terminal.
 - Second `x` within the window, on the **same** run, acts:
   - **Running** — stop the process group (shared `subagent_stop` semantics),
@@ -646,7 +916,7 @@ is unchanged in every mode.
 
 ### Dismissal is navigator-only
 
-Dismissed runs leave the navigator list and footer count. Logs, prompt, session
+Dismissed runs leave the navigator list. Logs, prompt, session
 data, metadata, and id-based tool access stay intact. `subagent_list`,
 `subagent_output`, `subagent_result`, and `subagent_stop` still resolve dismissed
 run ids. Dismissal survives `/reload` as dismissed in the navigator.
@@ -654,16 +924,17 @@ run ids. Dismissal survives `/reload` as dismissed in the navigator.
 ### Reload and teardown
 
 `/reload` and session restart reinstall the empty-editor wrapper without stacking
-duplicate handlers, republish the footer count, and clear any leftover overlay
-timers or close-confirm state. Session shutdown disposes open navigator timers
-and clears navigator footer statuses (TUI only).
+duplicate handlers and clear any leftover overlay timers or close-confirm
+state. Session shutdown disposes open navigator timers.
 
 ## Design notes
 
-- Runtime lives outside any repo, under `$TMPDIR/pi-better-subagents/`
-  (`runs/<id>/` holds `output.log`, `prompt.md`, `meta.json`; `sessions/` holds
-  child session state). The `meta.json` sidecar is authoritative, so `list` /
-  `output` / `result` survive turns, `/reload`, and pi restarts.
+- Temporary run evidence lives outside any repo under `$TMPDIR/pi-better-subagents/`
+  (`runs/<id>/` holds `output.log`, `prompt.md`, and `meta.json`). Native child
+  sessions and compact completed-attempt recipes persist under the Pi agent
+  directory in `subagents/sessions` and `subagents/attempts`. Event-log cleanup
+  does not remove the saved conversation or recipe. Existing legacy recipes keep
+  their original session paths.
 - The child runs `--mode json`; `subagent_result` / `subagent_output` **parse**
   the event stream and return just the bounded final answer (no tool-name history).
   Non-JSON banner/warning lines fail to parse and are dropped, so the result is
@@ -675,7 +946,49 @@ and clears navigator footer statuses (TUI only).
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Default `subagent_list` is current-session, newest first, 10 compact rows / 1 KiB. Pass `limit:N` (max 100) or `max_bytes` (max 4 KiB) for an explicit larger page. Pass `all:true` for a global / foreign-session view. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` default to the current session; pass `all:true` to read a foreign-session id. Unknown ownership is a gap, not “not found”; when the current session identity cannot be read, no run's ownership is treated as verified and `all:true` is required. List pages are reached with the returned `nextCursor` (every run is reachable, not only the first 100). Runs whose metadata is missing or corrupt are reported as gaps and counted on lists, never as nonexistent.
+The live widget, concurrency cap, and supervision ticker track this Pi process's runs. `subagent_list` searches the current folder and its descendants across foreground sessions; `all:true` searches globally. Rows show the attempt id and the native `session_id`, so a listed conversation can be continued explicitly. Results are newest first, with 10 rows / 1 KiB by default. Use `limit` (max 100), `max_bytes` (max 4 KiB), and `status` filters as needed. Cursors are bound to the local folder or global scope and cannot be replayed from a different folder. Id-based `subagent_result` and `subagent_output` keep their current-session scope; use `all:true` to read another session's run evidence. Unknown ownership remains an explicit gap for those evidence tools. Saved conversation discovery and continuation do not require the original foreground session to exist.
+
+## Abandoned launch records
+
+A launch creates and claims its run directory, writes `prompt.md`, and prepares
+the sandbox `control/` dir before the child starts and `meta.json` is committed. When that
+preparation fails — or Pi dies inside that window — only those artifacts remain:
+no metadata (nothing was committed) and no `output.log` (the log is created at
+spawn and removed when the spawn itself fails). A launch failure now removes
+them, so this state cannot be created anew.
+
+A directory in that state that is left by an older version or a crashed process
+is an **abandoned launch record**, not a run. It has no owner, status, log or
+result, and can never gain any, so `subagent_list` reports it separately as not
+run evidence and does not count it:
+
+```text
+1 abandoned launch record(s), not run evidence and not counted: the launch
+stopped before any child started (prompt written, no metadata, no log): sa_…
+Cleanup reclaims them after 1 hour; remove one now with subagent_stop <id>.
+```
+
+Every launch's hygiene pass (`runDailyCleanupOnce`, alongside the daily and size
+sweeps) reclaims abandoned launch records older than one hour, or immediately
+with `subagent_stop <id>`. Only the attempt's own run directory, its per-run
+session directory, and a clone workspace it owned are removed.
+
+Cleanup never deletes a live attempt. A launch claims its run directory
+(`.launch-attempt.json`: pid + process start identity) before it prepares
+anything, and removes the claim when `meta.json` becomes the record. A record
+whose claim is owned by a live process is not debris at any age, and the purge
+re-classifies under the same per-run metadata lock a launch publishes under, so a
+launch that commits metadata while a purge waits is preserved. In that case
+`subagent_stop` reports `Preserved …` and removes nothing:
+
+```text
+Preserved sa_…: a concurrent launch published this run (running), so nothing
+was removed. Call subagent_stop again to stop the run.
+```
+
+A directory that has a log is deliberately **not** treated as debris either: a
+child may have started and its output is real evidence, so it stays an explicit
+unreadable-record gap until normal retention reclaims it.
 
 ## Supervision health (`orphaned` / `lost`)
 
@@ -741,8 +1054,8 @@ sudo dnf install bubblewrap
 sudo pacman -S bubblewrap
 ```
 
-When `bwrap` is absent, explicit sandbox requests fail with an installation hint;
-default-on sandboxing preserves the documented direct-execution fallback. Once
+When `bwrap` is absent, explicit sandbox requests and enabled human profiles
+fail with an installation hint. Unconfined launches need no backend. Once
 `bwrap` is selected, a launch failure fails closed rather than retrying the child
 without confinement.
 
@@ -780,3 +1093,17 @@ Near-term:
   twice ([#2](https://github.com/1aboveio/pi-better-subagents/issues/2)) — **done**.
 - Named agent-definition files (per-agent system prompt + tool allowlist) and
   chain/parallel orchestration.
+# Historical Waits
+
+`/subagents history` lists retained waits from other sessions in this workspace.
+Each entry identifies its originating session and offers inspection or explicit
+cancellation. Inspection does not adopt the assignment, acknowledge its evidence,
+or start a continuation. Cancellation confirms the durable result; it does not
+claim that an uncertain writer has stopped. Failures leave the wait available
+for inspection and retry.
+
+`/subagents history dismiss` durably dismisses the current historical-attention
+notice without changing any wait or evidence. A changed wait generation, phase,
+publication or attention reason can produce a new notice. Ordinary task navigation
+remains scoped to the active session.
+

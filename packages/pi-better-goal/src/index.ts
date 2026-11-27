@@ -6,9 +6,11 @@ import { Type } from "typebox";
 import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
 import { goalPreferencesPath, readGoalPreferences, writeGoalPreference, type GoalPreferences } from "./preferences.js";
 import { createGoalSettingsPage } from "./settings-page.js";
+import { OPERATION_RESUME_ADMISSION, operationOwnerMatches, type OperationResumeRequest } from "./operation-admission.js";
 
 import {
   collectActivitySnapshot,
+  hasUnverifiedActivity,
   planBackgroundDrainWake,
   summarizeActiveBackground,
   terminalAttentionSignature,
@@ -28,7 +30,8 @@ import {
   type GoalEntrySource,
 } from "./goal-state.js";
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
-import { currentPermissionHold, logicalPermissionBlockerKey, MAX_PERMISSION_BLOCKERS, MAX_PERMISSION_RECORDS, permissionHoldRecord, permissionInstruction, permissionRecord, reportedPermissionBlockers, reportedPermissionGap, type PermissionHold } from "./permission-hold.js";
+import { currentPermissionHold, logicalPermissionBlockerKey, MAX_PERMISSION_BLOCKERS, MAX_PERMISSION_RECORDS, permissionGapRecord, permissionHoldRecord, reportedPermissionBlockers, reportedPermissionGap, type PermissionHold } from "./permission-hold.js";
+import { publishGoalGuidance } from "./prompt.js";
 import { observeGoalStall } from "./stall.js";
 import {
   flattenObjectiveForRail,
@@ -38,11 +41,17 @@ import {
   renderGoalClockLine,
 } from "./goal-clock.js";
 import { createRenderScheduler } from "./shared-render-scheduler.js";
+import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
-import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
+import { canStartGoalFromOutcome, GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
+  sessionIdleEvent,
+  type SessionIdleInspection,
+  type SessionIdleState,
   EVENT_READY,
   EVENT_REGISTER_PROVIDER,
   EVENT_TERMINAL_ATTENTION,
@@ -51,6 +60,7 @@ import {
   type ActivitySnapshot,
   type BackgroundActivityProvider,
   type BackgroundWorkItem,
+  type BackgroundProviderSnapshot,
   type GoalSnapshot,
 } from "./types.js";
 
@@ -58,6 +68,10 @@ const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 60_000;
 const DEFAULT_MAX_NO_PROGRESS_RETRIES = 10;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+/** Never re-poll a workflow's scheduler sooner than this, even when its stated attempt time has passed. */
+const MIN_WAIT_DELAY_MS = 5_000;
+/** Workflow skills whose invocation binds a goal when none is active, so the run cannot stop silently. */
+const AUTO_BIND_SKILLS = ISSUE_WORKFLOW_SKILLS;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
@@ -94,31 +108,32 @@ export function agentResumable(goal: GoalSnapshot | null, conversationalResume =
 
 /** Footer status for a paused goal, telling the user how to resume it. */
 export function pausedGoalStatus(goal: GoalSnapshot, conversationalResume = true): string {
-  if (goal.pauseReason === "permission-blocker") return "goal held: permission blocker · /goal resume (one retry)";
   return agentResumable(goal, conversationalResume) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
 }
 
-function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean): string {
+function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean, includeObjective = true): string {
   return [
     goal.pauseReason === "handback"
-      ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer. Goal: ${goal.objective}`
-      : `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
+      ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
+      : goal.pauseReason === "interrupt"
+        ? `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
+        : `Pi Better Goal is paused.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
-    conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
+    agentResumable(goal, conversationalResume) ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
 }
 
 const BLOCKING_QUESTION_TOOLS: ReadonlySet<string> = new Set(["ask_user_question"]);
 
 const GOAL_ACTIONS: readonly AutocompleteItem[] = [
-  { value: "pause", label: "pause", description: "Pause the active goal" },
-  { value: "resume", label: "resume", description: "Resume the paused goal" },
+  { value: "pause", label: "pause", description: "Pause work on the current Goal and Todo" },
+  { value: "resume", label: "resume", description: "Start or resume work on the current Goal and Todo" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
-  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and automatic execution settings" },
 ];
 
-const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape"] as const;
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape", "auto-run"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
@@ -193,6 +208,7 @@ export function finishedSinceQuestion(
   activeAtStart: ReadonlyMap<string, BackgroundWorkItem>,
   snapshot: ActivitySnapshot,
 ): BackgroundWorkItem[] {
+  if (hasUnverifiedActivity(snapshot)) return [];
   const stillActive = activeItemsByKey(snapshot);
   const current = new Map<string, BackgroundWorkItem>();
   for (const provider of snapshot.providers) {
@@ -234,11 +250,17 @@ function formatGoal(
   goal: GoalSnapshot | null,
   continuation: ReturnType<typeof currentContinuationState> = null,
   stall = observeGoalStall(goal, continuation),
-  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true },
+  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false },
   permissions?: PermissionHold | null,
+  saved?: { objective: string; status: string },
 ): string {
   const settings = formatPreferences(preferences);
   if (!goal) {
+    if (saved) {
+      const status = saved.status === "active" ? "saved" : saved.status;
+      const control = status === "saved" || status === "paused" ? "\nUse /goal resume to work on its Todo." : "";
+      return `Goal: ${saved.objective}\nStatus: ${status}${control}\n${settings}`;
+    }
     return `No goal is set.\n${settings}`;
   }
   const budget = goal.tokenBudget === null ? "none" : String(goal.tokenBudget);
@@ -251,8 +273,8 @@ function formatGoal(
     `Status: ${goal.status}`,
     ...(goal.pauseReason ? [`Pause reason: ${goal.pauseReason}`] : []),
     ...(permissions?.blockers.length ? [
-      `Permission hold: ${permissions.blockers.length} scope(s); ${permissions.recordCount} history records; retry ${permissions.retryPending ? "released once" : "held"}`,
-      ...(permissions.saturated ? ["Permission observation incomplete: history/scope limit reached; release refused."] : []),
+      `Permission diagnostics: ${permissions.blockers.length} scope(s); ${permissions.recordCount} history records`,
+      ...(permissions.saturated ? ["Permission observation incomplete: history/scope limit reached. Diagnostics only; continuation is unaffected."] : []),
     ] : []),
     `Token budget: ${budget}`,
     `Tokens used: ${goal.usage.tokensUsed}`,
@@ -275,6 +297,7 @@ function formatPreferences(preferences: GoalPreferences): string {
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
     `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
+    `Auto-start Goals setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -295,8 +318,15 @@ function formatSnapshot(snapshot: ActivitySnapshot): string {
 }
 
 export default function (pi: ExtensionAPI): void {
+  initializeNavigatorPanels(pi);
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
+  const providerCache = new Map<string, BackgroundProviderSnapshot>();
+  const providerCacheSequences = new Map<string, number>();
+  const dirtyProviders = new Set<string>();
+  const providerBindings = new Map<string, number>();
+  const compatibilityReadAt = new Map<string, number>();
+  let providerDeadline: ReturnType<typeof setTimeout> | undefined;
   providers.set("subagents", {
     id: "subagents",
     label: "Subagents",
@@ -305,6 +335,8 @@ export default function (pi: ExtensionAPI): void {
 
   let currentCtx: ExtensionContext | undefined;
   let executionGeneration = 0;
+  let operationAdmissionRevision = 0;
+  const operationAdmissionScope = {};
   let agentGeneration = -1;
   let turnGeneration = 0;
   let escapeAbortSuppression: { session: number; turn: number; execution: number } | undefined;
@@ -319,6 +351,27 @@ export default function (pi: ExtensionAPI): void {
   let collecting = false;
   let collectionPending = false;
   let latestSnapshot: ActivitySnapshot | null = null;
+  let idleChannel: string | undefined;
+  let stopIdleInspection: (() => void) | undefined;
+  let sessionIdle: SessionIdleState = false;
+  let verifyIdleOnSettle = false;
+
+  function setSessionIdle(idle: SessionIdleState) {
+    if (!idleChannel || idle === sessionIdle) return;
+    sessionIdle = idle;
+    pi.events.emit(idleChannel, idle);
+  }
+
+  function updateSessionIdle(goal: GoalSnapshot | null) {
+    if (foregroundRunning || (goal && goal.status !== "paused" && goal.status !== "complete")) {
+      setSessionIdle(false);
+    } else if (dirtyProviders.size || lastAppliedSnapshotSequence !== snapshotSequence) {
+      setSessionIdle("checking");
+    } else {
+      setSessionIdle(latestSnapshot?.coverage === "verified" && !latestSnapshot.foregroundRunning && !latestSnapshot.backgroundRunning);
+    }
+  }
+
   let backgroundDrainTracker: BackgroundDrainTracker | null = null;
   let lastAttentionSignature = "";
   let continuationQueuedFor: string | null = null;
@@ -329,7 +382,7 @@ export default function (pi: ExtensionAPI): void {
   let terminalInputIsEditor: (() => boolean) | undefined;
   let uiPromptDepth = 0;
   let lastAgentEvidence: ContinuationEvidence | null = null;
-  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
+  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false };
   /** Background items active when each pending blocking question started, keyed by tool call id. */
   const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
@@ -345,8 +398,8 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
   };
-  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>): void => {
-    pi.appendEntry(WORKFLOW_ENTRY_TYPE, workflowEntry(owner));
+  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>, resumePlan = false): void => {
+    pi.appendEntry(WORKFLOW_ENTRY_TYPE, { ...workflowEntry(owner), ...(resumePlan && { resumePlan }) });
     pi.events.emit("pi-better-workflow:changed", owner);
   };
 
@@ -368,7 +421,7 @@ export default function (pi: ExtensionAPI): void {
    * Chat `notify` appends lines above the Working/bash status region. While the
    * agent is streaming, that height change desyncs Pi main-screen differential
    * rendering and stacks "Working..." / "Elapsed Xs" into scrollback. Keep
-   * mid-stream feedback out of the transcript; use the footer status instead.
+   * mid-stream non-error feedback out of the transcript.
    */
   const notifyGoal = (
     ctx: ExtensionContext,
@@ -379,35 +432,34 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     if (isForegroundBusy(ctx) && type !== "error") {
-      try {
-        ctx.ui.setStatus(EXTENSION_NAME, message);
-      } catch {
-        // Footer status is best-effort only.
-      }
       return;
     }
     ctx.ui.notify(message, type);
   };
 
-  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
-    const permissionHold = currentPermissionHold(ctx, goal.goalId);
-    if (goal.status === "paused" && permissionHold.blockers.length > 0) {
-      if (permissionHold.retryPending && permissionHold.recordCount < MAX_PERMISSION_RECORDS) {
-        pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-      }
-      goal = { ...goal, pauseReason: "permission-blocker" };
-    }
+  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource, binding: "start" | "bind" | "adopt" = "start"): void => {
     executionGeneration += 1;
     lastAgentEvidence = null;
     const previous = getGoal(ctx);
     const wasVisible = previous !== null && isGoalClockVisible(previous);
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
+    // Bridge lifecycle after the raw Goal entry is durable. Harness may own the
+    // structured outcome, but Goal still owns its trigger, clocks, pauses, and wakes.
+    if (!previous || previous.goalId !== goal.goalId) {
+      requestTaskContext(pi, binding, goal);
+    } else if (goal.status === "complete") {
+      requestTaskContext(pi, "complete", goal);
+    } else if (goal.status === "paused" || goal.status === "budgetLimited") {
+      requestTaskContext(pi, "pause", goal, undefined, source === "command");
+    } else if (goal.status === "active" && previous.status !== "active") {
+      requestTaskContext(pi, "resume", goal, undefined, source === "command");
+    }
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(goal);
-    applyStatus(ctx);
+    updateSessionIdle(goal);
     // Force a full redraw when the dock height changes (absent ↔ visible clock).
     refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
@@ -417,6 +469,8 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     const current = getGoal(ctx);
     const wasVisible = current !== null && isGoalClockVisible(current);
+    // Clearing pauses a Harness-bound outcome; it never deletes or completes it.
+    if (current) requestTaskContext(pi, "pause", current);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
     if (getWorkflow(ctx)) recordWorkflow(null);
     continuationQueuedFor = null;
@@ -424,7 +478,7 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(null);
-    applyStatus(ctx);
+    updateSessionIdle(null);
     refreshGoalWidget?.(wasVisible);
   };
 
@@ -441,9 +495,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const held = currentContinuationState(ctx, goal.goalId)?.blocked === true;
     setGoal(goalWithStatus(goal, "paused", undefined, held ? undefined : "interrupt"), ctx, "runtime");
-    notifyGoal(ctx, currentPermissionHold(ctx, goal.goalId).blockers.length > 0
-      ? "Goal remains permission-held. Use /goal resume or alt+g for one same-scope retry."
-      : preferences.conversationalResume && !held
+    notifyGoal(ctx, preferences.conversationalResume && !held
       ? 'Goal paused. Say "go" to resume it, or use /goal resume.'
       : "Goal paused. Use /goal resume or alt+g to resume it.");
   };
@@ -478,6 +530,21 @@ export default function (pi: ExtensionAPI): void {
       : null;
 
   /**
+   * The session's workflow owner when an active goal is bound to it through its skill command, else
+   * null. Only these goals are gated by the workflow's scheduler.
+   */
+  const boundWorkflow = (goal: GoalSnapshot, ctx: ExtensionContext): NonNullable<ReturnType<typeof currentWorkflowOwner>> | null => {
+    const owner = getWorkflow(ctx);
+    if (!owner || goal.status !== "active" || goal.command?.source !== "skill") return null;
+    try {
+      const bound = goalWorkflowOwner(goal);
+      return bound?.name === owner.name && bound.path === owner.path ? owner : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * The one resume path shared by `/goal resume`, the hotkey, and `goal_resume`:
    * reactivate a paused goal or reopen an active no-progress hold.
    */
@@ -487,8 +554,9 @@ export default function (pi: ExtensionAPI): void {
   ): { ok: true; goal: GoalSnapshot } | { ok: false; message: string } => {
     const current = getGoal(ctx);
     const held = current?.status === "active" && currentContinuationState(ctx, current.goalId)?.blocked === true;
-    if (!current || (current.status !== "paused" && !held)) {
-      return { ok: false, message: "Only paused or no-progress-held goals can be resumed." };
+    if (!current) return { ok: false, message: "No Goal is set." };
+    if (current.status !== "paused" && !held) {
+      return { ok: false, message: current.status === "active" ? "This Goal is already running." : `This Goal is ${current.status}.` };
     }
     if (source === "tool" && currentContinuationState(ctx, current.goalId)?.blocked) {
       return { ok: false, message: "Only /goal resume or alt+g can reopen a no-progress hold." };
@@ -498,18 +566,6 @@ export default function (pi: ExtensionAPI): void {
       return { ok: false, message: blocker };
     }
     const goal = held ? current : goalWithStatus(current, "active");
-    const permissions = currentPermissionHold(ctx, current.goalId);
-    if (current.pauseReason === "permission-blocker" && permissions.blockers.length === 0) {
-      return { ok: false, message: "Permission hold evidence is unavailable. The goal stays held; inspect the report before replacing this goal explicitly." };
-    }
-    if (permissions.blockers.length > 0) {
-      if (source === "tool" || permissions.saturated) {
-        return { ok: false, message: permissions.saturated
-          ? "Permission hold history is full. The goal stays held; inspect it and create a new goal explicitly if needed."
-          : "Only /goal resume or alt+g can release one permission retry." };
-      }
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(current.goalId, "permission-release"));
-    }
     // Resuming a skill-bound goal is explicit re-entry into its workflow: rebind the owner the
     // goal was created with (released by a handback) before the continuation runs.
     const owner = goalWorkflowOwner(current);
@@ -547,11 +603,8 @@ export default function (pi: ExtensionAPI): void {
     if (!boundCommandReady(goal, ctx)) return;
     clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
-    const permissions = currentPermissionHold(ctx, goal.goalId);
-    if (permissions.blockers.length === 0) resetContinuationState(goal);
-    sendGoalContinuation(goal, permissions.blockers.length > 0
-      ? `${continuationPrompt(goal, getWorkflow(ctx))}\n\n${permissionInstruction(permissions)}`
-      : continuationPrompt(goal, getWorkflow(ctx)), "continuation");
+    resetContinuationState(goal);
+    sendGoalContinuation(goal, continuationPrompt(goal, getWorkflow(ctx)), "continuation");
   };
 
   function clearIdleContinuation(): void {
@@ -568,16 +621,17 @@ export default function (pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     kind: "continuation" | "background-drained",
     snapshot?: ActivitySnapshot,
+    /** Fixed delay for a workflow scheduler's wait; replaces any pending timer and ignores no-progress backoff. */
+    waitDelayMs?: number,
   ): void => {
     if (WAKE_DISABLED || !preferences.autoContinue || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
-    if (currentPermissionHold(ctx, goal.goalId).blockers.length > 0) return;
     if (currentContinuationState(ctx, goal.goalId)?.blocked) {
       return;
     }
-    const signature = `${goal.goalId}:${kind}`;
-    if (idleContinuationTimer && (idleContinuationSignature === signature ||
+    const signature = `${goal.goalId}:${waitDelayMs === undefined ? kind : "wait"}`;
+    if (waitDelayMs === undefined && idleContinuationTimer && (idleContinuationSignature === signature ||
         (kind === "continuation" && idleContinuationSignature === `${goal.goalId}:background-drained`))) {
       return;
     }
@@ -587,7 +641,7 @@ export default function (pi: ExtensionAPI): void {
       idleContinuationTimer = undefined;
       idleContinuationSignature = "";
       void sendIdleContinuationAfterAudit(goal.goalId, ctx, kind, snapshot);
-    }, idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
+    }, waitDelayMs ?? idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
     idleContinuationTimer.unref?.();
   };
 
@@ -603,7 +657,6 @@ export default function (pi: ExtensionAPI): void {
       if (WAKE_DISABLED || !preferences.autoContinue || execution !== executionGeneration || wake !== wakeGeneration) return false;
       const current = currentGoalSnapshot(ctx);
       return isPokeable(current) && current.goalId === goalId &&
-        currentPermissionHold(ctx, goalId).blockers.length === 0 &&
         !currentContinuationState(ctx, goalId)?.blocked &&
         continuationQueuedFor !== goalId && !isForegroundBusy(ctx);
     };
@@ -611,7 +664,7 @@ export default function (pi: ExtensionAPI): void {
     if (!auditIsCurrent() || !isPokeable(goal)) return;
     if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await publishSnapshot(ctx);
-    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning) return;
+    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) return;
 
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
@@ -626,6 +679,8 @@ export default function (pi: ExtensionAPI): void {
     tokenBudget: number | null,
     ctx: ExtensionContext,
     source: "command",
+    /** False when the user's own message already invoked the command, so the goal must not send it again. */
+    dispatch = true,
   ): GoalSnapshot => {
     const objectiveError = validateObjective(objective);
     if (objectiveError) {
@@ -647,28 +702,68 @@ export default function (pi: ExtensionAPI): void {
     setGoal(goal, ctx, source);
     if (command) {
       if (owner) recordWorkflow(owner);
-      pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
-      if (command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
+      if (dispatch) pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
+      if (dispatch && command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
     } else {
       queueGoalContinuation(goal, ctx);
     }
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
+  const publishSnapshot = async (
+    ctx: ExtensionContext, explicit = true,
+    readMode: "cached" | "connect" = getGoal(ctx) || getWorkflow(ctx) ? "connect" : "cached",
+  ): Promise<ActivitySnapshot | null> => {
+    const cachedOnly = readMode === "cached";
+    bindProviderSubscriptions();
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
-    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    const snapshot = await collectActivitySnapshot(ctx, [...providers.values()].map(provider => ({
+      ...provider,
+      getActivity: async () => {
+        const cached = providerCache.get(provider.id);
+        if (cached && !provider.onActivityChanged && !explicit && Date.now() < (compatibilityReadAt.get(provider.id) ?? 0)) return cached;
+        if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
+            !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
+        if (sessionIdle === true) setSessionIdle("checking");
+        dirtyProviders.delete(provider.id);
+        let value: BackgroundProviderSnapshot;
+        try {
+          value = await provider.getActivity(ctx, { cachedOnly });
+          if (provider.activityVersion === 1 && value.nextDeadline !== null &&
+              (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
+            throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+          }
+        } catch (error) {
+          // A failed fresh read must not resurrect an older verified cache.
+          if (execution === executionGeneration && providers.get(provider.id) === provider &&
+              sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+            providerCacheSequences.set(provider.id, sequence);
+            providerCache.delete(provider.id);
+          }
+          throw error;
+        }
+        // Explicit inspections may finish before an older notification read.
+        if (execution === executionGeneration && providers.get(provider.id) === provider &&
+            sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+          providerCacheSequences.set(provider.id, sequence);
+          if (cachedOnly && value.coverage === "unverified") providerCache.delete(provider.id);
+          else providerCache.set(provider.id, value);
+          if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
+        }
+        return value;
+      },
+    })), foregroundRunning);
     if (execution !== executionGeneration) return null;
     if (sequence < lastAppliedSnapshotSequence) return latestSnapshot;
     lastAppliedSnapshotSequence = sequence;
     latestSnapshot = snapshot;
+    armProviderDeadline();
 
     const goal = currentGoalSnapshot(ctx);
     const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
     backgroundDrainTracker = wakePlan.nextTracker;
-    if (isPokeable(goal) && wakePlan.wakeSignature && currentPermissionHold(ctx, goal.goalId).blockers.length === 0 &&
-        !currentContinuationState(ctx, goal.goalId)?.blocked) {
+    if (isPokeable(goal) && wakePlan.wakeSignature && !currentContinuationState(ctx, goal.goalId)?.blocked) {
       // Persist external progress now: a foreground/callback turn may cancel its delayed wake.
       clearIdleContinuation();
       resetContinuationState(goal);
@@ -676,10 +771,11 @@ export default function (pi: ExtensionAPI): void {
       scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
     }
 
-    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       clearIdleContinuation();
     }
 
+    updateSessionIdle(goal);
     pi.events.emit(EVENT_ACTIVITY, snapshot);
     if (execution !== executionGeneration) return null;
     const attention = terminalAttentionSignature(snapshot);
@@ -688,40 +784,8 @@ export default function (pi: ExtensionAPI): void {
       pi.events.emit(EVENT_TERMINAL_ATTENTION, snapshot);
       if (execution !== executionGeneration) return null;
     }
-    applyStatus(ctx);
-
     return snapshot;
   };
-
-  /** Footer status from the goal state and the latest activity snapshot. */
-  const statusText = (ctx: ExtensionContext, snapshot: ActivitySnapshot | null): string | undefined => {
-    const goal = getGoal(ctx);
-    let waitingOnAnswer = 0;
-    if (snapshot) {
-      for (const activeAtStart of pendingQuestions.values()) {
-        waitingOnAnswer += finishedSinceQuestion(activeAtStart, snapshot).length;
-      }
-    }
-    if (waitingOnAnswer > 0) return `${waitingOnAnswer} background done; waiting on your answer`;
-    if (goal?.status === "paused") return pausedGoalStatus(goal, preferences.conversationalResume);
-    if (snapshot?.backgroundRunning) return undefined;
-    const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
-    if (continuation?.blocked) return "waiting: no progress";
-    const goalStall = observeGoalStall(goal, continuation, {
-      foregroundRunning,
-      backgroundRunning: snapshot?.backgroundRunning ?? false,
-    });
-    return goalStall?.state === "stalled" ? "goal stalled" : undefined;
-  };
-
-  function applyStatus(ctx: ExtensionContext): void {
-    if (!ctx.hasUI) return;
-    try {
-      ctx.ui.setStatus(EXTENSION_NAME, statusText(ctx, latestSnapshot));
-    } catch {
-      // UI status is best-effort only.
-    }
-  }
 
   /**
    * `goal_resume` is in the model's tool list only while an escape-paused goal
@@ -752,7 +816,7 @@ export default function (pi: ExtensionAPI): void {
     }
     collecting = true;
     const session = sessionGeneration;
-    void publishSnapshot(ctx).finally(() => {
+    void publishSnapshot(ctx, false).finally(() => {
       if (session !== sessionGeneration) return;
       collecting = false;
       if (collectionPending) {
@@ -781,20 +845,56 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const syncPollingState = (): void => {
+    bindProviderSubscriptions();
+    armProviderDeadline();
     const ctx = currentCtx;
     const goal = ctx ? currentGoalSnapshot(ctx) : null;
-    if (ctx && (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
+    if (ctx && [...providers.values()].some(provider => !provider.onActivityChanged) &&
+        (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
       startPolling();
     } else {
       stopPolling();
     }
   };
 
+  function armProviderDeadline(): void {
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    if (!currentCtx) return;
+    const goal = getGoal(currentCtx);
+    if (isForegroundBusy(currentCtx) || (goal && (!isPokeable(goal) || currentContinuationState(currentCtx, goal.goalId)?.blocked))) return;
+    const deadlines = [...providerCache.values()].map(value => value.nextDeadline)
+      .filter((value): value is number => typeof value === "number" && value > Date.now());
+    if (!deadlines.length) return;
+    const execution = executionGeneration;
+    providerDeadline = setTimeout(() => {
+      providerDeadline = undefined;
+      if (execution === executionGeneration) collectIfPossible();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.min(...deadlines) - Date.now())));
+    providerDeadline.unref?.();
+  }
+
+  function bindProviderSubscriptions(): void {
+    for (const provider of providers.values()) {
+      if (!provider.onActivityChanged || providerBindings.get(provider.id) === executionGeneration) continue;
+      providerUnsubscribers.get(provider.id)?.();
+      const execution = executionGeneration;
+      providerBindings.set(provider.id, execution);
+      providerUnsubscribers.set(provider.id, provider.onActivityChanged(() => {
+        if (!currentCtx || execution !== executionGeneration || providers.get(provider.id) !== provider) return;
+        dirtyProviders.add(provider.id);
+        if (sessionIdle === true) setSessionIdle("checking");
+        collectIfPossible();
+      }, currentCtx));
+    }
+  }
+
   const installGoalWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) {
       return;
     }
-    ctx.ui.setWidget(
+    setNavigatorPanel(
+      ctx,
       EXTENSION_NAME,
       (tui, theme) => {
         const inputIsEditor = (): boolean => {
@@ -844,10 +944,15 @@ export default function (pi: ExtensionAPI): void {
             }
             const nextRenderDelay = goalClockRefreshDelayMs(goal);
             if (nextRenderDelay !== null) scheduler.schedule(nextRenderDelay);
+            // Schedule before handing visual ownership to Harness so its header
+            // keeps ticking. An absent display response preserves standalone Goal.
+            if (requestTaskContext(pi, "inspect", goal, width).display === true) {
+              return [];
+            }
             const fg = typeof theme?.fg === "function"
               ? (color: string, value: string) => theme.fg(color as never, value)
               : undefined;
-            return [renderGoalClockLine(goal, width, undefined, fg), ""];
+            return [renderGoalClockLine(goal, width, undefined, fg)];
           },
         };
       },
@@ -855,31 +960,201 @@ export default function (pi: ExtensionAPI): void {
     );
   };
 
+  const unsubscribeOperationAdmission = pi.events.on(OPERATION_RESUME_ADMISSION, (value) => {
+    const request = value as Partial<OperationResumeRequest> | undefined;
+    if (request?.version !== 1 || !request.owner || typeof request.reply !== "function") return;
+    const ctx = currentCtx;
+    const revision = executionGeneration;
+    const preferencesRevision = operationAdmissionRevision;
+    const reply = request.reply;
+    const held = (reason: string) => reply({ allowed: false, reason, revision: executionGeneration });
+    if (!operationOwnerMatches(ctx, request.owner) || !ctx) { held("Owning parent session or branch is inactive"); return; }
+    const goal = getGoal(ctx);
+    if ((request.owner.goalId ?? null) !== (goal?.goalId ?? null)) { held("Owning Goal is no longer current"); return; }
+    if (goal && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
+    if (goal && !isPokeable(goal)) { held("Goal is not active"); return; }
+    if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
+    if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
+    const workflow = getWorkflow(ctx);
+    if (workflow) request.pending?.();
+    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow, {
+      scope: operationAdmissionScope,
+      revision: JSON.stringify([request.owner.sessionId, request.owner.workspace, request.owner.branchId, goal?.goalId, revision, preferencesRevision]),
+      getEntries: () => ctx.sessionManager.getBranch(),
+    }) : Promise.resolve({ ok: true as const, waitUntil: undefined, isCurrent: () => true })).then((gate) => {
+      if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision || !operationOwnerMatches(currentCtx, request.owner!)) {
+        held("Parent execution changed during resume admission"); return;
+      }
+      const latest = getGoal(ctx);
+      if ((request.owner!.goalId ?? null) !== (latest?.goalId ?? null)) { held("Owning Goal changed during resume admission"); return; }
+      if (latest && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
+      if (latest && (!isPokeable(latest) || currentContinuationState(ctx, latest.goalId)?.blocked)) {
+        held("Goal became held during resume admission"); return;
+      }
+      if (!gate.ok) { held(gate.reason); return; }
+      if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow) || !gate.isCurrent()) {
+        held("Bound workflow changed during resume admission"); return;
+      }
+      if (gate.waitUntil && gate.waitUntil > Date.now()) { held("Workflow scheduler is waiting"); return; }
+      // An in-process capability lets the dispatcher validate this admission
+      // after its last await and immediately before releasing execution.
+      const isCurrent = (): boolean => {
+        if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision
+          || !operationOwnerMatches(currentCtx, request.owner!)) return false;
+        const active = getGoal(ctx);
+        if ((request.owner!.goalId ?? null) !== (active?.goalId ?? null)) return false;
+        if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow)) return false;
+        if (!gate.isCurrent()) return false;
+        return !active || (preferences.autoContinue && isPokeable(active)
+          && !currentContinuationState(ctx, active.goalId)?.blocked && boundCommandReady(active, ctx));
+      };
+      reply({ allowed: true, revision, isCurrent });
+    }, () => held("Workflow admission evidence is unavailable"));
+  });
+
   pi.events.on(EVENT_REGISTER_PROVIDER, (provider) => {
     const candidate = provider as Partial<BackgroundActivityProvider> | undefined;
     if (!candidate || typeof candidate.id !== "string" || typeof candidate.getActivity !== "function") {
       return;
     }
     const accepted = candidate as BackgroundActivityProvider;
+    if (accepted.activityVersion !== undefined && accepted.activityVersion !== 1) return;
+    if (accepted.activityVersion === 1 && typeof accepted.onActivityChanged !== "function") return;
     providerUnsubscribers.get(accepted.id)?.();
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
-    if (typeof accepted.onActivityChanged === "function") {
-      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(collectIfPossible));
-    }
+    providerCache.delete(accepted.id);
+    providerCacheSequences.set(accepted.id, ++snapshotSequence);
+    dirtyProviders.add(accepted.id);
+    if (sessionIdle === true) setSessionIdle("checking");
+    providerBindings.delete(accepted.id);
+    bindProviderSubscriptions();
     if (latestSnapshot) collectIfPossible();
+  });
+
+  // Both auto-start and manual resume must recover the same command and workflow checks.
+  const prepareSavedGoal = (ctx: ExtensionContext, objective: string, previous?: GoalSnapshot, handoffOwner?: string) => {
+    const invalid = validateObjective(objective);
+    if (invalid) return invalid;
+    const owner = getWorkflow(ctx);
+    if (owner && !workflowAvailable(owner)) return `Restore /skill:${owner.name} before continuing its Todo.`;
+    if (previous) {
+      const blocker = resumeBlocker(previous, ctx);
+      if (blocker) return blocker;
+    }
+    if (objective.startsWith("/") && (!previous?.command || previous.objective.trim() !== objective)) {
+      return "Reinvoke the original command to continue this Goal.";
+    }
+    const command = previous?.command ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
+    const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
+    const restoredOwner = previous?.command ? goalWorkflowOwner(goal) : null;
+    const completedOwner = previous?.command?.source === "skill"
+      ? currentWorkflowOwner(ctx.sessionManager.getBranch(), previous.goalId) : null;
+    if ((completedOwner && (restoredOwner?.name !== completedOwner.name || restoredOwner.path !== completedOwner.path)) ||
+        (handoffOwner && restoredOwner?.name !== handoffOwner) ||
+        (restoredOwner && owner && (restoredOwner.name !== owner.name || restoredOwner.path !== owner.path))) {
+      return "Reinvoke the original workflow to continue its Todo.";
+    }
+    return { goal, restore: owner ? null : restoredOwner };
+  };
+
+  const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
+    const ctx = currentCtx;
+    const event = value as Partial<OutcomeAcceptedEvent> | null;
+    if (!preferences.autoStartFromOutcome || !ctx || !event ||
+        typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const current = getGoal(ctx);
+    if (current && current.status !== "complete") return;
+    const reopenedGoal = current?.status === "complete" && current.goalId === event.reopenedGoalId ? current : undefined;
+    if (event.reopenedGoalId && !reopenedGoal) return;
+    if (!canStartGoalFromOutcome(event.outcome, reopenedGoal)) return;
+    const prepared = prepareSavedGoal(ctx, event.outcome.objective.trim(), reopenedGoal);
+    if (typeof prepared === "string") return;
+    setGoal(prepared.goal, ctx, "runtime", "bind");
+    if (prepared.restore) recordWorkflow(prepared.restore, true);
+    resetContinuationState(prepared.goal);
+  });
+
+  const inspectGoal = (ctx: ExtensionContext) => {
+    const current = getGoal(ctx);
+    const saved = requestTaskContext(pi, "saved").savedGoal;
+    const goal = current?.status === "complete" && saved && saved.goalId !== current.goalId ? null : current;
+    const bound = saved && goal && saved.goalId === goal.goalId;
+    const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
+    const permissionHold = goal ? currentPermissionHold(ctx, goal.goalId) : null;
+    const stall = observeGoalStall(goal, continuation, { foregroundRunning, backgroundRunning: latestSnapshot?.backgroundRunning ?? false });
+    const displayed = bound ? { ...goal, objective: saved.objective } : goal;
+    return {
+      content: [{ type: "text" as const, text: formatGoal(displayed, continuation, stall, preferences, permissionHold, saved) }],
+      details: { goal: displayed ?? saved ?? null,
+        executionStatus: goal?.status ?? (saved?.status === "active" ? "saved" : saved?.status ?? null),
+        continuation, permissionHold, stall, preferences: { ...preferences },
+        timing: goal ? goalTiming(goal) : null, hasGoal: !!(goal || saved) },
+    };
+  };
+
+  // Explicit controls can attach execution to a saved Goal or legacy checklist.
+  // Pausing writes a paused snapshot directly, so it cannot queue a kickoff.
+  const controlGoal = (action: "pause" | "resume", ctx: ExtensionContext, expectedSavedObjective?: string): void => {
+    const current = getGoal(ctx);
+    const { savedGoal, handoffOwner } = requestTaskContext(pi, "saved");
+    if (expectedSavedObjective !== undefined &&
+        (savedGoal?.objective !== expectedSavedObjective || savedGoal.status !== "active" || savedGoal.goalId)) return;
+    const warn = (message: string) => ctx.ui.notify(message, "warning");
+    if (savedGoal && (!current || current.goalId !== savedGoal.goalId)) {
+      if (current && current.status !== "complete") {
+        warn("A different Goal still owns execution. Inspect it with /goal. Use /goal clear to release it before switching tasks.");
+        return;
+      }
+      if (savedGoal.status === "complete" || savedGoal.status === "cancelled") {
+        warn(`This Goal is ${savedGoal.status}.`);
+        return;
+      }
+      const previous = current?.status === "complete" && current.goalId === savedGoal.reopenedGoalId ? current : undefined;
+      if (savedGoal.goalId || (savedGoal.reopenedGoalId && !previous)) {
+        warn("This task has a previous execution or workflow binding. Reinvoke its original Goal or workflow to continue.");
+        return;
+      }
+      const prepared = prepareSavedGoal(ctx, savedGoal.objective, previous, handoffOwner);
+      if (typeof prepared === "string") { warn(prepared); return; }
+      const { goal } = prepared;
+      setGoal(action === "pause" ? goalWithStatus(goal, "paused") : goal, ctx, "command", "adopt");
+      if (prepared.restore) recordWorkflow(prepared.restore, true);
+      if (action === "resume") queueGoalContinuation(goal, ctx);
+    } else if (action === "resume") {
+      if (!current) { warn("No saved Goal or unfinished Todo to resume."); return; }
+      const result = resumeGoal(ctx, "command");
+      if (!result.ok) { warn(result.message); return; }
+    } else {
+      if (!current) { warn("No saved Goal or unfinished Todo to pause."); return; }
+      if (current.status !== "active") { warn(`Goal is already ${current.status}.`); return; }
+      setGoal(goalWithStatus(current, "paused"), ctx, "command");
+    }
+    if (action === "pause" && isForegroundBusy(ctx)) ctx.abort?.();
+    notifyGoal(ctx, action === "pause" ? "Goal paused." : "Goal resumed.");
+  };
+
+  const unsubscribePanelStart = pi.events.on(GOAL_PANEL_START_EVENT, value => {
+    const request = value as GoalPanelStartRequest | undefined;
+    if (request?.action === "probe") {
+      request.available = true;
+      return;
+    }
+    const ctx = currentCtx;
+    if (request?.action !== "start" || !ctx?.hasUI || request.sessionId !== ctx.sessionManager.getSessionId()) return;
+    if (typeof request.objective === "string") controlGoal("resume", ctx, request.objective);
   });
 
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
     const previous = preferences;
     preferences = writeGoalPreference(key, enabled);
+    operationAdmissionRevision += 1;
     if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
     syncResumeTool(getGoal(ctx));
-    applyStatus(ctx);
     if (!previous.autoContinue && preferences.autoContinue) {
       const snapshot = await publishSnapshot(ctx);
       const goal = getGoal(ctx);
-      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
         scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
       }
     }
@@ -895,8 +1170,17 @@ export default function (pi: ExtensionAPI): void {
       ctx.ui.notify(`${formatPreferences(preferences)}\nPreferences: ${goalPreferencesPath()}`, "info");
     }
   };
-  const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
-  const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+  const autoStartControl = {
+    id: "goal-auto-start",
+    label: "Auto-start Goals",
+    values: ["Off", "On"],
+    get: () => preferences.autoStartFromOutcome ? "On" : "Off",
+    async change(value: string, ctx: ExtensionCommandContext) {
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-start Goals mode.");
+      await changePreference(ctx, "autoStartFromOutcome", value === "On");
+    },
+  };
+  const registerSettings = () => pi.events.emit("harness-settings:register", autoStartControl);
   const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
 
@@ -913,16 +1197,18 @@ export default function (pi: ExtensionAPI): void {
           await openSettings(ctx);
           return;
         }
-        const [, setting, mode, ...extra] = trimmed.split(/\s+/);
+        const [, name, mode, ...extra] = trimmed.split(/\s+/);
+        const setting = name === "auto-start-from-outcome" ? "auto-run" : name;
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
-          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape on|off]", "warning");
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape|auto-run on|off]", "warning");
           return;
         }
         if (setting !== undefined) {
           try {
             const key = setting === "auto-continue" ? "autoContinue"
-              : setting === "conversational-resume" ? "conversationalResume" : "pauseOnEscape";
+              : setting === "conversational-resume" ? "conversationalResume"
+                : setting === "pause-on-escape" ? "pauseOnEscape" : "autoStartFromOutcome";
             await changePreference(ctx, key, mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -934,30 +1220,12 @@ export default function (pi: ExtensionAPI): void {
       }
 
       if (!trimmed) {
-        const continuation = current ? currentContinuationState(ctx, current.goalId) : null;
-        // Inspection is always explicit user intent; show the full summary even while busy.
-        ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning }), preferences,
-          current ? currentPermissionHold(ctx, current.goalId) : null), "info");
+        ctx.ui.notify(inspectGoal(ctx).content[0]!.text, "info");
         return;
       }
 
-      if (trimmed === "pause") {
-        if (!current || current.status !== "active") {
-          notifyGoal(ctx, "Only active goals can be paused.", "warning");
-          return;
-        }
-        setGoal(goalWithStatus(current, "paused"), ctx, "command");
-        notifyGoal(ctx, "Goal paused.");
-        return;
-      }
-
-      if (trimmed === "resume") {
-        const result = resumeGoal(ctx, "command");
-        if (!result.ok) {
-          notifyGoal(ctx, result.message, current?.status === "paused" ? "error" : "warning");
-          return;
-        }
-        notifyGoal(ctx, "Goal resumed.");
+      if (trimmed === "pause" || trimmed === "resume") {
+        controlGoal(trimmed, ctx);
         return;
       }
 
@@ -1007,29 +1275,24 @@ export default function (pi: ExtensionAPI): void {
     promptSnippet: "Inspect the current goal, status, token budget, tokens used, active time, and total elapsed time.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const goal = getGoal(ctx);
-      const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
-      const stall = observeGoalStall(goal, continuation, {
-        foregroundRunning,
-        backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
-      });
-      return {
-        content: [{ type: "text", text: formatGoal(goal, continuation, stall, preferences, goal ? currentPermissionHold(ctx, goal.goalId) : null) }],
-        details: { goal, continuation, permissionHold: goal ? currentPermissionHold(ctx, goal.goalId) : null, stall, preferences: { ...preferences }, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
-      };
+      return inspectGoal(ctx);
     },
   });
 
   pi.registerTool({
     name: "update_goal",
     label: "Update Goal",
-    description: "Mark the current pi-better-goal objective complete after a completion audit.",
+    description: "Mark the Goal complete after verifying the requested outcome. For each recorded doneWhen criterion, supply its exact text and observed result in evidence. If the Goal has no criteria, use its objective. A scheduler finish alone only confirms that workflow actions have settled.",
     promptSnippet: "Mark the current Codex-style goal complete after verification.",
     parameters: Type.Object({
+      evidence: Type.Optional(Type.Array(Type.Object({
+        criterion: Type.String(),
+        result: Type.String({ description: "Observed result and its source, such as a test run, deployment receipt, or issue state." }),
+      }))),
       status: Type.String({ description: "Only 'complete' is accepted." }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const input = params as { status: string };
+      const input = params as { status: string; evidence?: Array<{ criterion: string; result: string }> };
       if (input.status !== "complete") {
         return {
           content: [{ type: "text", text: "Only status:'complete' is accepted." }],
@@ -1039,7 +1302,9 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
       if (!current) {
         return {
-          content: [{ type: "text", text: "No goal is set." }],
+          content: [{ type: "text", text: requestTaskContext(pi, "saved").savedGoal
+            ? "For a saved Goal, record verified completion with update_todo and goal.status set to complete."
+            : "No goal is set." }],
           details: { ok: false, goal: null },
         };
       }
@@ -1049,12 +1314,44 @@ export default function (pi: ExtensionAPI): void {
           details: { ok: true, goal: current },
         };
       }
-      const goal = goalWithStatus(current, "complete");
+      const gated = boundWorkflow(current, ctx);
+      const verdict = gated ? await completionGate(ctx.sessionManager.getBranch(), gated) : null;
+      if (verdict && !verdict.allow) {
+        return {
+          content: [{ type: "text", text: verdict.message }],
+          details: { ok: false, goal: current, due: verdict.due },
+        };
+      }
+      const latest = getGoal(ctx);
+      if (latest?.goalId !== current.goalId || latest.status !== current.status) {
+        return { content: [{ type: "text", text: "Goal changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
+      }
+      if (gated) {
+        const owner = getWorkflow(ctx);
+        if (owner?.name !== gated.name || owner.path !== gated.path) {
+          return { content: [{ type: "text", text: "Workflow changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
+        }
+      }
+      const audit = requestTaskContext(pi, { action: "audit", workflowOwnsPlan: !!gated }, current);
+      const criteria = audit.doneWhen?.length ? audit.doneWhen : audit.objective ? [audit.objective] : [];
+      const evidence = [...input.evidence ?? [], ...audit.evidence ?? []];
+      const missing = criteria.filter(criterion => !evidence.some(item => item.criterion === criterion && item.result.trim()));
+      if (audit.ledgerBlocker || audit.openSteps?.length || missing.length) {
+        const message = [
+          "Verify the requested outcome before completing the Goal.",
+          ...(audit.ledgerBlocker ? [audit.ledgerBlocker] : []),
+          ...(audit.openSteps ?? []).map(step => `Open Todo: ${step}`),
+          ...missing.map(criterion => `Missing evidence: ${criterion}`),
+        ].join("\n");
+        return { content: [{ type: "text", text: message }], details: { ok: false, goal: current, missing, openSteps: audit.openSteps } };
+      }
+      const goal = goalWithStatus(latest, "complete");
       setGoal(goal, ctx, "tool");
-      if (getWorkflow(ctx)) recordWorkflow(null);
+      if (gated) recordWorkflow(null);
+      const warning = verdict?.allow ? verdict.warning : undefined;
       return {
-        content: [{ type: "text", text: "Goal marked complete." }],
-        details: { ok: true, goal },
+        content: [{ type: "text", text: warning ? `Goal marked complete. ${warning}` : "Goal marked complete." }],
+        details: { ok: true, goal, ...(warning ? { warning } : {}) },
       };
     },
   });
@@ -1095,11 +1392,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerShortcut?.(GOAL_RESUME_SHORTCUT, {
-    description: "Resume the paused goal",
+    description: "Start or resume work on the current Goal and Todo",
     handler: (ctx) => {
       currentCtx = ctx;
-      const result = resumeGoal(ctx, "command");
-      notifyGoal(ctx, result.ok ? "Goal resumed." : result.message, result.ok ? "info" : "warning");
+      controlGoal("resume", ctx);
     },
   });
 
@@ -1107,7 +1403,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) return;
       ctx.ui.notify(formatSnapshot(snapshot), "info");
     },
@@ -1135,6 +1431,12 @@ export default function (pi: ExtensionAPI): void {
       const owner = getWorkflow(ctx);
       if (!owner) return { content: [{ type: "text", text: "No workflow owns this session." }], details: { released: false } };
       const goal = getGoal(ctx);
+      const gated = goal ? boundWorkflow(goal, ctx) : null;
+      const verdict = gated ? await pauseGate(ctx.sessionManager.getBranch(), gated) : null;
+      if (verdict && !verdict.allow) {
+        return { content: [{ type: "text", text: verdict.message }], details: { released: false, goalPaused: false } };
+      }
+      const warning = verdict?.allow ? verdict.warning : undefined;
       let resumeCommand: string | undefined;
       if (goal?.status === "active" && goal.command?.source === "skill") {
         const boundOwner = workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath);
@@ -1145,7 +1447,7 @@ export default function (pi: ExtensionAPI): void {
       }
       recordWorkflow(null);
       return {
-        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete; the user's go-ahead or /goal resume rebinds /${resumeCommand}.` : ""}` }],
+        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete; the user's go-ahead or /goal resume rebinds /${resumeCommand}.` : ""}${warning ? ` ${warning}` : ""}` }],
         details: { released: true, owner: owner.name, goalPaused: resumeCommand !== undefined },
       };
     },
@@ -1159,7 +1461,7 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) {
         return { content: [{ type: "text", text: "Activity changed during collection; inspect again." }], details: { stale: true } };
       }
@@ -1184,19 +1486,41 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     collecting = false;
     collectionPending = false;
+    providerCache.clear();
+    dirtyProviders.clear();
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     agentLoopActive = false;
     try {
       preferences = readGoalPreferences();
     } catch (error) {
+      preferences = { ...preferences, autoStartFromOutcome: false };
       notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
     }
-    const restoredGoal = getGoal(ctx);
-    if (restoredGoal?.status === "active" && currentPermissionHold(ctx, restoredGoal.goalId).blockers.length > 0) {
-      // A persisted release is not a replayable dispatch ticket after reload.
-      setGoal(goalWithStatus(restoredGoal, "paused", undefined, "permission-blocker"), ctx, "runtime");
+    if (typeof stopIdleInspection === "function") stopIdleInspection();
+    idleChannel = undefined;
+    sessionIdle = false;
+    verifyIdleOnSettle = false;
+    latestSnapshot = null;
+    const sessionId = ctx.sessionManager.getSessionId?.();
+    if (ctx.hasUI && ctx.mode === "tui" && sessionId) {
+      idleChannel = sessionIdleEvent(sessionId);
+      stopIdleInspection = pi.events.on(idleChannel + ":inspect", (value) => {
+        const request = value as SessionIdleInspection;
+        request.idle = sessionIdle;
+        // A plain conversation may only have a passive, unverified provider cache.
+        if (!request.verify) return;
+        if (foregroundRunning) {
+          // The Recap settlement handler can run before Goal's handler.
+          verifyIdleOnSettle = true;
+          return;
+        }
+        if (!latestSnapshot || !hasUnverifiedActivity(latestSnapshot)) return;
+        const goal = getGoal(ctx);
+        if (!goal || goal.status === "paused" || goal.status === "complete") void publishSnapshot(ctx, true, "connect");
+      });
     }
+    const restoredGoal = getGoal(ctx);
     if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
       setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
       notifyGoal(ctx, "Goal paused: invoke its skill directly before resuming.", "error");
@@ -1221,15 +1545,36 @@ export default function (pi: ExtensionAPI): void {
         return undefined;
       });
     }
-    const snapshot = await publishSnapshot(ctx);
+    const snapshot = await publishSnapshot(ctx, true, "cached");
     if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning) {
-      scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+    if (restoredGoal?.status === "active") {
+      const resumeIfIdle = (activity: ActivitySnapshot | null) => {
+        if (activity && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning &&
+            !activity.backgroundRunning && !hasUnverifiedActivity(activity)) {
+          scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+        }
+      };
+      if (hasUnverifiedActivity(snapshot)) {
+        // A restored Goal still needs verified work evidence. Let Pi finish binding while it arrives.
+        void publishSnapshot(ctx, true, "connect").then(resumeIfIdle);
+      } else resumeIfIdle(snapshot);
     }
   });
 
   pi.on("ui_prompt_start", () => { uiPromptDepth += 1; });
+  pi.on("session_tree", async (_event, ctx) => {
+    executionGeneration += 1;
+    clearIdleContinuation();
+    backgroundDrainTracker = null;
+    continuationQueuedFor = null;
+    providerCache.clear();
+    latestSnapshot = null;
+    setSessionIdle(false);
+    currentCtx = ctx;
+    await publishSnapshot(ctx);
+    syncPollingState();
+  });
   pi.on("ui_prompt_end", () => { uiPromptDepth = Math.max(0, uiPromptDepth - 1); });
 
   pi.on("input", async (event, ctx) => {
@@ -1242,7 +1587,20 @@ export default function (pi: ExtensionAPI): void {
       if (command) {
         try {
           const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path, registeredSkillPath);
-          if (owner) recordWorkflow(owner);
+          if (owner) {
+            // The input already runs the skill. Opt-in supervision must not send it twice.
+            const existing = getGoal(ctx);
+            if (preferences.autoStartFromOutcome && AUTO_BIND_SKILLS.has(skillName) && (!existing || existing.status === "complete")) {
+              try {
+                startOrReplaceGoal(event.text.trim(), null, ctx, "command", false);
+              } catch (error) {
+                recordWorkflow(owner);
+                notifyGoal(ctx, `Could not bind a goal to /skill:${skillName}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+              }
+            } else {
+              recordWorkflow(owner);
+            }
+          }
         } catch (error) {
           notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
           return { action: "handled" as const };
@@ -1252,8 +1610,7 @@ export default function (pi: ExtensionAPI): void {
     // A paused goal stays paused while the user talks: the message is ordinary
     // conversation. Only /goal resume, the hotkey, or goal_resume resume it.
     const goal = getGoal(ctx);
-    if (goal?.status === "active" && currentPermissionHold(ctx, goal.goalId).blockers.length === 0 &&
-        !currentContinuationState(ctx, goal.goalId)?.blocked) {
+    if (goal?.status === "active" && !currentContinuationState(ctx, goal.goalId)?.blocked) {
       executionGeneration += 1;
       clearIdleContinuation();
       lastAgentEvidence = null;
@@ -1265,21 +1622,15 @@ export default function (pi: ExtensionAPI): void {
     currentCtx = ctx;
     const goal = currentGoalSnapshot(ctx);
     const owner = getWorkflow(ctx);
+    // A defined `enabled` means a Harness runtime is present, even when
+    // Outcome & Todo is off. Then Harness owns the structured outcome text.
+    const harnessPresent = requestTaskContext(pi, "inspect", goal).enabled !== undefined;
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
-    const permissions = goal ? currentPermissionHold(ctx, goal.goalId) : null;
-    const permissionPrompt = permissions && goal?.status !== "complete" &&
-      (permissions.blockers.length > 0 || goal?.pauseReason === "permission-blocker")
-      ? permissionInstruction({ ...permissions, retryPending: permissions.retryPending && goal?.status === "active" }) +
-        (permissions.blockers.length === 0 ? "\nBlocker evidence is unavailable. Stay held; do not invent a retry scope." : "") : "";
-    // A held goal overrides workflow ownership without invoking or invalidating that workflow.
-    if (permissionPrompt && goal?.status === "paused") {
-      return { systemPrompt: `${event.systemPrompt}\n\n${permissionPrompt}` };
-    }
-    const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
-      ? pausedGoalPrompt(goal, preferences.conversationalResume) : "");
+    const pausedInstruction = goal?.status === "paused"
+      ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "";
     if (!isPokeable(goal) && !owner) {
-      return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
+      return publishGoalGuidance(event, pausedInstruction);
     }
 
     const questionInstruction = snapshot.backgroundRunning
@@ -1293,39 +1644,48 @@ export default function (pi: ExtensionAPI): void {
       if (!workflowAvailable(owner)) {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
         recordWorkflow(null);
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.`);
       }
       let instructions: string;
       try {
         instructions = readFileSync(owner.path, "utf8");
       } catch {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.`);
       }
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n` +
-          (pausedInstruction
-            ? `${pausedInstruction}\n` + (permissionPrompt
-              ? "These permission constraints override the workflow instructions below.\n\n"
-              : "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n")
-            : "") +
-          `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
-          (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : "") +
-          (questionInstruction ? `\n\n${questionInstruction.trim()}` : "") +
-          (heldInstruction ? `\n\n${heldInstruction}` : ""),
-      };
+      return publishGoalGuidance(
+        event,
+        pausedInstruction &&
+          `${pausedInstruction}\n` + "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n",
+        `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}`,
+        isPokeable(goal) && (harnessPresent
+          ? "Complete the goal only after the workflow completion audit and verification of every accepted Goal criterion."
+          : `Active objective: ${goal.objective}. Complete it only after the workflow completion audit.`),
+        questionInstruction && questionInstruction.trim(),
+        heldInstruction,
+      );
     }
 
     if (!isPokeable(goal)) return;
-    const backgroundInstruction = snapshot.backgroundRunning
+    const backgroundInstruction = hasUnverifiedActivity(snapshot)
+      ? " Background activity is unverified. Do not infer completion or drained work from missing activity; inspect a verified observation before completing the goal."
+      : snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
-    return {
-      systemPrompt:
-        `${event.systemPrompt}\n\n` +
-        `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}` +
-        (permissionPrompt ? `\n\n${permissionPrompt}` : ""),
-    };
+    if (harnessPresent) {
+      // Harness owns the outcome text. Retain only the Goal-specific guidance
+      // that the Outcome & Todo prompt cannot replace.
+      return publishGoalGuidance(
+        event,
+        heldInstruction,
+        backgroundInstruction.trim(),
+        questionInstruction.trim(),
+      );
+    }
+    return publishGoalGuidance(
+      event,
+      `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}`,
+    );
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -1335,6 +1695,8 @@ export default function (pi: ExtensionAPI): void {
     agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
+    verifyIdleOnSettle = false;
+    setSessionIdle(false);
     agentLoopActive = true;
     clearIdleContinuation();
     continuationQueuedFor = null;
@@ -1374,31 +1736,22 @@ export default function (pi: ExtensionAPI): void {
     const incomplete = reportedPermissionGap(pi, event.toolName, event.details);
     if (reports.length === 0 && !incomplete) return;
     let hold = currentPermissionHold(ctx, goal.goalId);
-    let changed = false;
     for (const blocker of reports) {
       const previous = hold.blockers.find((item) => logicalPermissionBlockerKey(item) === logicalPermissionBlockerKey(blocker));
-      if (!hold.retryPending && previous && JSON.stringify(previous) === JSON.stringify(blocker)) continue;
+      if (previous && JSON.stringify(previous) === JSON.stringify(blocker)) continue;
       if (hold.saturated || (!previous && hold.blockers.length >= MAX_PERMISSION_BLOCKERS)) {
         if (!hold.saturated && hold.recordCount < MAX_PERMISSION_RECORDS) {
-          pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-gap"));
+          pi.appendEntry(EXTENSION_NAME, permissionGapRecord(goal.goalId));
         }
         break;
       }
       pi.appendEntry(EXTENSION_NAME, permissionHoldRecord(goal.goalId, blocker));
-      changed = true;
       hold = currentPermissionHold(ctx, goal.goalId);
     }
     if (incomplete && !hold.saturated && hold.recordCount < MAX_PERMISSION_RECORDS) {
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-gap"));
-      changed = true;
-      hold = currentPermissionHold(ctx, goal.goalId);
+      pi.appendEntry(EXTENSION_NAME, permissionGapRecord(goal.goalId));
     }
-    if (hold.retryPending && hold.recordCount < MAX_PERMISSION_RECORDS) {
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-    }
-    if (!changed && goal.status === "paused" && goal.pauseReason === "permission-blocker") return;
-    setGoal(goalWithStatus(goal, "paused", undefined, "permission-blocker"), ctx, "runtime");
-    notifyGoal(ctx, "Goal held for a permission blocker. /goal resume or alt+g releases one same-scope retry.", "warning");
+    // Diagnostics only: the goal keeps running and continuation is unchanged.
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -1434,21 +1787,28 @@ export default function (pi: ExtensionAPI): void {
     escapeAbortSuppression = undefined;
     currentCtx = ctx;
     foregroundRunning = false;
-    const snapshot = await publishSnapshot(ctx);
+    const verify = verifyIdleOnSettle;
+    verifyIdleOnSettle = false;
+    const snapshot = await publishSnapshot(ctx, true, verify ? "connect" : undefined);
     if (!snapshot) return;
     const goal = getGoal(ctx);
-    if (isPokeable(goal)) {
-      const permissions = currentPermissionHold(ctx, goal.goalId);
-      if (permissions.blockers.length > 0) {
-        if (permissions.retryPending && permissions.recordCount < MAX_PERMISSION_RECORDS) {
-          pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-        }
-        setGoal(goalWithStatus(goal, "paused", undefined, "permission-blocker"), ctx, "runtime");
+    if (!isPokeable(goal) || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
+      return;
+    }
+    // A run the scheduler says is only waiting (a retry is due at a known time) is not stuck: wake at
+    // that time and leave the no-progress count alone, since nothing the model could do changes it.
+    const waitOwner = preferences.autoContinue && !WAKE_DISABLED ? boundWorkflow(goal, ctx) : null;
+    if (waitOwner) {
+      const execution = executionGeneration;
+      const waitUntil = await schedulerWaitUntil(ctx.sessionManager.getBranch(), waitOwner);
+      if (execution !== executionGeneration) return;
+      if (waitUntil !== undefined) {
+        resetContinuationState(goal);
+        lastAgentEvidence = null;
+        scheduleIdleContinuation(goal, ctx, "continuation", snapshot,
+          Math.min(MAX_TIMER_DELAY_MS, Math.max(MIN_WAIT_DELAY_MS, waitUntil - Date.now())));
         return;
       }
-    }
-    if (!isPokeable(goal) || snapshot.backgroundRunning) {
-      return;
     }
     const evidence = lastAgentEvidence;
     if (!evidence) {
@@ -1473,9 +1833,9 @@ export default function (pi: ExtensionAPI): void {
       updatedAt: Math.floor(now / 1000),
     });
     if (blocked) {
+      syncPollingState();
       refreshGoalWidget?.();
       if (ctx.hasUI) {
-        ctx.ui.setStatus(EXTENSION_NAME, "waiting: no progress");
         ctx.ui.notify(
           `Goal automatic continuation is waiting after ${noProgressRetries} identical retries (${evidence.summary}). Use /goal resume or alt+g to resume it.`,
           "warning",
@@ -1511,6 +1871,9 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
+    if (typeof unsubscribeOperationAdmission === "function") unsubscribeOperationAdmission();
+    if (typeof unsubscribePanelStart === "function") unsubscribePanelStart();
+    if (typeof unsubscribeOutcomeAccepted === "function") unsubscribeOutcomeAccepted();
 
     executionGeneration += 1;
     sessionGeneration += 1;
@@ -1520,15 +1883,22 @@ export default function (pi: ExtensionAPI): void {
     terminalInputIsEditor = undefined;
     uiPromptDepth = 0;
     stopPolling();
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    for (const off of providerUnsubscribers.values()) off();
+    providerUnsubscribers.clear();
+    providerCache.clear();
     foregroundRunning = false;
     pendingQuestions.clear();
     clearIdleContinuation();
     currentCtx = undefined;
     latestSnapshot = null;
+    if (typeof stopIdleInspection === "function") stopIdleInspection();
+    stopIdleInspection = undefined;
+    idleChannel = undefined;
     collectionPending = false;
     try {
-      ctx.ui.setStatus(EXTENSION_NAME, undefined);
-      ctx.ui.setWidget(EXTENSION_NAME, undefined);
+      setNavigatorPanel(ctx, EXTENSION_NAME, undefined);
     } catch {
       // Best-effort cleanup.
     }

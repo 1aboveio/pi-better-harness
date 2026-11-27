@@ -55,6 +55,29 @@ holding different cursors do not consume each other. A content-hash change retur
 returns `reset: "stale-cursor"` and the first page. Cursors carry a short
 digest of the resource, never the scope text.
 
+Offset-bearing cursors also carry a short integrity tag over their other
+fields plus two independent *position witnesses*: `v` digests the source
+snapshot at that offset, `w` (in the text pager) digests the snapshot, its
+length, and the offset again. Cursors are re-typed by the model, and a payload
+that still parsed after one mistyped character used to be read as a *replaced
+source*, which restarted at byte 0 and minted the same cursor again: the caller
+could never reach the rest of the text (#617).
+
+A damaged payload now returns `reset: "cursor-corrupt"`, never
+`source-replaced` — that name claims the source changed, and it is reserved for
+an intact cursor whose digest no longer matches. The decoded offset is never
+trusted on the payload's word: the page resumes only when a witness recomputed
+from the **current** text proves that offset still belongs to the same snapshot
+(either witness surviving one damaged field is enough, so a single-character
+miscopy keeps advancing instead of looping on page 1). Otherwise — a replaced,
+grown, or shifted source, a damaged offset, or a cursor from before the
+witnesses existed — the page restarts at byte 0, so no unread text is skipped
+and an out-of-range offset cannot answer with an empty "end of text".
+
+Status cursors (`k: "s"`) are untagged: they hold no offset, a damaged one
+falls back to the current facts, and their payload competes with decision facts
+in 1 KiB status responses.
+
 ## Retained-file paging
 
 `pageRetainedFile(path, request)` pages raw retained bytes without skipping
@@ -67,7 +90,19 @@ unread ranges in the current snapshot.
 - A trailing, still-incomplete UTF-8 sequence (a writer split a code point
   across writes) is withheld and reported as `pendingBytes`; the next read
   returns the whole character once it is complete. Malformed bytes that can
-  never complete are passed through instead of stalling.
+  never complete are passed through instead of stalling. Backward pages obey
+  the same rule: the newest page withholds such a suffix and anchors its
+  append-ready cursor at the sequence's first byte, so the tail-then-append
+  sequence still yields the whole character exactly once.
+- `direction: "backward"` starts an end-anchored pager: the first page is the
+  newest retained bytes instead of byte 0 (issue #618). Backward pages start
+  just after a newline when that keeps at least half the window (one oversized
+  line starts on the next whole code point), report the earlier bytes they did
+  not show as `omittedBytes`, and set `direction: "backward"` so callers can
+  name the direction. `nextCursor` continues toward the oldest byte; reaching
+  the start sets `appendReady` and hands back a forward cursor that reads only
+  bytes appended later. A backward cursor keeps its direction on its own, so
+  the request flag is only needed to start the pager.
 - Cursors bind `resource` (task/run id plus session scope), the file object's
   identity (`dev`, `ino`, and birth time where the platform reports it, so a
   delete + recreate that reuses an inode number is still `source-replaced`),
@@ -75,6 +110,13 @@ unread ranges in the current snapshot.
   before the offset. Increment `generation` on replacement or same-inode
   compaction; the pre-offset sample also catches in-place rewrites that keep
   the head, size, and inode.
+- A cursor whose integrity tag does not match is reported as
+  `reset: "cursor-corrupt"`, never as `source-replaced`, and is never resumed:
+  both its offset and its direction (`a` append flag, `b` backward flag) come
+  from a payload that failed its integrity check. The pass restarts at its own
+  anchor — byte 0 forward, the newest retained byte for a backward pass — so a
+  hand-copied cursor cannot continue from an unproven position or flip the
+  direction of a tail read.
 - `discardedBytes` and `captureGaps` are disclosed on every page. They are not
   recoverable. Empty readable files have no gaps; missing or unreadable files
   return a `read` gap and never look like a healthy empty log.

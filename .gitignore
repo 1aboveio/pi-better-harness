@@ -8,6 +8,9 @@ node_modules/
 dist/
 coverage/
 
+# Generated from the canonical root changelog during Harness prepack.
+/packages/pi-better-harness/CHANGELOG.md
+
 # pi local state
 .pi/
 
@@ -22,3 +25,6 @@ pi-compat-golden-*
 
 # pi-better-server Pi-version compatibility runs (scripts/test-on-pi.sh)
 .pi-compat/
+packages/pi-better-subagents/runtime-client/
+packages/pi-better-background-tasks/runtime-client/
+.work/

@@ -1,6 +1,9 @@
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
-import { recordFailure } from "./failures.js";
+import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+import { backgroundObservation, closeBackgroundObservation } from "./work-observation.js";
+import { failurePath, recordFailure } from "./failures.js";
+import { markFailureAttentionDelivered, pendingFailureAttention, readFailureState } from "./shared-failure-observations.js";
 import { packCallbackBatch } from "./shared-callback-batcher.js";
 import { pageTaskLog, readLog, retainLogTail } from "./logs.js";
 import {
@@ -16,15 +19,48 @@ import {
 } from "./output.js";
 import { inspectMeta, logPathFor, metaPathFor, taskDir, writeMeta } from "./registry.js";
 import { registerTools } from "./tools.js";
-import { ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
+import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
+const { captureRunRemovalEvidence } = await import(new URL("../../pi-better-subagents/tests/fixture-run-ownership.mjs", import.meta.url).href);
 
 const createdIds: string[] = [];
+const apis: any[] = [];
+let stopRuntime: Awaited<ReturnType<typeof startWorkRuntime>>;
+const fixtureWriters = new Map<string, { pid: number; status: string; cleanup: string }>();
+
+function retainMissingTaskWriter(error: unknown): void {
+  const match = /Unverified background task ([A-Za-z0-9_-]{1,128}): metadata file is missing/.exec(String(error));
+  if (!match) return;
+  try {
+    const fixtureWriter = fixtureWriters.get(match[1]!);
+    const evidence = { id: match[1], residual: fixtureWriter ? captureRunRemovalEvidence(taskDir(match[1]!))
+      : { entries: [], truncated: false, unavailable: "not retained as an owned fixture" },
+      fixtureWriter: fixtureWriter ?? null, registeredObservationApis: apis.length,
+      daemon: stopRuntime.diagnostics(), pendingWrites: "not observed by fixture", residualAuthor: "not established by filenames" };
+    let encoded = JSON.stringify(evidence);
+    if (Buffer.byteLength(encoded) > 32768) {
+      evidence.residual.entries = evidence.residual.entries.slice(0, 8);
+      evidence.residual.truncated = true;
+      encoded = JSON.stringify(evidence);
+    }
+    console.error("[output-missing-task-writer]", encoded);
+  } catch (captureError) {
+    try { console.error("[output-missing-task-writer-unavailable]", (captureError as NodeJS.ErrnoException).code ?? "capture-failed"); } catch {}
+  }
+}
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime(); });
 const origin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", sessionId: "session-a" };
 const otherOrigin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", sessionId: "session-b" };
 
 afterEach(() => {
-  for (const id of createdIds.splice(0)) rmSync(taskDir(id), { recursive: true, force: true });
+  clearBackgroundTasksNavigatorSession();
+  for (const api of apis.splice(0)) closeBackgroundObservation(api);
+  for (const id of createdIds.splice(0)) {
+    rmSync(taskDir(id), { recursive: true, force: true });
+    const writer = fixtureWriters.get(id);
+    if (writer) writer.cleanup = "directory removal returned";
+  }
 });
 
 function fixture(overrides: Partial<BackgroundTaskMeta> & { logLines?: string[] } = {}): BackgroundTaskMeta {
@@ -49,6 +85,8 @@ function fixture(overrides: Partial<BackgroundTaskMeta> & { logLines?: string[] 
     ...rest,
   };
   writeMeta(meta);
+  fixtureWriters.set(id, { pid: process.pid, status: String(meta.status).slice(0, 40), cleanup: "metadata write returned; cleanup not requested" });
+  if (fixtureWriters.size > 32) fixtureWriters.delete(fixtureWriters.keys().next().value!);
   return meta;
 }
 
@@ -58,10 +96,12 @@ function textOf(result: { content: Array<{ text?: string }> }): string {
 
 function register(): Record<string, any> {
   const tools: Record<string, any> = {};
-  registerTools({
+  const api = {
     on() {},
     registerTool(tool: any) { tools[tool.name] = tool; },
-  } as any);
+  };
+  apis.push(api);
+  registerTools(api as any);
   return tools;
 }
 
@@ -69,6 +109,234 @@ const ctx = {
   cwd: origin.cwd,
   sessionManager: { getSessionId: () => origin.sessionId },
 };
+
+it("keeps each interleaved read's captured scope across async dispatch and refuses absent or foreign owners", async () => {
+  const owned = fixture({ callbackOrigin: origin, logLines: ["private-owner-evidence"] });
+  const foreign = fixture({ callbackOrigin: otherOrigin, logLines: ["other-owner-evidence"] });
+  const tools = register();
+  const otherCtx = { ...ctx, sessionManager: { getSessionId: () => otherOrigin.sessionId } };
+  const results = await Promise.all([
+    tools.bg_task_log.execute("owned-log", { id: owned.id }, undefined, undefined, ctx),
+    tools.bg_task_status.execute("foreign-status", { id: owned.id }, undefined, undefined, otherCtx),
+    tools.bg_task_status.execute("owned-status", { id: owned.id }, undefined, undefined, ctx),
+    tools.bg_status.execute("foreign-alias", { action: "log", id: owned.id }, undefined, undefined, otherCtx),
+    tools.bg_task.execute("owned-alias", { action: "log", id: owned.id }, undefined, undefined, ctx),
+    tools.bg_task_list.execute("owned-list", {}, undefined, undefined, ctx),
+    tools.bg_status.execute("foreign-list", { action: "list" }, undefined, undefined, otherCtx),
+    tools.bg_task_log.execute("missing-owner", { id: owned.id }, undefined, undefined, undefined),
+  ]);
+  const bodies = results.map(textOf);
+  expect(bodies[0]).toContain("private-owner-evidence");
+  expect(bodies[2]).toContain("succeeded");
+  expect(bodies[4]).toContain("private-owner-evidence");
+  for (const index of [1, 3, 7]) expect(bodies[index]).not.toContain("private-owner-evidence");
+  expect(bodies[5]).toContain(owned.id);
+  expect(bodies[5]).not.toContain(foreign.id);
+  expect(bodies[6]).toContain(foreign.id);
+  expect(bodies[6]).not.toContain(owned.id);
+});
+
+describe("progress observations and launch provenance (#572)", () => {
+  const startedAt = Date.parse("2026-10-25T00:00:00Z");
+  let taskSequence = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(startedAt);
+    vi.stubEnv("PI_BETTER_STALL_QUIET_MS", "60000");
+    vi.stubEnv("PI_BETTER_STALL_MS", "300000");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  function running(overrides: Partial<BackgroundTaskMeta> = {}): BackgroundTaskMeta {
+    const task = fixture({ id: `bg_progress_572_${++taskSequence}`, kind: "process", status: "running", startedAt,
+      endedAt: undefined, lastProgressAt: startedAt, ...overrides });
+    utimesSync(task.logPath, new Date(startedAt), new Date(startedAt));
+    return task;
+  }
+
+  function cursorOf(text: string): string {
+    const cursor = text.match(/statusCursor=(\S+)/)?.[1];
+    expect(cursor).toBeTruthy();
+    return cursor!;
+  }
+
+  it("changes status revisions exactly at quiet/stall boundaries, not on every clock tick, and recovers on output", () => {
+    const task = running();
+    const first = formatStatus(task);
+    const freshCursor = cursorOf(first);
+    vi.setSystemTime(startedAt + 59_999);
+    expect(formatStatus(task, { cursor: freshCursor })).toContain("No new evidence since cursor");
+
+    vi.setSystemTime(startedAt + 60_000);
+    const quiet = formatStatus(task, { cursor: freshCursor });
+    expect(quiet).not.toContain("No new evidence since cursor");
+    expect(quiet).toContain("is running");
+    expect(quiet).toContain("quiet; no observed progress for 1m00s");
+    expect(quiet).toContain("2026-10-25T00:00:00.000Z");
+    expect(quiet).toContain("Silence alone does not prove the task is hung.");
+    const quietCursor = cursorOf(quiet);
+    expect(quietCursor).not.toBe(freshCursor);
+
+    vi.setSystemTime(startedAt + 299_999);
+    const stillQuiet = formatStatus(task, { cursor: quietCursor });
+    expect(stillQuiet).toContain("No new evidence since cursor");
+    expect(stillQuiet).toContain("no observed progress for 5m00s");
+    expect(cursorOf(stillQuiet)).toBe(quietCursor);
+
+    vi.setSystemTime(startedAt + 300_000);
+    const stale = formatStatus(task, { cursor: quietCursor });
+    expect(stale).not.toContain("No new evidence since cursor");
+    expect(stale).toContain("suspected stall; no observed progress for 5m00s");
+    const staleCursor = cursorOf(stale);
+    expect(staleCursor).not.toBe(quietCursor);
+    expect(utf8ByteLength(stale)).toBeLessThanOrEqual(1024);
+
+    appendFileSync(task.logPath, "new checkpoint\n");
+    utimesSync(task.logPath, new Date(startedAt + 300_000), new Date(startedAt + 300_000));
+    const recovered = formatStatus(task, { cursor: staleCursor });
+    expect(recovered).not.toContain("No new evidence since cursor");
+    expect(recovered).not.toMatch(/suspected stall|no observed progress/);
+    expect(recovered).toContain("new checkpoint");
+    expect(cursorOf(recovered)).not.toBe(staleCursor);
+  });
+
+  it("keeps a completed watch poll visible without letting it hide silence", () => {
+    const task = running({ kind: "command_watch" });
+    vi.setSystemTime(startedAt + 300_000);
+    const stale = formatStatus(task);
+    task.lastCheckedAt = startedAt + 300_000;
+    const polled = formatStatus(task, { cursor: cursorOf(stale) });
+    // The poll is activity the reader can see, but it is not progress: the
+    // suspected stall still stands until the observed outcome changes.
+    expect(polled).not.toContain("No new evidence since cursor");
+    expect(polled).toContain("last check: 0s ago");
+    expect(polled).toContain("suspected stall; no observed progress for 5m00s");
+
+    task.lastProgressAt = startedAt + 300_000;
+    const advanced = formatStatus(task);
+    expect(advanced).not.toContain("suspected stall");
+    expect(advanced).not.toContain("no observed progress");
+  });
+
+  it.each(["succeeded", "failed", "cancelled", "timed_out"] as const)("does not turn an old %s task into a suspected stall", (status) => {
+    const task = running({ status, endedAt: startedAt + 1_000 });
+    vi.setSystemTime(startedAt + 3_600_000);
+    expect(formatStatus(task)).not.toMatch(/suspected stall|no observed progress|Silence alone/);
+  });
+
+  it("keeps stale progress observations beside failures and unreadable-log evidence", () => {
+    const task = running();
+    vi.setSystemTime(startedAt + 300_000);
+    recordFailure(task, "poll", "poll could not run", "poll-1", { category: "operation" });
+    rmSync(task.logPath);
+    const text = formatStatus(task);
+    expect(text).toMatch(/^Action required/);
+    expect(text).toContain("log unreadable");
+    expect(text).toContain("suspected stall; no observed progress for 5m00s");
+    expect(text).toContain("Silence alone does not prove the task is hung.");
+    expect(utf8ByteLength(text)).toBeLessThanOrEqual(1024);
+  });
+
+  it.each(["confined", "unconfined", "unknown"] as const)("shows recorded %s launch provenance without inferring it from current permissions", (confinement) => {
+    const sandbox = { confinement, backend: confinement === "confined" ? "seatbelt" : undefined,
+      policySource: "background" as const, policySummary: "Background launch-time permission profile", changesAffectTask: false as const };
+    const task = Object.assign(running(), { sandbox });
+    for (const text of [formatLaunch(task), formatStatus(task)]) {
+      expect(text).toContain(`sandbox: ${confinement}`);
+      expect(text).toContain("source: background");
+      expect(text).toContain("later changes do not affect this task");
+      if (sandbox.backend) expect(text).toContain(sandbox.backend);
+      expect(utf8ByteLength(text)).toBeLessThanOrEqual(1024);
+    }
+    const verbose = JSON.parse(formatStatus(task, { verbose: true }));
+    expect(verbose.sandbox).toEqual(sandbox);
+  });
+
+  it("continues verbose metadata when live process samples change or are omitted", () => {
+    const task = running();
+    task.argv = ["first-argument", "x".repeat(10_000), "final-argument"];
+    const diagnostics = { availability: "available", identity: "matches", state: "S", cpuTime: "0:00.01", waitChannel: "pipe_read", limit: "One snapshot." } as const;
+    const first = formatStatus(task, { verbose: true, processDiagnostics: diagnostics, maxBytes: 1024 });
+    const cursor = first.match(/nextCursor=(\S+)/)?.[1];
+    expect(cursor).toBeDefined();
+    const changed = formatStatus(task, { verbose: true, processDiagnostics: { ...diagnostics, state: "R", cpuTime: "0:00.02" }, cursor, maxBytes: 1024 });
+    expect(changed).not.toContain("reset=source-replaced");
+    expect(changed).not.toContain("first-argument");
+    let next = changed.match(/nextCursor=(\S+)/)?.[1];
+    let tail = "";
+    for (let page = 0; page < 30 && next; page++) {
+      const text = formatStatus(task, { cursor: next, maxBytes: 1024 });
+      expect(text).not.toContain("reset=source-replaced");
+      tail += text;
+      next = text.match(/nextCursor=(\S+)/)?.[1];
+    }
+    expect(next).toBeUndefined();
+    expect(tail).toContain("final-argument");
+  });
+
+  it("reports missing launch provenance as unknown and invalidates the cursor when provenance appears", () => {
+    const task = running();
+    const first = formatStatus(task);
+    expect(first).toContain("sandbox: unknown; launch-time policy was not recorded.");
+    expect(formatLaunch(task)).toContain("sandbox: unknown; launch-time policy was not recorded.");
+    Object.assign(task, { sandbox: { confinement: "unknown", policySource: "no-publisher", policySummary: "No launch record", changesAffectTask: false } });
+    const restored = formatStatus(task, { cursor: cursorOf(first) });
+    expect(restored).not.toContain("No new evidence since cursor");
+    expect(restored).toContain("sandbox: unknown");
+  });
+
+  it("uses suspected-stall wording in navigator rows and details, and clears it after output", () => {
+    // A cached factory registers its provider only for the TUI session that owns
+    // it, so a headless sibling cannot replace the parent's rows (#460).
+    ensureBackgroundTasksNavigatorProvider({} as any);
+    ensureBackgroundTasksNavigator({ ...ctx, mode: "tui", hasUI: true,
+      ui: { setStatus() {}, setWidget() {}, setEditorComponent() {} } } as any);
+    const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
+    const task = running();
+    vi.setSystemTime(startedAt + 60_000);
+    expect(provider.listRows(Date.now()).find((row: any) => row.id === task.id).facts.join("\n")).toContain("quiet; no observed progress for 1m00s");
+    vi.setSystemTime(startedAt + 300_000);
+    const row = provider.listRows(Date.now()).find((row: any) => row.id === task.id);
+    expect(row.status).toBe("running");
+    expect(row.facts.join("\n")).toContain("suspected stall; no observed progress for 5m00s");
+    const activity = provider.detail(task.id, Date.now()).metadata.find((field: any) => field.label === "activity");
+    expect(activity.value).toContain("suspected stall; no observed progress for 5m00s");
+    appendFileSync(task.logPath, "checkpoint\n");
+    utimesSync(task.logPath, new Date(Date.now()), new Date(Date.now()));
+    expect(provider.listRows(Date.now()).find((row: any) => row.id === task.id).facts.join("\n")).not.toContain("suspected stall");
+    expect(provider.detail(task.id, Date.now()).metadata.some((field: any) => field.label === "activity")).toBe(false);
+  });
+
+  it("counts earlier failure deliveries without repeating them in completion facts", () => {
+    const task = running();
+    recordFailure(task, "first", "first failure already delivered", "first", { category: "operation" });
+    const path = failurePath(task.id);
+    const pending = pendingFailureAttention(readFailureState(path), Date.now(), { terminal: true });
+    expect(pending).toBeDefined();
+    markFailureAttentionDelivered(path, pending!, Date.now());
+    recordFailure(task, "second", "new failure awaiting delivery", "second", { category: "operation" });
+    task.status = "failed";
+    task.endedAt = Date.now();
+    const facts = formatCallbackFacts(task);
+    expect(facts.failureRows).toHaveLength(1);
+    expect(facts.failureRows![0]).toContain("new failure awaiting delivery");
+    expect(JSON.stringify(facts)).not.toContain("first failure already delivered");
+    expect(facts.incidentCount).toBe(1);
+    expect(facts.decision).toContain("1 other active failure observation");
+    const remaining = pendingFailureAttention(readFailureState(path), Date.now(), { terminal: true });
+    expect(remaining).toBeDefined();
+    markFailureAttentionDelivered(path, remaining!, Date.now());
+    const delivered = formatCallbackFacts(task);
+    expect(delivered.failureRows).toBeUndefined();
+    expect(delivered.incidentCount).toBeUndefined();
+    expect(delivered.decision).toContain("2 other active failure observations");
+  });
+});
 
 describe("background output budgets", () => {
   it("uses revised consumer defaults and clamps explicit pages to the core hard cap", () => {
@@ -318,10 +586,10 @@ describe("retained log paging and capture/retention disclosure", () => {
     const status = formatStatus(inspectMeta(meta.id), { origin });
     expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
     expect(status).not.toContain("\uFFFD");
-    expect(status).toMatch(/incidentCursor=i1\./);
+    expect(status).toMatch(/incidentCursor=i2\./);
     const shownCount = Number(status.match(/(\d+) shown/)?.[1]);
     expect(status).toMatch(new RegExp(`12 active failure observations · ${shownCount} shown · ${12 - shownCount} omitted`));
-    let cursor = status.match(/incidentCursor=(i1\.\S+)/)?.[1];
+    let cursor = status.match(/incidentCursor=(i2\.\S+)/)?.[1];
     expect(cursor).toBeTruthy();
     const seen = new Set<string>();
     for (const match of status.matchAll(/bg-incident-(\d+)/g)) seen.add(match[1]!);
@@ -334,7 +602,7 @@ describe("retained log paging and capture/retention disclosure", () => {
         expect(seen.has(match[1]!), `incident ${match[1]} repeated`).toBe(false);
         seen.add(match[1]!);
       }
-      cursor = page.includes("hasMore=true") ? page.match(/nextCursor=(i1\.\S+)/)?.[1] : undefined;
+      cursor = page.includes("hasMore=true") ? page.match(/nextCursor=(i2\.\S+)/)?.[1] : undefined;
     }
     expect([...seen].sort()).toEqual(Array.from({ length: 12 }, (_, i) => String(i)).sort());
     const log = formatLog(meta.id, { origin });
@@ -672,49 +940,56 @@ describe("review regressions (#312)", () => {
   });
 
   it("does not treat a legacy no-origin task as owned when the session id is absent", async () => {
-    const legacy = fixture({ logLines: ["LEGACY_NO_ORIGIN"], callbackOrigin: undefined });
-    const ours = fixture({ logLines: ["OWN_SESSIONLESS"], callbackOrigin: { cwd: origin.cwd } });
-    const tools = register();
-    const sessionless = { cwd: origin.cwd, sessionManager: { getSessionId: () => undefined } };
-    const legacyLog = textOf(await tools.bg_task_log.execute("tc", { id: legacy.id }, undefined, undefined, sessionless));
-    expect(legacyLog).not.toContain("LEGACY_NO_ORIGIN");
-    expect(legacyLog).toContain("ownership is unavailable");
-    const ownLog = textOf(await tools.bg_task_log.execute("tc", { id: ours.id }, undefined, undefined, sessionless));
-    expect(ownLog).toContain("OWN_SESSIONLESS");
-    const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
-    expect(list).not.toContain(`${legacy.id} `);
-    expect(list).toContain(`${ours.id} `);
+    try {
+      const legacy = fixture({ logLines: ["LEGACY_NO_ORIGIN"], callbackOrigin: undefined });
+      const ours = fixture({ logLines: ["OWN_SESSIONLESS"], callbackOrigin: { cwd: origin.cwd } });
+      const tools = register();
+      const sessionless = { cwd: origin.cwd, sessionManager: { getSessionId: () => undefined } };
+      const legacyLog = textOf(await tools.bg_task_log.execute("tc", { id: legacy.id }, undefined, undefined, sessionless));
+      expect(legacyLog).not.toContain("LEGACY_NO_ORIGIN");
+      expect(legacyLog).toContain("ownership is unavailable");
+      const ownLog = textOf(await tools.bg_task_log.execute("tc", { id: ours.id }, undefined, undefined, sessionless));
+      expect(ownLog).toContain("OWN_SESSIONLESS");
+      const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
+      expect(list).not.toContain(`${legacy.id} `);
+      expect(list).toContain(`${ours.id} `);
+      const observed = await backgroundObservation(apis.at(-1), sessionless as any, true);
+      expect(observed.rows.some((row: any) => row.meta.id === legacy.id)).toBe(false);
+      expect(observed.rows.some((row: any) => row.meta.id === ours.id)).toBe(true);
+    } catch (error) { retainMissingTaskWriter(error); throw error; }
   });
 });
 
 describe("output-control aliases (#321)", () => {
   it("accepts lines/tail_lines and max_bytes/maxBytes on every log surface; the canonical name wins", async () => {
-    const lines = Array.from({ length: 30 }, (_, index) => `alias-line-${String(index + 1).padStart(2, "0")} ${"x".repeat(40)}`);
-    const meta = fixture({ logLines: lines });
-    const tools = register();
-    const surfaces = [[tools.bg_task_log, {}], [tools.bg_task, { action: "log" }], [tools.bg_status, { action: "log" }]] as const;
-    for (const [tool, extra] of surfaces) {
-      const run = async (params: Record<string, unknown>) => textOf(await tool.execute("tc", { ...extra, id: meta.id, ...params }, undefined, undefined, ctx));
-      const canonical = await run({ lines: 3 });
-      expect(canonical).toContain("newest 3 display rows");
-      expect(canonical).toContain("alias-line-30");
-      expect(canonical).not.toContain("alias-line-27");
-      expect(await run({ tail_lines: 3 })).toBe(canonical);
-      expect(await run({ lines: 2, tail_lines: 5 })).toContain("newest 2 display rows");
-      const rawCanonical = await run({ lines: 0 });
-      expect(rawCanonical).toContain("raw log");
-      expect(await run({ tail_lines: 0 })).toBe(rawCanonical);
+    try {
+      const lines = Array.from({ length: 30 }, (_, index) => `alias-line-${String(index + 1).padStart(2, "0")} ${"x".repeat(40)}`);
+      const meta = fixture({ logLines: lines });
+      const tools = register();
+      const surfaces = [[tools.bg_task_log, {}], [tools.bg_task, { action: "log" }], [tools.bg_status, { action: "log" }]] as const;
+      for (const [tool, extra] of surfaces) {
+        const run = async (params: Record<string, unknown>) => textOf(await tool.execute("tc", { ...extra, id: meta.id, ...params }, undefined, undefined, ctx));
+        const canonical = await run({ lines: 3 });
+        expect(canonical).toContain("newest 3 display rows");
+        expect(canonical).toContain("alias-line-30");
+        expect(canonical).not.toContain("alias-line-27");
+        expect(await run({ tail_lines: 3 })).toBe(canonical);
+        expect(await run({ lines: 2, tail_lines: 5 })).toContain("newest 2 display rows");
+        const rawCanonical = await run({ lines: 0 });
+        expect(rawCanonical).toContain("raw log");
+        expect(await run({ tail_lines: 0 })).toBe(rawCanonical);
 
-      const small = await run({ max_bytes: 300 });
-      expect(utf8ByteLength(small)).toBeLessThanOrEqual(300);
-      expect(await run({ maxBytes: 300 })).toBe(small);
-      const bothBytes = await run({ max_bytes: 300, maxBytes: 4096 });
-      expect(bothBytes).toBe(small);
-    }
-    const list = textOf(await tools.bg_task_list.execute("tc", { maxBytes: 200 }, undefined, undefined, ctx));
-    expect(utf8ByteLength(list)).toBeLessThanOrEqual(200);
-    const status = textOf(await tools.bg_task_status.execute("tc", { id: meta.id, maxBytes: 400 }, undefined, undefined, ctx));
-    expect(utf8ByteLength(status)).toBeLessThanOrEqual(400);
+        const small = await run({ max_bytes: 300 });
+        expect(utf8ByteLength(small)).toBeLessThanOrEqual(300);
+        expect(await run({ maxBytes: 300 })).toBe(small);
+        const bothBytes = await run({ max_bytes: 300, maxBytes: 4096 });
+        expect(bothBytes).toBe(small);
+      }
+      const list = textOf(await tools.bg_task_list.execute("tc", { maxBytes: 200 }, undefined, undefined, ctx));
+      expect(utf8ByteLength(list)).toBeLessThanOrEqual(200);
+      const status = textOf(await tools.bg_task_status.execute("tc", { id: meta.id, maxBytes: 400 }, undefined, undefined, ctx));
+      expect(utf8ByteLength(status)).toBeLessThanOrEqual(400);
+    } catch (error) { retainMissingTaskWriter(error); throw error; }
   });
 
   it("declares canonical and deprecated names in every read schema", () => {
@@ -836,7 +1111,9 @@ describe("status cursor delegation (#323)", () => {
 describe("#332 navigator rows", () => {
   it("history-only failures keep the command in the row; an actionable incident still leads it", () => {
     ensureBackgroundTasksNavigatorProvider({} as any);
-    ensureBackgroundTasksNavigator({ cwd: origin.cwd, hasUI: false, sessionManager: { getSessionId: () => origin.sessionId } } as any);
+    ensureBackgroundTasksNavigator({ cwd: origin.cwd, mode: "tui", hasUI: true,
+      ui: { setStatus() {}, setWidget() {}, setEditorComponent() {} },
+      sessionManager: { getSessionId: () => origin.sessionId } } as any);
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
     const quiet = fixture({ status: "running", endedAt: undefined, command: "rg needle src" });
     recordFailure(quiet, "exit", "exited with declared expected code 1", "q1", { expected: true });

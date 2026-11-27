@@ -106,6 +106,19 @@ export function getSharedCapacityGate(countRunning) {
     return sharedGate;
 }
 
+/** Server centralization retains each original process/start capacity domain. */
+export function createOwnerCapacityGates(countOwner) {
+    const gates = new Map();
+    return owner => {
+        const key = JSON.stringify([owner.pid, owner.start]);
+        if (!gates.has(key)) {
+            const captured = { pid: owner.pid, start: owner.start };
+            gates.set(key, createCapacityGate(() => countOwner(captured)));
+        }
+        return gates.get(key);
+    };
+}
+
 /** Test-only: drop the singleton so a suite starts from a clean ledger. */
 export function _resetSharedCapacityGateForTests() {
     sharedGate = undefined;

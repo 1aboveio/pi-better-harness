@@ -43,7 +43,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => screen.includes("/goal settings"));
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings") && screen.includes("Conversational resume"));
+  waitForScreen((screen) => screen.includes("Goal execution settings") && screen.includes("Conversational resume"));
   sendKey("Space");
   waitForScreen((screen) => screen.includes("Saved.") && /Automatic continuation\s+Off/.test(screen));
   sendKey("Down");
@@ -54,7 +54,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
   const preferencesFile = join(fixtures, "agent", "settings.json");
   assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal, {
-    version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false,
+    version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false,
   });
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));
@@ -65,17 +65,24 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendKey("Space");
   waitForScreen((screen) => /Automatic continuation\s+On/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings"));
   assert.equal(modelCalls().length, 0, "settings changes must not start a model turn");
 
   sendLiteral("/goal ship the pause widget");
   sendKey("Enter");
   waitForScreen((screen) => screen.includes("goal active") && screen.includes("working through step"), 15_000);
   sendKey("Escape");
-  waitForScreen((screen) => screen.includes('goal paused · say "go" or /goal resume'));
+  const paused = waitForScreen((screen) => screen.includes("goal paused"));
+  assert.doesNotMatch(paused, /goal paused ·|goal held:|waiting: no progress/,
+    "the paused widget remains visible without Goal footer text");
   assert.equal(modelCalls().length, 1, "only the first continuation reached the model");
   assert.equal(modelCalls()[0].tools.includes("goal_resume"), false, "a running goal hides goal_resume");
 
+  // Pi queues a prompt submitted while the aborted turn is still streaming and
+  // drains it as a continuation of that run, which never re-runs
+  // before_agent_start. Wait for the pause turn to settle so the question is a
+  // fresh prompt turn that receives the paused-goal instruction.
+  waitForFile(join(fixtures, "pause-settled"));
   sendLiteral("why is that step needed?");
   sendKey("Enter");
   waitForScreen((screen) => screen.includes("Because the widget needs it."));
@@ -98,9 +105,9 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForFile(join(fixtures, "idle-settled"));
 
   sendLiteral("/goal ");
-  waitForScreen((screen) => screen.includes("Pause the active goal"));
+  waitForScreen((screen) => screen.includes("Pause work on the current Goal and Todo"));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Pause the active goal") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Pause work on the current Goal and Todo") && screen.includes("goal active"));
   sendKey("C-u");
 
   sendLiteral("/settings");
@@ -112,9 +119,9 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
 
   sendLiteral("/goal-dialog");
   sendKey("Tab");
@@ -130,13 +137,13 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Down");
   sendKey("Down");
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
   sendKey("Escape");
   assertScreenStays((screen) => screen.includes("goal active") && !screen.includes("goal paused"), 1_000);
   assert.equal(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal.pauseOnEscape, false);
@@ -144,16 +151,16 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendLiteral("/goal settings");
   sendKey("Tab");
   sendKey("Enter");
-  waitForScreen((screen) => screen.includes("Goal settings"));
+  waitForScreen((screen) => screen.includes("Goal execution settings"));
   sendKey("Down");
   sendKey("Down");
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  waitForScreen((screen) => !screen.includes("Goal execution settings") && screen.includes("goal active"));
   const beforeIdlePause = modelCalls().length;
   sendKey("Escape");
-  waitForScreen((screen) => screen.includes('goal paused · say "go" or /goal resume'));
+  waitForScreen((screen) => screen.includes("goal paused"));
   sendLiteral("why is that step needed?");
   sendKey("Enter");
   waitForScreen((screen) => modelCalls().length === beforeIdlePause + 1 && screen.includes("Because the widget needs it."));
@@ -277,6 +284,7 @@ export default function (pi) {
   pi.on("agent_settled", () => {
     if (lastKind === "idle-continuation") writeFileSync(${JSON.stringify(join(fixtures, "idle-settled"))}, "settled");
     if (lastKind === "off-slow-continuation") writeFileSync(${JSON.stringify(join(fixtures, "off-stream-settled"))}, "settled");
+    if (lastKind === "slow-continuation") writeFileSync(${JSON.stringify(join(fixtures, "pause-settled"))}, "settled");
   });
   pi.registerProvider("scripted", {
     baseUrl: "http://localhost:0",

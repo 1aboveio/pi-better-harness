@@ -1,0 +1,152 @@
+// Generated fixed launch domain from packages/pi-better-subagents/list.mjs. Do not edit directly.
+import { assignmentFor, assignmentDiagnostic } from "./assignment-projection.mjs";
+import { describeTiming } from "./timing.domain.mjs";
+import { fmtElapsed } from "./widget.mjs";
+import { formatListHealthSuffix } from "./health-surface.mjs";
+import { discoveryWorkspace, isWithinWorkspace, normalizeWorkspacePath } from "./workspace-scope.domain.mjs";
+export const SUBAGENT_LIST_DEFAULT_LIMIT = 10;
+export const SUBAGENT_LIST_MAX_LIMIT = 100;
+/** Effective + durable supervision statuses accepted by subagent_list filters. */
+export const SUBAGENT_LIST_STATUSES = [
+    "waiting",
+    "cancelled",
+    "running",
+    "completed",
+    "failed",
+    "killed",
+    "exited",
+    "orphaned",
+    "lost",
+];
+const STATUS_SET = new Set(SUBAGENT_LIST_STATUSES);
+function promptPreview(meta) {
+    return String(meta.promptPreview ?? "").replace(/\s+/g, " ").slice(0, 100);
+}
+export function normalizeSubagentListOptions(params = {}) {
+    const warnings = [];
+    const rawLimit = params.limit;
+    let limit = SUBAGENT_LIST_DEFAULT_LIMIT;
+    if (rawLimit !== undefined && rawLimit !== null) {
+        const n = Number(rawLimit);
+        if (!Number.isFinite(n)) {
+            throw new Error("subagent_list limit must be a finite number.");
+        }
+        limit = Math.floor(n);
+        if (limit < 0) {
+            warnings.push(`Requested limit ${rawLimit} is below 0; using 0.`);
+            limit = 0;
+        }
+        if (limit > SUBAGENT_LIST_MAX_LIMIT) {
+            warnings.push(`Requested limit ${rawLimit} exceeds maximum ${SUBAGENT_LIST_MAX_LIMIT}; using ${SUBAGENT_LIST_MAX_LIMIT}.`);
+            limit = SUBAGENT_LIST_MAX_LIMIT;
+        }
+    }
+    const rawStatus = params.status;
+    let statuses = null;
+    if (rawStatus !== undefined && rawStatus !== null) {
+        const values = Array.isArray(rawStatus) ? rawStatus : [rawStatus];
+        const normalized = values.map((s) => String(s).trim().toLowerCase()).filter(Boolean);
+        const invalid = normalized.filter((s) => !STATUS_SET.has(s));
+        if (invalid.length) {
+            throw new Error(`Unsupported subagent_list status: ${[...new Set(invalid)].join(", ")}. ` +
+                `Supported statuses: ${SUBAGENT_LIST_STATUSES.join(", ")}.`);
+        }
+        statuses = new Set(normalized);
+    }
+    return {
+        all: params.all === true,
+        limit,
+        statuses,
+        warnings,
+    };
+}
+/**
+ * Cursor scope for one list call.
+ *
+ * Machine-global lists keep the existing `all` key. Folder lists use the
+ * canonical folder path, so a cursor cannot replay another folder's page while
+ * two foreground sessions in the same folder intentionally share one scope.
+ */
+export function listFolderScopeKey(all, cwd) {
+    if (all)
+        return "all";
+    const folder = typeof cwd === "string" && cwd !== "" ? cwd : process.cwd();
+    return `folder:${normalizeWorkspacePath(folder)}`;
+}
+function bounded(value, max) {
+    const single = String(value ?? "").replace(/\s+/g, " ").trim();
+    return single.length <= max ? single : `${single.slice(0, Math.max(0, max - 1))}…`;
+}
+/**
+ * One compact row. Free text (name, model, batch) is bounded so the id and
+ * status always sit within the row's first ~80 characters and survive clipping.
+ */
+export function formatSubagentListRow(meta, p) {
+    const status = p.status;
+    const now = p.now ?? Date.now();
+    const elapsed = fmtElapsed((meta.endedAt ?? now) - meta.startedAt);
+    const name = meta.name ? `${bounded(meta.name, 60)} ` : "";
+    const health = formatListHealthSuffix(p.health);
+    const failure = p.failure ? ` · ${bounded(p.failure, 60)}` : "";
+    const timingNote = describeTiming({ ...meta, status: meta.status });
+    const timing = timingNote ? ` · ${timingNote.short}` : "";
+    const batch = meta.batchId
+        ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
+        : "";
+    const assignment = p.assignment ?? assignmentFor(meta, p.processStatus ?? meta.status);
+    const diagnostic = meta.operations || meta.park || status !== assignment.processStatus || status === "failed"
+        ? `\n    ${assignmentDiagnostic(assignment, { includeEvidence: !p.compact })}` : "";
+    return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)} · r${assignment.revision}${diagnostic}`;
+}
+export function collectSubagentList(p) {
+    const options = normalizeSubagentListOptions(p.params ?? {});
+    const now = p.now ?? Date.now();
+    // Folder scope, not spawn ownership: every foreground session working in
+    // this folder (or one of its descendants) contributes to the default list.
+    const cwd = typeof p.cwd === "string" && p.cwd !== "" ? p.cwd : process.cwd();
+    const statusOf = p.statusOf ?? ((meta) => meta.status);
+    const healthById = p.healthById ?? (() => undefined);
+    const failureById = p.failureById ?? (() => "");
+    const inScope = p.inScope ?? ((meta) => options.all || isWithinWorkspace(discoveryWorkspace(meta), cwd));
+    const offset = Math.max(0, Math.floor(Number(p.offset) || 0));
+    const scoped = (p.metas ?? [])
+        .filter((meta) => inScope(meta, options))
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .map((meta) => ({ meta, status: statusOf(meta) }));
+    const items = options.statuses === null
+        ? scoped
+        : scoped.filter((row) => options.statuses.has(row.status));
+    const displayed = items.slice(offset, offset + options.limit);
+    const rows = displayed.map((row) => formatSubagentListRow(row.meta, {
+        assignment: p.assignmentOf?.(row.meta),
+        status: row.status,
+        now,
+        health: healthById(row.meta.id),
+        failure: failureById(row.meta.id),
+    }));
+    return {
+        warnings: options.warnings,
+        items,
+        rows,
+        matching: items.length,
+        displayed: displayed.length,
+        offset,
+        limit: options.limit,
+        all: options.all,
+        empty: items.length === 0,
+    };
+}
+export function buildSubagentList(p) {
+    const collected = collectSubagentList(p);
+    const lines = [...collected.warnings];
+    if (collected.empty) {
+        lines.push("No subagent runs match filters.");
+        return lines.join("\n");
+    }
+    lines.push(...collected.rows);
+    if (collected.matching > collected.displayed + collected.offset) {
+        lines.push(`Showing ${collected.displayed} of ${collected.matching} matching subagent runs ` +
+            `(limit ${collected.limit}). Increase limit up to ${SUBAGENT_LIST_MAX_LIMIT} to see more.`);
+    }
+    return lines.join("\n");
+}

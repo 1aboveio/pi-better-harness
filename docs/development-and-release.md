@@ -13,7 +13,19 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| `pi-better-plan` | Keep structured execution plans and explicit checklist progress visible. |
+| Harness Goal & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
+
+Install `pi-better-model-router` separately to route between DeepSeek and Ollama
+Cloud by estimated price. The router package includes the Ollama Cloud provider
+and requires Pi's `registerVirtualModel` API.
+
+Isolated subagents resolve the selected model's declared extension dependencies,
+including the router's DeepSeek and Ollama Cloud candidates. The launcher follows
+package `pi.childDependencies` and `pi.childRequirements` declarations recursively
+and checks the resulting model and tool requirements inside the child before its
+first request. Missing dependencies, dependency cycles, and configuration changes
+fail the launch checks with an explanation. These checks establish registration
+and configured authentication; provider connectivity still requires a live request.
 
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
@@ -34,7 +46,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
+pi install npm:pi-better-model-router
 ```
 
 For a temporary one-off run without changing Pi settings:
@@ -56,15 +68,15 @@ The package workspaces are:
 | `packages/pi-better-sandbox` | `pi-better-sandbox` | yes | yes |
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
-| `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
+| `packages/pi-better-plan` | retired private archive | no | no |
+| `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
+| `packages/pi-better-model-router` | `pi-better-model-router` | yes | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 | `packages/sandbox-diagnostics` | internal workspace, vendored into sandbox consumers | no | no |
 
-All publish-configured packages carry the `pi-package` npm keyword. The bundle is
-the recommended install for most users, and the component packages remain
-available for people who want only one extension.
+All publish-configured packages carry the `pi-package` npm keyword. Use `npx pi-better-harness install` to register all five Harness components separately and load the Harness-owned extensions. You can also install the bundle directly. The installer removes an old Plan registration only in the selected scope.
 
 ## Development
 
@@ -83,6 +95,8 @@ npm test
 npm run test:cross-session
 ```
 
+When designing a plugin hook, timer, subscription or render path, identify which component owns the source data and what change should make it read again. [ADR 0032 · Plugin and runtime performance design](adr/0032-runtime-performance-design.md)
+
 ### Minimal tool output compatibility
 
 The renderer regression suite covers single-line folded call headers, terminal-width
@@ -96,6 +110,33 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 ```
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
+
+### Goal & Todo release contract
+
+**Auto-start Goals** is the only Goal control in `/harness-settings` and defaults
+to Off. Harness makes the Todo tools available and displays saved work on startup,
+including for legacy settings with `enabled: false` or `display: false`. Empty
+sessions render no placeholder and write no task state. Test manual pause and
+resume with auto-start off, including after reload. Use `/todo hide` and
+`/todo show` to control the panel for the current session branch.
+
+The compact widget has one Todo heading with the caret after Todo, the completion
+count on the left, and matching Goal status and its existing active-time clock on
+the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
+to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
+reveals the compact Overview when display is on and returns it to automatic
+display; the full objective, acceptance criteria, boundaries, and plan remain
+available through `get_todo`. Subagent and background-task rows open their
+existing navigator details on click; Enter and keyboard controls remain, and
+editor input stays passive.
+Harness packages do not write to Pi's status bar, including Goal holds, SSH
+profiles, navigator hints, and remote connection state. Commands and widgets retain
+their state displays; permission checks and pause/resume rules are unchanged.
+
+Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
+`display: true` means Harness actually displays the requested `goalId`; only then
+is the standalone Goal clock suppressed. `enabled` indicates that Harness owns the task context. Standalone Goal and hidden or unmatched fallback remain available. See
+[ADR 0018](adr/0018-harness-outcome-todo.md) for the contract and history.
 
 ### Harness settings verification
 
@@ -158,6 +199,31 @@ log character across wrapping at 100 and 80
 columns, retain one input frame, and return to a working editor. It seeds only
 session-scoped registry/log fixtures; navigation and rendering use the real Pi
 TUI in an isolated tmux server, without a model request.
+
+Every launch owns a fresh fixture directory, probe file and tmux server. The
+readiness file records its launch, probe and Pi process identity, and the test
+refuses state from any other producer. A launch that fails to become ready is
+stopped immediately. A controlled late-start regression holds two launches
+behind FIFOs and proves that releasing the older Pi cannot create the newer
+launch's readiness.
+
+Before the timed journey, import-only setup populates jiti's per-test module
+cache with a separate 60-second limit. It does not call extension factories or
+session handlers; their first execution remains inside the unchanged 10-second
+readiness budget. This separates cold TypeScript loading from interactive
+readiness. Linux tests under a half-CPU quota reproduced a first-launch timeout
+while Pi was still importing extensions, including on the 0.41.3 release commit.
+The dedicated TUI command runs its test files sequentially because simultaneous
+Pi startups compete for CPU on the same runner.
+For a Node-based `PI_NAVIGATOR_CLI`, setup uses that host's jiti and package
+aliases. Compiled Pi binaries keep the existing timed journey without external
+preloading because their loader is embedded; setup prints that distinction.
+
+On failure the journey records pane state, process liveness and Pi stderr before
+cleanup. Startup timings are available once the SDK finishes loading extensions;
+a timeout earlier in loading may have no completed timing report. A vanished
+tmux server is reported alongside the original failure rather than replacing it
+with a capture error.
 
 The test prints its evidence directory and saves terminal panes plus
 `smoke-results.json`. Set `PI_NAVIGATOR_EVIDENCE_DIR` to choose the directory;
@@ -278,7 +344,7 @@ pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
 pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
-pi install ./packages/pi-better-plan
+pi install ./packages/pi-better-model-router
 ```
 
 ## Release Checklist
@@ -303,6 +369,8 @@ npm run verify
 npm publish --dry-run -w packages/pi-better-goal --registry=https://registry.npmjs.org/
 ```
 
+For changes to recurring plugin or runtime work, verify the affected work budget and user-visible result on the release candidate. [ADR 0032 · Plugin and runtime performance design](adr/0032-runtime-performance-design.md)
+
 Vendored shared modules (`shared-sandbox-core.ts`, `shared-ssh-core/`,
 `shared-log-utils.ts`, `shared-failure-observations.ts`,
 `shared-callback-batcher.ts`, `shared-sandbox-diagnostics.ts`) are regenerated by each consumer's `prepack`, and
@@ -312,6 +380,22 @@ failure-observation and callback-batcher copies. If a sync script gains
 a consumer, add its expected path to `publish.yml`'s pack check and to `ci.yml`'s
 bundled-tarball assertions, or a release can ship a package missing the module it
 imports.
+
+Harness `prepack` projects only its root entries into an ignored, generated
+`packages/pi-better-harness/CHANGELOG.md`, included explicitly in the npm tarball.
+Do not maintain a second changelog there. The generated version-only headings
+let compatible Pi hosts show Extension Updates using the default changelog path.
+Packing fails if the Harness manifest version has no root entry or that entry
+contains only whitespace or headings, including for metadata-only releases;
+add notes for every new Harness version.
+
+Run `node --test scripts/harness-changelog.test.mjs` for projection edge cases
+and a real npm tarball check, including bundled components. To also parse the
+extracted changelog with a compatible installed Pi host, set
+`PI_CHANGELOG_PARSER` to that host's `dist/utils/changelog.js`. No external host
+path is hardcoded in the tests. This bridge was verified with Pi 1.5.1: the
+0.42.0 notes parse and are selected as newer than 0.41.3. The Harness workspace
+typecheck also passed. These checks do not publish or change package versions.
 
 Add package-scoped notes to `CHANGELOG.md`; independent packages can use the
 same semantic version without colliding:
@@ -330,6 +414,29 @@ request. After CI passes and the PR is merged, dispatch
 The workflow reads the version from that package's manifest, publishes only its
 workspace, and creates a package-scoped tag and GitHub release such as
 `pi-better-goal@0.1.15`.
+
+Monitor a dispatched GitHub run with the state-based helper in a background task:
+
+```sh
+node scripts/watch-github-run.mjs --repo 1aboveio/pi-better-harness --run <run-id>
+```
+
+It emits the active steps only when provider state changes, keeps polling while
+that state stays the same, and exits with an error for failed runs or unreadable
+provider state. It omits terminal redraws and display clocks, so repeated status
+refreshes cannot keep resetting the background task's progress clock. The normal
+quiet and suspected-stall observations remain available while a phase is unchanged.
+A suspected stall is an observation to inspect, not proof that CI is hung.
+
+For an active Harness Outcome, **Supervisor mode > CI observation recovery**
+can diagnose an interrupted local Background task observing a GitHub.com run.
+Pass an explicit repository and run ID through `shell: false` argv. Supported
+forms are `gh run watch` or the helper above through `bg_task_spawn`, and
+`gh run view --json` through `bg_task_watch`. The daemon checks that the
+original attempt is still active (attempt 1 unless the watch pins `--attempt`).
+It does not dispatch or rerun a build. Only the original owner receives the
+suggestion to resume observation. Use `supervisor_consult` with the local
+watcher's Background task ID to request the same diagnosis explicitly.
 
 Confirm that package is visible:
 
@@ -415,10 +522,14 @@ deprecate the unattested one — not to relax the check.
 
 ### npm version skew between CI and publish
 
-`publish.yml` runs `npm install --global npm@latest` before `npm run verify`,
-while `ci.yml` uses the runner image's bundled npm. The two lanes therefore run
-different npm majors, and a change in npm's own output can pass CI and still
-break the release.
+`publish.yml` runs only from `main` and pins Node 24.14.1 and npm 11.19.0.
+The Node pin matches the managed-runtime tests; the npm pin supports trusted
+publishing without depending on a changing `npm@latest`. CI's host-side lane
+still uses Node 22.
+
+When updating either pin, verify the release workflow as well as ordinary CI.
+The lanes have historically used different npm majors, and a change in npm's
+output can pass CI and still break a release.
 
 This has happened once: npm 12 changed `npm pack --json` from an array of packed
 results to an object keyed by package name, which broke four pack assertions that

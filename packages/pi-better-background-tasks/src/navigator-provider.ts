@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_LOG_TAIL_ROWS as NAVIGATOR_DETAIL_ROWS,
+  disposeBackgroundWorkNavigator,
+  isNavigatorUiAvailable,
   ensureBackgroundWorkNavigator,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
@@ -14,60 +16,287 @@ import { actionableFailures, failureLabel, readFailureState } from "./shared-fai
 import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
-import { stopTask } from "./runtime.js";
-import { observeBackgroundTaskStall } from "./stall.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import { describeSupervisedProgress } from "./supervised-progress.js";
+import type { DurableTaskProjection } from "./observed-waits.js";
+import type { BackgroundTaskRuntime } from "./runtime.js";
+import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
+const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
+const DURABLE_ROW_CACHE_MS = 1_000;
+let durableRowCache: {
+  tasks: readonly DurableTaskProjection[];
+  at: number;
+  rows: BackgroundWorkRow[];
+} | undefined;
+
+export interface ManagedBackgroundNavigator {
+  onOpen?(): void;
+  rows(): BackgroundWorkRow[];
+  prepareDetail(id:string,options?:{logTailLines?:number}): void;
+  detail(id: string, now: number, options?: {logTailLines?: number}): BackgroundWorkDetail | null;
+  close(id: string): {action:string;providerId:string;id:string;status?:string};
+}
+export function createBackgroundTasksNavigator(runtime?: Pick<BackgroundTaskRuntime, "stopTask">, managed?: ManagedBackgroundNavigator) {
+const owner = Symbol("background-tasks navigator factory");
 let unregister: (() => void) | undefined;
+let navigatorContext: ExtensionContext | undefined;
 let piRef: ExtensionAPI | undefined;
 let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
-const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
-
-export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
+function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
+  // Provider registration is deferred until an actual TUI session owns it, so a
+  // headless child sharing the cached module cannot replace the parent's provider.
+  if (!navigatorContext) {
+    piRef = pi;
+    return;
+  }
+  // A reloaded or replaced extension instance gets a fresh host. Re-register so
+  // the provider's durable-change subscription targets that host, not the one
+  // captured by the previous instance.
+  if (piRef === pi && unregister) return;
+  if (unregister) {
+    try { unregister(); } catch { /* ignore */ }
+    unregister = undefined;
+  }
   piRef = pi;
-  if (unregister) return;
   unregister = registerBackgroundWorkProvider(provider);
 }
 
-export function ensureBackgroundTasksNavigator(ctx: ExtensionContext): void {
+function ensureBackgroundTasksNavigator(ctx: ExtensionContext): void {
+  if (!isNavigatorUiAvailable(ctx)) return;
+  navigatorContext = ctx;
+  if (piRef) ensureBackgroundTasksNavigatorProvider(piRef);
   activeNavigatorOrigin = getNavigatorOrigin(ctx);
   ensureBackgroundWorkNavigator(ctx, {
     createDefaultEditor: (tui, theme, keybindings) => new CustomEditor(tui as never, theme as never, keybindings as never),
     isOpenTrigger: (data) => matchesKey(data, Key.left),
     matchKey: (data, keyId) => matchesKey(data, keyId as Parameters<typeof matchesKey>[1]),
     truncate: truncateToWidth,
-  });
+  }, owner);
 }
 
-export function clearBackgroundTasksNavigatorSession(): void {
+function clearBackgroundTasksNavigatorSession(): void {
   activeNavigatorOrigin = undefined;
+  unregister?.();
+  unregister = undefined;
+  if (navigatorContext) disposeBackgroundWorkNavigator(navigatorContext, owner);
+  navigatorContext = undefined;
 }
 
-export function refreshBackgroundTasksNavigator(ctx?: ExtensionContext): void {
-  refreshBackgroundWorkNavigator(ctx);
+function refreshBackgroundTasksNavigator(ctx?: ExtensionContext): void {
+  // This factory owns no navigator until a TUI session installs it; a refresh from
+  // a non-TUI tool context then repaints the stored owner context (main #332).
+  const ownerCtx = navigatorContext;
+  if (!ownerCtx) return;
+  refreshBackgroundWorkNavigator(ctx && isNavigatorUiAvailable(ctx) ? ctx : ownerCtx);
 }
 
 const provider: BackgroundWorkProvider = {
   id: "background-tasks",
   label: "Background Tasks",
   priority: 20,
-  visibleCount: () => visibleMetas(Date.now()).filter((meta) => meta.status === "running").length,
-  listRows: (now) => visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
-  detail: (id, now, options) => detailFromMeta(readMeta(id), now, options),
-  armCloseLabel: (row) => row.status === "running" ? "x again to stop" : "x again to dismiss",
+  onOpen: managed?.onOpen,
+  visibleCount: () => {
+    const now = Date.now();
+    return (managed ? managed.rows().filter(row => row.status === "running").length : visibleMetas(now).filter((meta) => meta.status === "running").length)
+      + visibleDurableTasks(now).filter((task) => task.active).length;
+  },
+  listRows: (now) => [
+    ...(managed ? managed.rows() : visibleMetas(now).map((meta) => rowFromMeta(meta, now))),
+    ...durableRows(visibleDurableTasks(now), now),
+  ],
+  prepareDetail: (id,options) => managed?.prepareDetail(id,options),
+  detail: (id, now, options) => {
+    const durable = durableTask(id);
+    if (durable) return detailFromDurable(durable, options);
+    return managed ? managed.detail(id,now,options) : detailFromMeta(readMeta(id), now, options);
+  },
+  armCloseLabel: (row) => row.status === "running" || row.status === "starting" ? "x again to stop" : "x again to dismiss",
   close: (id) => {
+    if (durableTask(id)?.readOnly) return {action: "not-closable", providerId: "background-tasks", id};
+    if(managed)return managed.close(id);
+    const durable = durableTask(id);
+    if (durable?.readOnly) return {action: "not-closable", providerId: "background-tasks", id};
+    if (durable) {
+      const host = navigatorHost();
+      const origin = activeNavigatorOrigin;
+      if (!host || !origin) return { action: "missing", providerId: "background-tasks", id };
+      if (durable.active) {
+        void host.stopDurableTask(origin, id);
+        return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
+      }
+      if (host.dismissDurableTask(origin, id)) {
+        return { action: "dismissed", providerId: "background-tasks", id, status: durable.status };
+      }
+      return { action: "denied", providerId: "background-tasks", id };
+    }
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      void stopTask(piRef as ExtensionAPI, id);
+      const pi = piRef as ExtensionAPI;
+      if (runtime) void runtime.stopTask(pi, id);
+      else void import("./runtime.js").then(({ stopTask }) => stopTask(pi, id));
       return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
     writeMeta(meta);
     return { action: "dismissed", providerId: "background-tasks", id, status: meta.status };
   },
-  onVisibleChanged: onMetaChanged,
+  onVisibleChanged: (notify) => {
+    const offMeta = onMetaChanged(notify);
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange((change) => {
+      const active = activeNavigatorOrigin;
+      if (!active || change.workspace !== active.cwd || change.sessionId !== active.sessionId) return;
+      notify();
+    });
+    return () => {
+      offMeta();
+      offDurable?.();
+    };
+  },
 };
+
+function navigatorHost() {
+  return piRef ? getObservedWaitHost(piRef) : undefined;
+}
+
+function visibleDurableTasks(now = Date.now()): DurableTaskProjection[] {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  if (!active || !host) return [];
+  // ObservedWaitHost caches unchanged projections and invalidates them on every
+  // durable notification, so a host redraw no longer re-queries per panel.
+  const listed = host.listDurableTasks(active, { retentionMs: TERMINAL_NAVIGATOR_RETENTION_MS });
+  return listed;
+}
+
+function durableRows(tasks: readonly DurableTaskProjection[], now: number): BackgroundWorkRow[] {
+  if (durableRowCache && durableRowCache.tasks === tasks
+    && now >= durableRowCache.at && now - durableRowCache.at < DURABLE_ROW_CACHE_MS) {
+    return durableRowCache.rows;
+  }
+  const rows = tasks.map((task) => rowFromDurable(task, now));
+  durableRowCache = { tasks, at: now, rows };
+  return rows;
+}
+
+function durableTask(id: string): DurableTaskProjection | undefined {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  if (!active || !host) return undefined;
+  return host.readDurableTask(active, id);
+}
+
+function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWorkRow {
+  const command = durableCommandLabel(task);
+  const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
+  const facts: string[] = [];
+  const progress = task.progress && describeSupervisedProgress(task.progress, now);
+  if (progress) facts.push(progress);
+  if (task.attention && task.reason) facts.push(task.reason);
+  else if (task.attention) facts.push(task.status);
+  if (task.kind === "watch" && task.intervalSeconds) facts.push(`every ${formatDuration(task.intervalSeconds * 1000)}`);
+  if (task.active && task.deadlineAt) facts.push(`${formatDuration(task.deadlineAt - now)} left`);
+  if (task.waits.length) facts.push(`${task.waits.length} wait${task.waits.length === 1 ? "" : "s"}`);
+  return {
+    providerId: "background-tasks",
+    id: task.id,
+    parentAgentId: task.parentAgentId,
+    readOnly: task.readOnly,
+    name: task.name,
+    status: task.status,
+    statusTone: toneForDurableStatus(task.status),
+    kind: task.kind,
+    elapsed,
+    primary: compactDurableLabel(task),
+    command,
+    tool: compactDurableLabel(task),
+    secondary: [task.cwd, task.exitCode !== null ? `exit ${task.exitCode}` : undefined].filter(Boolean).join(" · ") || undefined,
+    facts: facts.slice(0, 2),
+    sortStartedAt: task.startedAt,
+    expiresAt: task.terminal && task.endedAt !== undefined
+      ? task.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
+      : undefined,
+  };
+}
+
+function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines?: number }): BackgroundWorkDetail {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  const lines = options?.logTailLines ?? NAVIGATOR_DETAIL_ROWS;
+  const log = active && host ? host.readDurableTaskLog(active, task.id, lines) : undefined;
+  const metadata = [
+    { label: "provider", value: "Background Tasks (durable)" },
+    { label: "kind", value: task.kind },
+    ...(task.parentAgentId ? [{label: "agent", value: task.parentAgentId}] : []),
+    { label: "operation", value: task.operationId },
+    ...(task.progress ? [{ label: "last progress", value: new Date(task.progress.observedAt).toISOString() }] : []),
+    { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
+    { label: "started", value: new Date(task.startedAt).toISOString() },
+    ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),
+    { label: "cwd", value: task.cwd },
+    ...(task.exitCode !== null || task.signal ? [{ label: "exit", value: `${task.exitCode ?? "null"}${task.signal ? ` signal ${task.signal}` : ""}` }] : []),
+    ...(task.reason ? [{ label: "reason", value: task.reason }] : []),
+    ...(task.stepGateFailure ? [{ label: "step gate", value: `${task.stepGateFailure.command} exited ${task.stepGateFailure.stepExitCode}` }] : []),
+    { label: "stdout", value: task.logPaths.stdout },
+    { label: "stderr", value: task.logPaths.stderr },
+    { label: "events", value: task.logPaths.events },
+    ...(task.waits.length
+      ? [{ label: "waits", value: task.waits.map((wait) => `${wait.waitId} ${wait.phase}`).join(", ") }]
+      : []),
+  ];
+  const evidenceText = log
+    ? [log.stdout, log.stderr ? `stderr:\n${log.stderr}` : "", log.events ? `events:\n${log.events}` : ""]
+      .filter(Boolean).join("\n") || "(log is empty)"
+    : "(durable log is unavailable)";
+  return {
+    providerId: "background-tasks",
+    id: task.id,
+    title: task.name || task.id,
+    status: task.status,
+    statusTone: toneForDurableStatus(task.status),
+    subtitle: task.stepGateFailure?.command ?? task.reason ?? compactDurableLabel(task),
+    metadata,
+    foldedSections: [{
+      id: "command",
+      label: "command",
+      text: task.command ?? (task.argv ? task.argv.join(" ") : "(no command recorded)"),
+      collapsedText: compactDurableLabel(task),
+      expandedByDefault: true,
+    }],
+    evidence: {
+      label: log?.truncated ? "log tail" : "log",
+      text: evidenceText,
+    },
+    footerActions: task.readOnly ? ["Managed by owning agent"] : [task.active ? "x stop" : "x dismiss"],
+  };
+}
+
+function durableCommandLabel(task: DurableTaskProjection): string {
+  if (task.command) return task.command;
+  if (task.argv?.length) return task.argv.join(" ");
+  return task.name ?? "(no command recorded)";
+}
+
+function compactDurableLabel(task: DurableTaskProjection): string {
+  const value = durableCommandLabel(task).trim();
+  const parts = value.split(/\s+/).filter(Boolean);
+  return parts.length <= 3 ? value : parts.slice(0, 3).join(" ");
+}
+
+function toneForDurableStatus(status: string): BackgroundWorkRow["statusTone"] {
+  switch (status) {
+    case "running":
+    case "starting": return "running";
+    case "succeeded": return "success";
+    case "failed":
+    case "timed_out":
+    case "lost": return "failed";
+    case "cancelled": return "warning";
+    default: return "muted";
+  }
+}
 
 function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
   const active = activeNavigatorOrigin;
@@ -98,13 +327,18 @@ function belongsToActiveNavigatorSession(meta: BackgroundTaskMeta): boolean {
   return meta.cwd === active.cwd;
 }
 
+return { ensureBackgroundTasksNavigatorProvider, ensureBackgroundTasksNavigator, clearBackgroundTasksNavigatorSession, refreshBackgroundTasksNavigator };
+}
+const defaultNavigator = createBackgroundTasksNavigator();
+export const { ensureBackgroundTasksNavigatorProvider, ensureBackgroundTasksNavigator, clearBackgroundTasksNavigatorSession, refreshBackgroundTasksNavigator } = defaultNavigator;
+
 function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): boolean {
   if (meta.status === "running") return false;
   const endedAt = meta.endedAt;
   return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
-function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
+export function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   // Only a failure that needs action replaces the row's command; history stays in the detail view (#332).
   const view = failureView(meta.id);
   const failure = view.actionable ? view.text : "";
@@ -129,7 +363,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   };
 }
 
-function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
+export function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
   const view = failureView(meta.id);
   const failure = view.text;
@@ -152,8 +386,8 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
   if (meta.deadlineAt) metadata.push({ label: "deadline", value: formatDuration(meta.deadlineAt - now) });
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
   if (meta.status === "running") {
-    const stall = observeBackgroundTaskStall(meta, now);
-    if (stall.state !== "healthy") metadata.push({ label: "activity", value: stall.state });
+    const activity = formatBackgroundTaskStall(observeBackgroundTaskStall(meta, now));
+    if (activity) metadata.push({ label: "activity", value: activity });
   }
   if (meta.lastExitCode !== undefined) metadata.push({ label: "exit", value: String(meta.lastExitCode) });
   if (meta.error) metadata.push({ label: "error", value: meta.error });
@@ -223,9 +457,8 @@ function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const incident = actionableFailures(readFailureState(failurePath(meta.id)))[0];
   if (incident) facts.push(`${failureLabel(incident)}: ${incident.summary}`);
   if (meta.status === "running") {
-    const stall = observeBackgroundTaskStall(meta, now);
-    if (stall.state === "stalled") facts.push("stalled");
-    else if (stall.state === "quiet") facts.push("quiet");
+    const activity = formatBackgroundTaskStall(observeBackgroundTaskStall(meta, now));
+    if (activity) facts.push(activity);
   }
   if (meta.kind === "command_watch" && meta.intervalMs) facts.push(`every ${formatDuration(meta.intervalMs)}`);
   if (meta.deadlineAt && meta.status === "running") facts.push(`${formatDuration(meta.deadlineAt - now)} left`);

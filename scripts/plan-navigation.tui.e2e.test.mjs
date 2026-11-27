@@ -7,54 +7,67 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const piBin = process.env.PI_PLAN_TUI_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
-const extensionPath = join(repoRoot, "packages", "pi-better-plan", "src", "index.ts");
-const fixtures = mkdtempSync(join(tmpdir(), "pi-plan-navigation-"));
-const probePath = join(fixtures, "seed-plan.mjs");
+const piBin = process.env.PI_TODO_TUI_CLI ?? process.env.PI_PLAN_TUI_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
+const extensionPath = join(repoRoot, "packages", "pi-better-harness", "extensions", "task-context", "index.ts");
+const fixtures = mkdtempSync(join(tmpdir(), "pi-todo-navigation-"));
+const probePath = join(fixtures, "seed-todo.mjs");
 const readyPath = join(fixtures, "ready");
 const seededPath = join(fixtures, "seeded");
-const session = `pi-plan-navigation-${process.pid}`;
+const session = `pi-todo-navigation-${process.pid}`;
+
+// The real runtime is opt-in, so this private fixture enables it explicitly.
+const agentDir = join(fixtures, "agent");
+mkdirSync(agentDir, { recursive: true });
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+  tuiMode: "fullscreen",
+  packages: [],
+  quietStartup: true,
+  piBetterHarness: { outcomeTodo: { version: 1, enabled: true } },
+}));
 
 after(() => {
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   rmSync(fixtures, { recursive: true, force: true });
 });
 
-// @covers plan.passive-widget
+// @covers todo.passive-widget
 // @level e2e
-test("golden path: the plan stays passive and right arrow remains editor input", () => {
-  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI plan rendering requires tmux");
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+test("golden path: the todo stays passive and right arrow remains editor input", () => {
+  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI todo rendering requires tmux");
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   startPiSession();
   waitForFile(readyPath);
 
-  sendLiteral("/seed-plan");
+  sendLiteral("/seed-todo");
   sendKey("Enter");
-  const initial = waitForScreen((screen) => screen.includes("plan  1/3 complete"));
-  assertBlankRowBefore(initial, /^plan  1\/3 complete/, "generic plan section");
-  assert.match(initial, /●\s+2\s+Implement plan navigation\s+active/);
-  assert.doesNotMatch(initial, /^› /m, "the plan starts visible but unfocused");
-  assert.doesNotMatch(initial, /→ plan/, "the footer does not advertise plan navigation");
+  const initial = waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen));
+  assertBlankRowBefore(initial, /^todo  1\/3 complete/im, "generic todo section");
+  assert.match(initial, /●\s+2\s+Implement todo navigation\s+active/);
+  const initialHeader = initial.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
+  assert.equal(initialHeader, "todo  1/3 complete · ●", "a short Todo has no fold caret and shows active work");
+  assert.doesNotMatch(initial, /^› /m, "the todo starts visible but unfocused");
+  assert.doesNotMatch(initial, /→ (plan|todo)/, "the footer does not advertise todo navigation");
 
   sendKey("Right");
   const unchanged = assertScreenNeverMatches(/^› /m, 500);
-  assert.doesNotMatch(unchanged, /→ plan/);
+  assert.doesNotMatch(unchanged, /→ (plan|todo)/);
   sendLiteral("draft");
   waitForScreen((screen) => screen.includes("draft"));
-  assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the plan");
+  assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the todo");
   sendKey("C-u");
-  sendLiteral("/plan");
+  sendLiteral("\x1b[200~/todo hide\x1b[201~");
   sendKey("Enter");
-  waitForScreen((screen) => /^› ●\s+2\s+Implement plan navigation/m.test(screen));
-  sendKey("Up");
-  waitForScreen((screen) => /^› ✓\s+1\s+Inspect the navigator/m.test(screen));
-  sendKey("Escape");
-  waitForScreen((screen) => screen.includes("plan  1/3 complete") && !/^› /m.test(screen));
+  waitForScreen((screen) => !/^todo(?:\s|$)/m.test(screen));
+  sendLiteral("/todo");
+  sendKey("Enter");
+  const revealed = waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen) &&
+    screen.includes("Implement todo navigation") && !/^› /m.test(screen));
+  assert.doesNotMatch(revealed, /after: step_1|↑↓ navigate/, "/todo must reveal the compact overview, not the removed detail view");
 });
 
-// @covers plan.workflow-projection
+// @covers todo.workflow-projection
 // @level e2e
-test("golden path: Rush-owned units appear in the real plan widget", () => {
+test("golden path: Rush-owned units appear in the real todo widget", () => {
   assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0);
   const runDir = join(fixtures, ".resolve-issues", "rush", "e2e-run");
   mkdirSync(runDir, { recursive: true });
@@ -62,61 +75,114 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
     runId: "e2e-run", planRevision: 7, warehouseCanaryRequired: false,
     fleet: { explore: { status: "succeeded" }, implement: { status: "pending" } },
     issues: [
-      { id: "214", title: "Extract shared core", stage: "self-review", status: "in-flight", dependsOn: [] },
-      { id: "215", title: "Add mux support", stage: "pending", status: "pending", dependsOn: ["214"] },
+      { id: "214", title: "Extract shared core", stage: "done", status: "in-flight", headSha: "abc", reviewedHead: "abc", delivery: "ci", dependsOn: [] },
+      { id: "215", title: "Add mux support", stage: "done", status: "blocked", headSha: "def", reviewedHead: "def", delivery: "ci", dependsOn: [] },
     ],
   }));
   rmSync(readyPath, { force: true });
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   startPiSession();
   waitForFile(readyPath);
   sendLiteral("/seed-rush");
   sendKey("Enter");
   const widget = waitForScreen((screen) => screen.includes("Reloaded keybindings") && screen.includes("rush-issues · rev 7") && screen.includes("Extract shared core"));
-  assertBlankRowBefore(widget, /^plan  0\/2 complete/, "Rush plan section");
-  assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
-  assert.match(widget, /Add mux support/);
+  assertBlankRowBefore(widget, /^todo  0\/2 complete/i, "Rush todo section");
+  const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
+  assert.equal(rushHeader, "todo  0/2 complete · ●", "the icon reflects the reviewed issue in CI");
+  assert.match(widget, /◑ +#214 +Extract shared core +│ Implement 2\/2/);
+  const tasks = widget.split("\n").filter(line => line.includes(" │ "));
+  assert.deepEqual(tasks.map(line => line.split(" │ ")[0].trimEnd()).filter(Boolean), [
+    "◑ #214 Extract shared core", "! #215 Add mux support",
+  ]);
+  assert.equal(tasks[0].indexOf("│"), 49);
   assert.doesNotMatch(widget, /Old generic step/);
-  sendLiteral("/plan");
+  const dividerAt = (screen, column) => screen.split("\n").some(line => line.includes("#214") && line.indexOf("│") === column);
+  sendLiteral("\x1b[200~/todo split 3:2\x1b[201~");
   sendKey("Enter");
-  const full = waitForScreen((screen) => screen.includes("after: #214") && /^› ●\s+#214/m.test(screen));
-  assert.match(full, /self-review · in-flight/);
-  sendKey("Down");
-  waitForScreen((screen) => /^› ○\s+#215/m.test(screen));
-  sendKey("Left");
-  waitForScreen((screen) => screen.includes("rush-issues · rev 7") && !/^› /m.test(screen));
+  let adjusted = waitForScreen(screen => dividerAt(screen, 59));
+  if (process.env.PI_TODO_TUI_MOUSE === "1" || process.env.PI_PLAN_TUI_MOUSE === "1") {
+    const y = adjusted.split("\n").findIndex(line => line.includes("#214") && line.includes(" │ ")) + 1;
+    sendLiteral(`\x1b[<0;60;${y}M\x1b[<32;40;${y}M`);
+    waitForScreen(screen => dividerAt(screen, 39)); // while the button is still held
+    sendLiteral("\x1b[<0;40;1m"); // release above the widget after the pointer leaves it
+    rmSync(readyPath, { force: true });
+    sendLiteral("/reload");
+    sendKey("Enter");
+    waitForFile(readyPath);
+    adjusted = waitForScreen(screen => dividerAt(screen, 39));
+    assert.match(adjusted, /#215 Add mux support/);
+  }
+  sendLiteral("\x1b[200~/todo split 1:1\x1b[201~");
+  sendKey("Enter");
+  waitForScreen(screen => dividerAt(screen, 49));
+  sendLiteral("\x1b[200~/todo hide\x1b[201~");
+  sendKey("Enter");
+  waitForScreen((screen) => !/^todo(?:\s|$)/m.test(screen));
+  sendLiteral("/todo");
+  sendKey("Enter");
+  const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
+    /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
+  assert.match(revealed, /#214 Extract shared core +│ Implement 2\/2/);
+  assert.match(revealed, /Review ✓2\/2 ─┬ ─→ Ship/);
+  assert.match(revealed, /Ship !1 ●1/);
+  assert.match(revealed, /Extract shared core/);
+  assert.match(revealed, /Add mux support/);
+  assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
+    "the workflow overview does not open the removed detail view");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
+  const narrow = waitForScreen(screen => /#214[^│\n]*│ Implement 2\/2/.test(screen) && screen.includes("↺ Review") &&
+    !screen.includes("Extract shared core"));
+  assert.match(narrow, /↳ Fix —/);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "35", "-y", "32"]);
+  const stacked = waitForScreen(screen => /^Implement 2\/2$/m.test(screen) && screen.includes("↺ Review"));
+  assert.match(stacked, /#215[^]*\nImplement 2\/2/);
 });
 
-// @covers plan.compact-folding
+// @covers todo.compact-folding
 // @level e2e
-test("long plans fold through commands, survive reload, and accept fullscreen mouse clicks", () => {
+test("long todos fold through commands, survive reload, and accept fullscreen mouse clicks", () => {
   assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0);
   rmSync(readyPath, { force: true });
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   startPiSession();
   waitForFile(readyPath);
-  sendLiteral("/seed-long-plan");
+  sendLiteral("/seed-long-todo");
   sendKey("Enter");
   waitForFile(seededPath);
   let screen = waitForScreen((value) => value.includes("... 4 more steps"));
   assert.doesNotMatch(screen, /Long task 9/);
-  sendLiteral("\x1b[200~/plan expand\x1b[201~");
+  assert.equal(todoHeader(screen), "todo ▸  0/9 complete", "the fold caret follows the Todo title at the compact width");
+  sendLiteral("\x1b[200~/todo expand\x1b[201~");
   sendKey("Enter");
-  waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+  screen = waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+  assert.equal(todoHeader(screen), "todo ▾  0/9 complete");
   sendLiteral("/reload");
   sendKey("Enter");
-  waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
-  sendLiteral("\x1b[200~/plan collapse\x1b[201~");
+  screen = waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
+  assert.equal(todoHeader(screen), "todo ▾  0/9 complete", "reload keeps the expanded Todo and its caret state");
+  sendLiteral("\x1b[200~/todo collapse\x1b[201~");
   sendKey("Enter");
   screen = waitForScreen((value) => value.includes("... 4 more steps") && !/○\s+9\s+Long task 9/.test(value));
-  if (process.env.PI_PLAN_TUI_MOUSE === "1") {
+  assert.equal(todoHeader(screen), "todo ▸  0/9 complete");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
+  screen = waitForScreen((value) => todoHeader(value) === "todo ▸  0/9 complete" && value.includes("... 4 more steps"));
+  assert.ok(Math.max(...screen.split("\n").map((line) => line.trimEnd().length)) <= 40, "the terminal is actually 40 columns");
+  assert.ok(todoHeader(screen).length <= 40, "the compact header fits a 40-column terminal");
+  assert.equal(screen.split("\n").filter((line) => /^todo(?:\s|$)/.test(line)).length, 1, "the header never wraps into two rows");
+  sendLiteral("narrow-editor-draft");
+  screen = waitForScreen((value) => value.includes("narrow-editor-draft"));
+  assert.ok(!screen.split("\n").some((line) => line.includes("narrow-editor-draft") && /todo/.test(line)), "the Todo widget stays out of the editor row at 40 columns");
+  sendKey("C-u");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "100", "-y", "32"]);
+  screen = waitForScreen((value) => Math.max(...value.split("\n").map((line) => line.trimEnd().length)) > 40 && !value.includes("narrow-editor-draft"));
+  if (process.env.PI_TODO_TUI_MOUSE === "1" || process.env.PI_PLAN_TUI_MOUSE === "1") {
     const clickHeading = (value) => {
       const rows = value.split("\n");
-      const y = rows.findIndex((line) => /[▸▾] plan\s+0\/9/.test(line));
-      assert.ok(y >= 0, `plan heading missing:\n${value}`);
-      const x = rows[y].indexOf("plan");
+      const y = rows.findIndex((line) => /^todo\s+[▸▾]\s{2}0\/9/i.test(line));
+      assert.ok(y >= 0, `todo heading missing:\n${value}`);
+      const x = rows[y].toLowerCase().indexOf("todo");
       sendLiteral(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
     };
     clickHeading(screen);
@@ -128,13 +194,39 @@ test("long plans fold through commands, survive reload, and accept fullscreen mo
   }
 });
 
+test("dynamic Todo keeps tasks beside the review loop and reflows in a narrow terminal", () => {
+  rmSync(seededPath, { force: true });
+  rmSync(readyPath, { force: true });
+  writeFileSync(probePath, seedTodoExtension(readyPath));
+  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  startPiSession();
+  waitForFile(readyPath);
+  sendLiteral("/seed-dynamic");
+  sendKey("Enter");
+  waitForFile(seededPath);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "160", "-y", "35"]);
+  const graph = waitForScreen(screen => /✓ Draft report +│ ✓ Draft report ─→ · Review draft/.test(screen));
+  assert.match(graph, /○ Revise draft +│ +└─ ○ Revise draft ←─+┘/);
+  assert.match(graph, /┬ ─→ · Deliver report/);
+  assert.doesNotMatch(graph, /Review draft waiting|Revise draft ready/);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "35"]);
+  const narrow = waitForScreen(screen => screen.includes("↺ Review draft") && screen.includes("↓ · Deliver report"));
+  assert.match(narrow, /^✓ Draft[^│\n]*│ ✓ Draft report/m);
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "30", "-y", "35"]);
+  waitForScreen(screen => screen.includes("↺ Review draft") && /^✓ Draft report *$/m.test(screen) && !screen.includes("│ ✓ Draft report"));
+  sendLiteral("\x1b[200~/todo split 2:1\x1b[201~");
+  sendKey("Enter");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "120", "-y", "35"]);
+  waitForScreen(screen => screen.split("\n").some(line => line.startsWith("✓ Draft report") && line.indexOf("│") === 79));
+});
+
 function startPiSession() {
   const command = [
     `cd ${shellQuote(fixtures)}`,
     "&& exec env",
     `PI_CODING_AGENT_DIR=${shellQuote(join(fixtures, "agent"))}`,
     "PI_OFFLINE=1",
-    "OPENAI_API_KEY=sk-plan-e2e-placeholder",
+    "OPENAI_API_KEY=sk-todo-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionPath)}`,
     `-e ${shellQuote(probePath)}`,
@@ -142,20 +234,24 @@ function startPiSession() {
     "--no-skills",
     "--no-context-files",
     `--session-dir ${shellQuote(join(fixtures, "sessions"))}`,
-    "--name plan-navigation-e2e",
+    "--name todo-navigation-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
   execFileSync("tmux", ["new-session", "-d", "-s", session, "-x", "100", "-y", "32", command]);
 }
 
-function seedPlanExtension(path) {
+function todoHeader(screen) {
+  return screen.split(/\r?\n/).map((line) => line.trimEnd()).find((line) => /^todo(?:\s|$)/.test(line));
+}
+
+function seedTodoExtension(path) {
   return `export default function(pi) {
   pi.on("session_start", async () => {
     const fs = await import("node:fs");
     fs.writeFileSync(${JSON.stringify(path)}, "ready");
   });
-  pi.registerCommand("seed-plan", {
-    description: "Seed plan navigation fixture",
+  pi.registerCommand("seed-todo", {
+    description: "Seed todo navigation fixture",
     handler: async (_args, ctx) => {
       const now = Math.floor(Date.now() / 1000);
       pi.appendEntry("pi-better-plan", {
@@ -168,7 +264,7 @@ function seedPlanExtension(path) {
           revision: 1,
           steps: [
             { id: "step_1", step: "Inspect the navigator", status: "completed" },
-            { id: "step_2", step: "Implement plan navigation", status: "in_progress" },
+            { id: "step_2", step: "Implement todo navigation", status: "in_progress" },
             { id: "step_3", step: "Verify the terminal journey", status: "pending" }
           ],
           createdAt: now,
@@ -176,6 +272,23 @@ function seedPlanExtension(path) {
         }
       });
       await ctx.reload();
+    }
+  });
+  pi.registerCommand("seed-dynamic", {
+    handler: async (_args, ctx) => {
+      pi.appendEntry("pi-better-harness:dynamic-workflow", { version: 1, run: {
+        id: "report-example", revision: 3, objective: "Publish the interview report", criteria: ["Both sources verified"],
+        steps: [
+          { id: "draft", title: "Draft report", output: "Draft" },
+          { id: "review", title: "Review draft", dependsOn: ["draft"], output: "Verdict", review: { artifact: "draft", revision: "fix" } },
+          { id: "fix", title: "Revise draft", output: "Revised report" },
+          { id: "ship", title: "Deliver report", dependsOn: ["review"], output: "Receipt" }
+        ],
+        history: [{ step: "draft", result: "draft.md" }, { step: "review", version: 1, verdict: "changes_requested", result: "Verify second source" }],
+        catalogChoices: [], workers: {}
+      } });
+      await ctx.reload();
+      (await import("node:fs")).writeFileSync(${JSON.stringify(seededPath)}, "ready");
     }
   });
   pi.registerCommand("seed-rush", {
@@ -194,8 +307,8 @@ function seedPlanExtension(path) {
       await ctx.reload();
     }
   });
-  pi.registerCommand("seed-long-plan", {
-    description: "Seed a compact plan fixture",
+  pi.registerCommand("seed-long-todo", {
+    description: "Seed a compact todo fixture",
     handler: async (_args, ctx) => {
       const fs = await import("node:fs");
       pi.appendEntry("pi-better-plan", { version: 1, kind: "set", at: Date.now(), plan: {
@@ -241,7 +354,7 @@ function waitForScreen(matches, timeoutMs = 10_000) {
     if (matches(screen)) return screen;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
-  throw new Error(`Timed out waiting for plan navigation. Current screen:\n${screen}`);
+  throw new Error(`Timed out waiting for todo navigation. Current screen:\n${screen}`);
 }
 
 function assertScreenNeverMatches(pattern, durationMs) {

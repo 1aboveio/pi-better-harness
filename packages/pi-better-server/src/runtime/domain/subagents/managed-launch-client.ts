@@ -1,0 +1,90 @@
+import { nativeBackgroundCapability } from './managed-background-capability.ts';
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { currentSandboxPermissions } from "./permission-policy.ts";
+import { ownerBindingFromContext, getWorkerOperationService, resolveProductionSchemas, DEFAULT_WORKER_BRIDGE_TOOLS } from "./worker-waits.ts";
+import { processStartToken } from "./registry.ts";
+import { connectWorkClient } from "./shared-work-client.mjs";
+import { catalogHostAuthority } from "./catalog-host-admission.ts";
+import { openSharedCatalog, waitForCatalogSetup } from "./shared-catalog.ts";
+import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.ts";
+import { canonicalJson } from "./operation-bridge-types.ts";
+import { activeChildProviders } from "./config.ts";
+import { captureLaunchContext } from "./launch-context.ts";
+
+/** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
+export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContext, key: string, tool: string, params: unknown, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    ctx = captureLaunchContext(ctx);
+    mkdirSync(getAgentDir(), { recursive: true });
+    const root = realpathSync(getAgentDir());
+    const catalog = await openSharedCatalog(ctx.cwd, root, undefined, undefined, signal);
+    catalog.close();
+    signal?.throwIfAborted();
+    const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
+    if (registration.agentDir !== root || registration.version !== 1) throw new Error("Invalid runtime registration");
+    const directory = join(root, "subagent-launch-admission");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077)) throw new Error("Unsafe launch admission directory");
+    const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"], { signal });
+    const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
+    let unsubscribe: unknown;
+    let dispatched = false;
+    const cancel = () => {
+        try { rmSync(path, { force: true }); } catch { /* Finally retries cleanup. */ }
+        client.close();
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+        signal?.throwIfAborted();
+        const hello = await client.ready;
+        const catalogAuthority = await waitForCatalogSetup(catalogHostAuthority(root, ctx.cwd, join(registration.serverDir, "pi-server.sock")), signal);
+        signal?.throwIfAborted();
+        const owner = ownerBindingFromContext(ctx);
+        if (!owner.sessionId) throw new Error("Launch requires a registered parent session");
+        // Only branch-local settings travel to the mechanical host, never the transcript.
+        const settings = ctx.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType.startsWith("pi-better-subagents-"));
+        const payload = { version: 1, id, secretHash: createHash("sha256").update(secret).digest("hex"), instanceId: hello.instanceId,
+            owner, pid: process.pid, start: processStartToken(process.pid), projectTrusted: ctx.isProjectTrusted(),
+            background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1 || nativeBackgroundCapability(pi), tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
+            activeProviders: activeChildProviders(pi), permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+            catalogAuthority, key, tool, params };
+        const staging = `${path}.tmp`;
+        writeFileSync(staging, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
+        renameSync(staging, path);
+        let checking = false;
+        unsubscribe = pi.events.on(SANDBOX_POLICY_CHANNEL, () => {
+            if (checking) return;
+            checking = true;
+            try {
+                if (canonicalJson(currentSandboxPermissions(pi) ?? {}) !== canonicalJson(payload.permissions)) rmSync(path, { force: true });
+            } catch { rmSync(path, { force: true }); }
+            finally { checking = false; }
+        });
+        signal?.throwIfAborted();
+        dispatched = true;
+        return await client.request("runtime_launch_subagent", { authority: { id, secret } });
+    } catch (error) {
+        if (!dispatched) signal?.throwIfAborted();
+        // Revoking the grant can stop later batch admissions after a worker has already started.
+        if (dispatched && error instanceof Error && (
+            (signal?.aborted && error.message === "runtime-unavailable: client closed")
+            || error.message === "runtime-unhealthy: runtime_launch_subagent timed out"
+        )) {
+            return {
+                isError: true,
+                details: { status: "outcome_unknown" },
+                content: [{ type: "text", text: "The launch receipt is unknown. Check subagent_list in this session before retrying. A worker may already be running." }],
+            };
+        }
+        throw error;
+    } finally {
+        signal?.removeEventListener("abort", cancel);
+        if (typeof unsubscribe === "function") unsubscribe();
+        client.close();
+        rmSync(path, { force: true });
+    }
+}

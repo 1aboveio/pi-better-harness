@@ -1,14 +1,12 @@
 /**
- * Whole-session demonstration: the harness starts foreground execution
- * inactive, then a human opt-in write-confines every first-party foreground
- * execution path at once. Default-on subagents remain independently confined.
+ * Whole-session demonstration: fresh sandbox profiles start Off. Main and
+ * Background opt in independently, then enforce their selected kernel policy.
  *
  * Nothing here is a stand-in for the product. The extension set is read out of
  * the published meta package's own manifest and loaded through its own shims, in
  * its own order; the tools are the ones those extensions register; the writes are
  * real writes checked against the real filesystem; and the confinement is the
- * kernel's, not a string check. The only scaffolding is the ExtensionAPI surface
- * pi itself would provide.
+ * kernel's, not a string check. The native Pi SDK supplies session identity, extension registration and lifecycle.
  *
  * Fixtures live under the canonical /var/tmp — never os.tmpdir(), which on macOS
  * is /private/var/folders and is always writable inside the profile, so an
@@ -17,13 +15,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describeSandboxSupport } from "../packages/sandbox-core/index.ts";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { prepareOwnedRuntime, removeOwnedFixture } from "./test-support/remove-owned-fixture.mjs";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -62,11 +61,48 @@ writeFileSync(join(outside, "readable.txt"), "readable from inside the sandbox\n
 const agentDir = join(fixtures, "agent");
 mkdirSync(agentDir, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const serverDir = join(agentDir, "server");
+process.env.PI_SERVER_DIR = serverDir;
+let runtimeOwner;
+
+async function stopOwnedRuntime() {
+  const owner = inspectDaemonOwner(serverDir);
+  if (owner.status === "missing" || owner.status === "dead") return;
+  assert.equal(owner.status, "live", "fixture runtime ownership must be known before cleanup");
+  assert.deepEqual(owner.owner, runtimeOwner, "cleanup must not stop a replacement runtime");
+  try { process.kill(owner.owner.pid, "SIGTERM"); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const current = inspectDaemonOwner(serverDir);
+    if (current.status === "missing" || current.status === "dead") return;
+    assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
+    assert.ok(Date.now() < deadline, `fixture runtime ${owner.owner.pid} did not stop`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
 
 const originalCwd = process.cwd();
-after(() => {
-  process.chdir(originalCwd);
-  rmSync(fixtures, { recursive: true, force: true });
+let session;
+after(async () => {
+  const errors = [];
+  try {
+    if (session) {
+      try { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+      catch (error) { errors.push(error); }
+      finally { session.dispose(); }
+    }
+  } finally {
+    process.chdir(originalCwd);
+  }
+  try {
+    await stopOwnedRuntime();
+    removeOwnedFixture(fixtures);
+    assert.equal(existsSync(fixtures), false, "the exact owned fixture is removed");
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "session shutdown or owned fixture cleanup failed");
 });
 
 /**
@@ -80,51 +116,15 @@ function defaultExtensionEntries() {
 }
 
 const tools = new Map();
+let activeTools;
 const commands = new Map();
-const sessionStartHandlers = [];
 const userBashHandlers = [];
-const events = new EventEmitter();
 const notifications = [];
 let initialForegroundPolicy;
-const sessionManager = SessionManager.inMemory(projectRoot);
-
-const ctx = {
-  cwd: projectRoot,
-  hasUI: true,
-  mode: "tui",
-  model: { provider: "test-provider", id: "test-model" },
-  thinkingLevel: "off",
-  sessionManager,
-  isIdle: () => true,
-  ui: {
-    theme: { fg: (_color, text) => text },
-    notify: (message) => notifications.push(message),
-    setStatus: () => undefined,
-    setWidget: () => undefined,
-    getEditorComponent: () => undefined,
-    setEditorComponent: () => undefined,
-    custom: () => Promise.resolve(null),
-    confirm: async () => true,
-  },
-};
-
-const pi = {
-  appendEntry: (customType, data) => { sessionManager.appendCustomEntry(customType, data); },
-  events: {
-    emit: (channel, payload) => events.emit(channel, payload),
-    on: (channel, handler) => {
-      events.on(channel, handler);
-      return () => events.off(channel, handler);
-    },
-  },
-  registerTool: (tool) => tools.set(tool.name, tool),
-  registerCommand: (name, command) => commands.set(name, command),
-  on: (event, handler) => {
-    if (event === "session_start") sessionStartHandlers.push(handler);
-    if (event === "user_bash") userBashHandlers.push(handler);
-  },
-  sendMessage: () => undefined,
-};
+const sessionManager = SessionManager.create(projectRoot, join(fixtures, "sessions"));
+let ctx;
+let pi;
+let backgroundPi;
 
 before(async () => {
   if (!support.supported) return;
@@ -137,20 +137,45 @@ before(async () => {
   execFileSync(process.execPath, [join(repoRoot, "scripts/stage-harness-dependencies.mjs")], {
     cwd: repoRoot, stdio: "pipe",
   });
+  runtimeOwner = await prepareOwnedRuntime(agentDir);
+  const factories = [];
   for (const source of defaultExtensionEntries()) {
     const extension = (await import(source)).default;
     assert.equal(typeof extension, "function", `${source} must export an extension factory`);
-    extension(pi);
+    factories.push(api => {
+      const wrapped = new Proxy(api, { get(target, key) {
+        if (key === "registerTool") return tool => { tools.set(tool.name, tool); target.registerTool(tool); };
+        if (key === "registerCommand") return (name, command) => { commands.set(name, command); target.registerCommand(name, command); };
+        if (key === "on") return (event, handler) => { if (event === "user_bash") userBashHandlers.push(handler); target.on(event, handler); };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+      pi = wrapped;
+      if (source.includes("background")) backgroundPi = wrapped;
+      return extension(wrapped);
+    });
   }
-
-  for (const handler of sessionStartHandlers) {
-    await handler({ type: "session_start", reason: "startup" }, ctx);
-  }
+  const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+  const resourceLoader = new DefaultResourceLoader({ cwd: projectRoot, agentDir, settingsManager,
+    noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: factories });
+  await resourceLoader.reload();
+  assert.deepEqual(resourceLoader.getExtensions().errors, []);
+  ({ session } = await createAgentSession({ cwd: projectRoot, agentDir, settingsManager, resourceLoader, sessionManager, noTools: "builtin" }));
+  await session.bindExtensions({ mode: "tui", uiContext: {
+    ...session.extensionRunner.getUIContext(),
+    theme: { fg: (_color, text) => text },
+    notify: message => notifications.push(message),
+    setStatus() {}, setWidget() {}, getEditorComponent() {}, setEditorComponent() {},
+    custom: () => Promise.resolve(null), confirm: async () => true,
+  } });
+  ctx = session.extensionRunner.createContext();
+  activeTools = new Set(pi.getActiveTools());
 
   const { currentForegroundSandboxPolicy } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
-  initialForegroundPolicy = currentForegroundSandboxPolicy(pi);
+  initialForegroundPolicy = currentForegroundSandboxPolicy(backgroundPi);
   await commands.get("sandbox").handler("on", ctx);
 });
 
@@ -168,7 +193,7 @@ async function runTool(name, params) {
 
 // @covers harness.default-capability
 // @level e2e
-test("the harness loads the sandbox alongside every other default extension", { skip }, () => {
+test("the harness loads every default extension and exposes the Todo tools", { skip }, () => {
   for (const name of [
     "bash",
     "write",
@@ -178,25 +203,28 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "remote_bash",
     "ssh_profile",
     "ssh_mux",
-    "update_plan",
-    "get_plan",
-    "get_goal",
+    "update_todo",
+    "get_todo",
     "update_goal",
+    "get_goal",
   ]) {
     assert.ok(tools.has(name), `a harness session must have the ${name} tool`);
+    assert.ok(activeTools.has(name), `a harness session must expose the ${name} tool`);
   }
   assert.ok(commands.has("sandbox"), "the human-only /sandbox command must be registered");
-  assert.ok(commands.has("plan"), "the human-owned /plan command must be registered");
+  assert.ok(commands.has("todo"), "the human-owned /todo command must be registered");
+  assert.ok(!commands.has("plan"), "the retired /plan command must not be registered");
+  assert.ok(!tools.has("update_plan") && !tools.has("get_plan"), "the retired Plan tool names must not be registered");
 });
 
 // @covers harness.default-capability
 // @level e2e
-test("the harness starts inactive, then one opt-in policy governs the whole session", { skip }, async () => {
+test("the harness starts unconfined, then Main and Background opt in independently", { skip }, async () => {
   assert.equal(initialForegroundPolicy.state, "disabled");
   const sessionPolicy = sessionManager.getBranch().find((entry) =>
     entry.type === "custom" && entry.customType === "pi-better-sandbox-permissions");
   assert.equal(sessionPolicy?.data.permissions.main.enabled, true, "opt-in must be persisted before enforcement changes");
-  assert.match(initialForegroundPolicy.reason, /inactive by default/);
+  assert.match(initialForegroundPolicy.reason, /Background tasks sandbox is off/);
 
   notifications.length = 0;
   await commands.get("sandbox").handler("", { ...ctx, mode: "rpc" });
@@ -206,11 +234,24 @@ test("the harness starts inactive, then one opt-in policy governs the whole sess
   assert.ok(text.includes(projectRoot), `/sandbox must name the canonical project root: ${text}`);
   assert.ok(text.includes(support.executable), `/sandbox must name the resolved backend: ${text}`);
 
-  // The same policy, as the other harness extensions receive it over pi.events.
+  // Main opt-in does not implicitly enable the independent Background profile.
   const { currentForegroundSandboxPolicy } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
-  const policy = currentForegroundSandboxPolicy(pi);
+  assert.equal(currentForegroundSandboxPolicy(backgroundPi).state, "disabled");
+  const previousCustom = ctx.ui.custom;
+  ctx.ui.custom = async (factory) => {
+    const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
+    const page = factory({ requestRender() {} }, theme, {}, () => {});
+    page.handleInput("\u001b[C");
+    page.handleInput("\u001b[C");
+    page.handleInput(" ");
+    await Promise.resolve();
+    return null;
+  };
+  try { await commands.get("sandbox").handler("", ctx); }
+  finally { ctx.ui.custom = previousCustom; }
+  const policy = currentForegroundSandboxPolicy(backgroundPi);
   assert.equal(policy.state, "enabled");
   assert.equal(policy.writableRoot, projectRoot, "consumers must see the same writable root");
   assert.ok(
@@ -295,20 +336,19 @@ test("edit: a packaged deny path cannot be edited, an ordinary file can", { skip
 
 // @covers background-task.sandbox-policy-contract
 // @level e2e
-test("local background tasks inherit the same policy", { skip }, async () => {
+test("local background tasks use their explicitly enabled independent policy", { skip }, async () => {
   const { resolveForegroundSandboxPlan } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
 
   // The plan the task runtime resolves at launch, from the policy the sandbox
   // extension published into this same session.
-  const plan = resolveForegroundSandboxPlan(pi);
+  const plan = resolveForegroundSandboxPlan(backgroundPi);
   assert.equal(plan.confined, true, "a local task launched now must be confined");
   assert.equal(plan.writableRoot, projectRoot);
   assert.ok(plan.denyWrite.includes(join(projectRoot, ".env")));
 
   // And the same policy, proved by a real detached task doing real writes.
-  const { readMeta } = await import("../packages/pi-better-background-tasks/src/registry.ts");
   const inside = join(projectRoot, "task-allowed.txt");
   const escaped = join(outside, "task-escaped.txt");
   const denied = join(projectRoot, ".env");
@@ -324,19 +364,21 @@ test("local background tasks inherit the same policy", { skip }, async () => {
   });
   assert.equal(launch.ok, true, launch.text);
 
-  const id = launch.text.match(/bg_[a-z0-9_]+/)?.[0];
+  const id = launch.text.match(/Started (?:durable )?background process (bgs_[0-9a-f]{20}|bg_[a-z0-9_]+)/)?.[1];
   assert.ok(id, `no task id in: ${launch.text}`);
+  assert.match(id, /^bgs_/, "the real Harness session must use server-owned durable execution");
 
   const deadline = Date.now() + 30_000;
-  let meta;
+  let status;
   while (Date.now() < deadline) {
-    meta = readMeta(id);
-    if (meta?.status === "succeeded" || meta?.status === "failed") break;
+    status = await runTool("bg_task_status", { id });
+    if (/\b(succeeded|failed|cancelled|lost)\b/.test(status.text.split("\n")[0])) break;
     await new Promise((wake) => setTimeout(wake, 25));
   }
-  assert.equal(meta?.status, "succeeded", `task never finished: ${JSON.stringify(meta)}`);
-  assert.equal(meta.launchArgv?.[0], support.executable, "the task must launch under the backend wrapper");
-  assert.match(readFileSync(meta.logPath, "utf8"), /PROBE-COMPLETE/);
+  assert.match(status?.text ?? "", /succeeded/, `task never finished: ${JSON.stringify(status)}`);
+  assert.match(status.text, /sandbox: confined.*source: background/);
+  const log = await runTool("bg_task_log", { id });
+  assert.match(log.text, /PROBE-COMPLETE/);
   assert.equal(readFileSync(inside, "utf8"), "inside\n");
   assert.equal(existsSync(escaped), false, "a background task must not write outside the project root");
   assert.equal(readFileSync(denied, "utf8"), "SECRET=original\n", "a background task must not write a denied path");
@@ -368,7 +410,7 @@ test("subagents run through the same shared mechanism", { skip }, async () => {
     { sandboxEnabled: true, explicitSandbox: false },
   );
 
-  assert.ok(command, "a default-on subagent spawn must be wrapped, never bare");
+  assert.ok(command, "a subagent with confinement enabled must be wrapped, never bare");
   assert.equal(command.file, support.executable);
   execFileSync(command.file, command.fileArgs, { cwd: projectRoot });
   assert.equal(readFileSync(inside, "utf8"), "inside\n");

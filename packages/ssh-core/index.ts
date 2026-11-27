@@ -57,6 +57,8 @@ export interface ResolvedSshIdentity {
 export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 10;
 export const DEFAULT_SSH_CONTROL_PERSIST_SECONDS = 600;
 export const MAX_SSH_CONTROL_PATH_BYTES = 100;
+/** The longest socket name under a ControlPath root: `cm-` plus a 32-char hash. */
+const MUX_CONTROL_PATH_NAME_TEMPLATE = `cm-${"0".repeat(32)}`;
 export const DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
 export interface RemoteRunner {
@@ -87,6 +89,7 @@ export interface SshMuxControllerOptions extends ResolvedSshCommand {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
 }
 
 export interface SshMuxStatus {
@@ -98,7 +101,6 @@ export interface SshMuxStatus {
 }
 
 export interface SshMuxEnsureResult extends SshMuxStatus {
-  state: "up";
   reused: boolean;
 }
 
@@ -325,7 +327,10 @@ export function wrapRemoteBashCommand(input: RemoteBashCommandInput): string {
 
 export function defaultSshControlPathRoot(): string {
   const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  return join(agentDirectory, "ssh-control");
+  const root = resolve(agentDirectory, "ssh-control");
+  // A long agent directory would push the socket past the unix path limit; fall back to a short per-user root.
+  if (Buffer.byteLength(join(root, MUX_CONTROL_PATH_NAME_TEMPLATE)) <= MAX_SSH_CONTROL_PATH_BYTES) return root;
+  return join("/tmp", `pi-ssh-${process.getuid?.() ?? "user"}`);
 }
 
 /**
@@ -334,6 +339,35 @@ export function defaultSshControlPathRoot(): string {
  */
 export function createSshMuxController(options: SshMuxControllerOptions): SshMuxController {
   const sessionScope = requireValue(options.sessionScope, "ssh mux sessionScope is required").trim();
+  // Native Windows OpenSSH cannot provide a working ControlMaster socket.
+  if ((options.platform ?? process.platform) === "win32") {
+    const commandResult: CommandResult = {
+      exitCode: null, signal: null, stdout: "", stderr: "", startedAt: 0, endedAt: 0,
+    };
+    const disabled: SshMuxStatus = {
+      state: "down",
+      target: options.identity.target,
+      controlPath: "",
+      detail: "SSH multiplexing is disabled on Windows; commands use independent connections.",
+      commandResult,
+    };
+    const unsupportedForward = async (): Promise<SshMuxForwardResult> => {
+      throw new SshMuxError("SSH Unix socket forwarding is not supported on Windows without ControlMaster.", commandResult);
+    };
+    return {
+      controlPath: "",
+      forwardUnixSocket: unsupportedForward,
+      cancelUnixSocketForward: unsupportedForward,
+      status: async () => disabled,
+      ensure: async () => ({ ...disabled, reused: false }),
+      cleanup: async () => ({ ...disabled, state: "not_running" }),
+      withMux: (commandSpec) => muxCommandSpec(commandSpec, options.identity.target, [
+        "-o", "ControlMaster=no",
+        "-o", "ControlPersist=no",
+        "-o", "ControlPath=none",
+      ], true),
+    };
+  }
   const controlPathRoot = resolve(options.controlPathRoot ?? defaultSshControlPathRoot());
   const controlPath = join(controlPathRoot, `cm-${muxIdentityHash(options.identity, sessionScope)}`);
   if (Buffer.byteLength(controlPath) > MAX_SSH_CONTROL_PATH_BYTES) {
@@ -490,6 +524,9 @@ function ensureControlPathRoot(controlPathRoot: string): void {
   const stats = lstatSync(controlPathRoot);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error(`ssh mux ControlPath root must be a real directory: ${controlPathRoot}`);
+  }
+  if (process.getuid && stats.uid !== process.getuid()) {
+    throw new Error(`ssh mux ControlPath root must be owned by the current user: ${controlPathRoot}`);
   }
   chmodSync(controlPathRoot, 0o700);
 }

@@ -24,6 +24,7 @@
  * with visible-width-aware truncation.
  */
 
+import { assignmentFor, createAssignmentProjector } from "./assignment-projection.mjs";
 import {
     formatNavigatorHealthFacts,
     statusThemeColor,
@@ -37,29 +38,23 @@ export const DETAIL_TICK_MS = 1000;
 /** Two-press Close confirmation window (ms). Exclusive at the boundary. */
 export const CLOSE_ARM_MS = 3000;
 
-/** Footer status key for the `← subagents · N` hint (default footer mechanism). */
+/** Legacy status keys retained for compatibility. */
 export const NAVIGATOR_STATUS_KEY = "subagents-nav";
 
-/** Footer status key for the Close confirmation hint (coexists with count hint). */
 export const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
 
-/**
- * Footer hint text: `← subagents · N` while at least one visible
- * current-parent run exists, null when none (caller clears the status).
- */
-export function navigatorFooterHint(count) {
-    return count > 0 ? `← subagents · ${count}` : null;
+function isStoppableView(row) {
+    const processStatus = row?.assignment?.processStatus ?? row?.attemptStatus ?? row?.status;
+    return processStatus === "running" || processStatus === "orphaned";
 }
 
-/**
- * Publish the footer hint through pi's default footer status mechanism.
- * Sets `← subagents · N` for count ≥ 1, clears the status at 0. Returns the
- * hint (or null) so callers can dirty-check. NEVER touches the footer itself.
- */
+/** Legacy footer helpers no longer write status. */
+export function navigatorFooterHint(count) {
+    return null;
+}
+
 export function applyNavigatorFooter(ui, count) {
-    const hint = navigatorFooterHint(count);
-    ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
-    return hint;
+    return navigatorFooterHint(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,17 +70,12 @@ export function applyNavigatorFooter(ui, count) {
 export function closeConfirmHint(row) {
     if (!row) return null;
     const label = (row.name != null && String(row.name).length > 0) ? String(row.name) : String(row.id);
-    const stoppable = row.status === "running" || row.status === "orphaned";
+    const stoppable = isStoppableView(row);
     return stoppable ? `x again to stop ${label}` : `x again to dismiss ${label}`;
 }
 
-/**
- * Publish/clear the Close confirmation hint through pi's default footer status
- * mechanism (a dedicated key so it coexists with `← subagents · N`).
- * Pass null/undefined to clear.
- */
+/** Preserve the hint for compatibility without writing status. */
 export function applyCloseConfirmFooter(ui, hint) {
-    ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
     return hint ?? null;
 }
 
@@ -191,18 +181,27 @@ export function isNavigatorUiAvailable(ctx) {
  * @param {(m: object) => string} [deps.toolFor] - current/used tool label or ""
  * @param {(m: object) => string|undefined} [deps.effortFor] - model effort when available
  * @param {(m: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
+ * @param {(m: object, status: string) => object} [deps.project] - refresh-local assignment results shared with expiry filtering
  * @param {number} [deps.now]
  */
+export function pendingNavigatorPark(meta) {
+    const park = meta?.park;
+    return park?.version === 1 && ["parking", "waiting", "ready", "resuming", "held"].includes(park.phase) ? park : undefined;
+}
+
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
+    const project = deps.project ?? createAssignmentProjector();
     return metas.map((m) => {
-        const status = deps.effectiveStatus(m);
+        const assignment = project(m, deps.effectiveStatus(m));
+        const status = assignment.state;
         const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
         const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);
         const tool = typeof deps.toolFor === "function" ? (deps.toolFor(m) || "") : "";
         return {
             id: m.id,
             name: m.name,
+            assignment,
             status,
             model: deps.shortModel(m.model),
             // Optional effort stays adjacent to model when the host exposes it.
@@ -339,7 +338,7 @@ export function buildNavigatorLines(state, opts = {}) {
     const rows = state.rows ?? [];
     const lines = [commandSheetRule(`Subagents · ${rows.length}`, width)];
     const selected = rows.length > 0 ? rows[state.selected] : null;
-    const stoppable = selected?.status === "running" || selected?.status === "orphaned";
+    const stoppable = isStoppableView(selected);
     const action = stoppable ? "x stop" : (selected ? "x dismiss" : null);
     lines.push(`   ${["↑↓ select", "Enter view", action, "Esc close"].filter(Boolean).join(" · ")}`);
     lines.push("");
@@ -390,7 +389,8 @@ export function buildNavigatorDetail(id, deps) {
     const now = deps.now ?? Date.now();
     const parsed = deps.parseRun(id);
     const toolCalls = parsed.toolCalls ?? [];
-    const status = deps.effectiveStatus(meta);
+    const assignment = assignmentFor(meta, deps.effectiveStatus(meta));
+    const status = assignment.state;
     const running = status === "running" || status === "orphaned";
     const health = typeof deps.healthFor === "function" ? deps.healthFor(meta) : undefined;
     const effortRaw = typeof deps.effortFor === "function"
@@ -400,6 +400,9 @@ export function buildNavigatorDetail(id, deps) {
         id: meta.id,
         name: meta.name,
         role: meta.catalog?.roleName || (meta.catalog?.roleId ? String(meta.catalog.roleId).replace(/^role\./, "") : undefined) || undefined,
+        park: pendingNavigatorPark(meta),
+        attemptStatus: deps.effectiveStatus(meta),
+        assignment,
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,
@@ -480,11 +483,17 @@ export function buildDetailLines(detail, opts = {}) {
     const statusRaw = String(detail.status ?? "?");
     const statusText = colorize ? fg(statusThemeColor(statusRaw), statusRaw) : statusRaw;
 
-    const stoppable = detail.status === "running" || detail.status === "orphaned";
+    const stoppable = isStoppableView(detail);
     const action = stoppable ? "x stop" : "x dismiss";
     lines.push(`   ← back · ${action} · Esc close`);
     lines.push("");
     lines.push(`   status  ${statusText}`);
+    if (detail.assignment) {
+        lines.push(`   revision ${detail.assignment.revision}`);
+        lines.push(`   reason ${detail.assignment.reason}`);
+        lines.push(`   process ${detail.assignment.processStatus}; termination ${detail.assignment.termination}`);
+        for (const ref of detail.assignment.evidence) lines.push(`   evidence ${ref}`);
+    }
     lines.push(`   id      ${detail.id ?? "?"}`);
     if (detail.role) lines.push(`   role    ${detail.role}`);
 
@@ -514,6 +523,7 @@ export function buildDetailLines(detail, opts = {}) {
     // detail header already shows a non-running effective status (legacy
     // dead-running metadata → effective "exited" must read as terminal).
     let live = h?.process?.liveness;
+    if (detail.assignment) live = `${detail.assignment.processStatus}; termination ${detail.assignment.termination}`;
     if (!live || (detail.status !== "running" && live === "supervised")) {
         live = detail.status === "orphaned" ? "orphaned"
             : detail.status === "lost" ? "lost"
@@ -771,7 +781,7 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
             if (detailId == null) return null;
             // Prefer live detail snapshot (status may have changed while armed).
             if (detail && detail.id === detailId) {
-                return { id: detail.id, name: detail.name, status: detail.status };
+                return { id: detail.id, name: detail.name, status: detail.status, assignment: detail.assignment, attemptStatus: detail.attemptStatus };
             }
             const fromList = (state.rows ?? []).find((r) => r && r.id === detailId);
             return fromList ?? { id: detailId, name: detailId, status: "completed" };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { startDaemon, type Daemon } from "../src/index.ts";
@@ -225,6 +226,106 @@ describe("prompt disposition", () => {
     gate(env, "d1").release();
     await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("echo:then this"));
   });
+
+  it("handled: an extension input handler that consumes the prompt reports 'handled' and starts no turn", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    const handled = await c.request({ type: "prompt", sessionId: id, message: "swallow this" });
+    assert.equal(handled.success, true, JSON.stringify(handled));
+    assert.equal(handled.data?.disposition, reportsDisposition ? "handled" : undefined);
+    assert.equal(llmCalls(env).length, 0);
+    // Nothing is left marked as a running turn: a plain prompt starts normally.
+    const next = await c.request({ type: "prompt", sessionId: id, message: "after" });
+    assert.equal(next.success, true, JSON.stringify(next));
+    await waitFor("turn ran", async () => (await assistantTexts(c, id)).includes("echo:after"));
+  });
+
+  it("an idle steer starts a turn through the prompt path and reports 'started'", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    const steered = await c.request({ type: "steer", sessionId: id, message: "wake" });
+    assert.equal(steered.success, true, JSON.stringify(steered));
+    assert.equal(steered.data?.disposition, reportsDisposition ? "started" : undefined);
+    await waitFor("turn ran", async () => (await assistantTexts(c, id)).includes("echo:wake"));
+  });
+
+  it("prompt, steer and follow_up all reach extension input handlers with source 'rpc'", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    await c.request({ type: "prompt", sessionId: id, message: "tool src1" });
+    await waitFor("tool running", () => gate(env, "src1").started());
+    await c.request({ type: "steer", sessionId: id, message: "the steer" });
+    await c.request({ type: "follow_up", sessionId: id, message: "the follow" });
+    gate(env, "src1").release();
+    await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("echo:the follow"));
+    const seen = readFileSync(`${env.logFile}.inputs`, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { text: string; source: string });
+    for (const text of ["tool src1", "the steer", "the follow"]) {
+      assert.equal(seen.find((e) => e.text === text)?.source, "rpc", `${text}: ${JSON.stringify(seen)}`);
+    }
+  });
+
+  it("a prompt Pi defers while it is settling still gets its response and keeps the turn marked as running", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    writeFileSync(join(env.gateDir, "settle.hold"), "1");
+    // An extension starts this turn, so no daemon prompt is in flight while it settles.
+    await c.request({ type: "prompt", sessionId: id, message: "/kick one" });
+    await waitFor("settling", () => existsSync(join(env.gateDir, "settle.started")));
+
+    // Pi defers this prompt until agent_settled finishes; its response must wait for the real outcome.
+    const deferred = c.request({ type: "prompt", sessionId: id, message: "tool defer1" });
+    await new Promise((r) => setTimeout(r, 150));
+    // The deferred prompt counts as a starting turn, so a plain prompt is refused instead of racing it.
+    const refused = await c.request({ type: "prompt", sessionId: id, message: "too early" });
+    assert.equal(refused.success, false, JSON.stringify(refused));
+    assert.match(refused.error, /already processing/i);
+
+    writeFileSync(join(env.gateDir, "settle.release"), "1");
+    const response = await deferred;
+    assert.equal(response.success, true, JSON.stringify(response));
+    assert.equal(response.data?.disposition, "started");
+    await waitFor("tool running", () => gate(env, "defer1").started());
+    gate(env, "defer1").release();
+    await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("tool-done:gate:defer1"));
+    // Once the deferred turn ended nothing stays marked: a plain prompt works again.
+    const after = await c.request({ type: "prompt", sessionId: id, message: "again" });
+    assert.equal(after.success, true, JSON.stringify(after));
+  });
+
+  it("a prompt Pi defers and then fails still gets a failure response and frees the session", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { daemon, client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    writeFileSync(join(env.gateDir, "settle.hold"), "1");
+    await c.request({ type: "prompt", sessionId: id, message: "/kick one" });
+    await waitFor("settling", () => existsSync(join(env.gateDir, "settle.started")));
+
+    const deferred = c.request({ type: "prompt", sessionId: id, message: "tool doomed" });
+    await new Promise((r) => setTimeout(r, 150));
+    // A compaction starts during the settle window, so Pi throws when it runs the deferred prompt.
+    const pi = (daemon.registry.get(id) as unknown as { session: { _compactionAbortController?: AbortController; _clearManualCompactionState(): void } }).session;
+    pi._compactionAbortController = new AbortController();
+    writeFileSync(join(env.gateDir, "settle.release"), "1");
+    await new Promise((r) => setTimeout(r, 300));
+    // The compaction ends; Pi is idle again.
+    pi._compactionAbortController = undefined;
+    pi._clearManualCompactionState();
+
+    const response = await Promise.race([deferred, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("no response to the failed deferred prompt")), 5000))]);
+    assert.equal(response.success, false, JSON.stringify(response));
+    await waitFor("idle", () => isIdle(c, id));
+    const after = await c.request({ type: "prompt", sessionId: id, message: "again" });
+    assert.equal(after.success, true, JSON.stringify(after));
+  });
 });
 
 describe("steer", () => {
@@ -282,5 +383,89 @@ describe("steer", () => {
     const messages = (await c.request({ type: "get_messages", sessionId: id })).data.messages;
     assert.ok(messages.some((m: any) => m.role === "user" && JSON.stringify(m.content).includes("change course")), "steer is in the session history");
     assert.equal((await c.request({ type: "get_state", sessionId: id })).data.pendingMessageCount, 0);
+  });
+
+  for (const streamingBehavior of ["steer", "followUp"] as const) {
+    it(`a prompt with streamingBehavior ${streamingBehavior} sent during preflight is queued for the starting turn, not run as a second turn`, async () => {
+      const env = makeEnv();
+      const { client } = await inProcess(env);
+      const c = await client();
+      const id = await createSession(c, env);
+      const text = `queued ${streamingBehavior}`;
+      c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "tool g3" })}\n${JSON.stringify({ id: "p2", type: "prompt", sessionId: id, message: text, streamingBehavior })}\n`);
+      const responses = await Promise.all(["p1", "p2"].map((rid) => c.responseFor(rid)));
+      for (const r of responses) assert.equal(r.success, true, JSON.stringify(r));
+      // A steer lands before the first LLM call, so the tool may never run; release it if it does.
+      await waitFor("turn done", async () => {
+        if (gate(env, "g3").started()) gate(env, "g3").release();
+        return c.events.some((e) => e.event?.type === "agent_end") && (await isIdle(c, id));
+      });
+      assert.ok(llmCalls(env).some((call) => call.messages.some((m) => m.role === "user" && m.text === text)), "an LLM call saw the queued prompt");
+      assert.ok(!c.events.some((e) => e.event?.type === "prompt_error"), "no second run failed");
+      assert.equal(c.events.filter((e) => e.event?.type === "agent_start").length, 1, "one turn, not two");
+      const messages = (await c.request({ type: "get_messages", sessionId: id })).data.messages;
+      assert.equal(messages.filter((m: any) => m.role === "user" && JSON.stringify(m.content).includes(text)).length, 1, "delivered exactly once");
+    });
+  }
+
+  // The starting prompt ends without a turn (extension command, handled input): a queued message must still run.
+  for (const [label, starter, gateName, queued] of [
+    ["an extension command", "/slow g5", "g5", { type: "prompt", streamingBehavior: "steer" }],
+    ["an extension command (followUp)", "/slow g6", "g6", { type: "prompt", streamingBehavior: "followUp" }],
+    ["an extension command (steer command)", "/slow g7", "g7", { type: "steer" }],
+    ["a handled input", "hold g8", "g8", { type: "prompt", streamingBehavior: "steer" }],
+  ] as const) {
+    it(`a message queued behind a starting prompt that ends as ${label} runs instead of being stranded`, async () => {
+      const env = makeEnv();
+      const { client } = await inProcess(env);
+      const c = await client();
+      const id = await createSession(c, env);
+      c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: starter })}\n${JSON.stringify({ id: "p2", sessionId: id, message: "stranded?", ...queued })}\n`);
+      const queuedResponse = await c.responseFor("p2");
+      assert.equal(queuedResponse.success, true, JSON.stringify(queuedResponse));
+      await waitFor("starter held", () => gate(env, gateName).started());
+      gate(env, gateName).release();
+      await waitFor("queued message ran", async () => (await assistantTexts(c, id)).includes("echo:stranded?") && (await isIdle(c, id)));
+      assert.equal(llmCalls(env).length, 1);
+      assert.equal((await c.request({ type: "get_state", sessionId: id })).data.pendingMessageCount, 0);
+    });
+  }
+
+  it("a stranded queued message in a session with history runs in Pi's run lifecycle (streaming, then agent_settled)", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    assert.equal((await c.request({ type: "prompt", sessionId: id, message: "first" })).success, true);
+    await waitFor("history", async () => (await assistantTexts(c, id)).includes("echo:first") && (await isIdle(c, id)));
+    c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "/slow g9" })}\n${JSON.stringify({ id: "p2", type: "prompt", sessionId: id, message: "tool g10", streamingBehavior: "steer" })}\n`);
+    assert.equal((await c.responseFor("p2")).success, true);
+    await waitFor("starter held", () => gate(env, "g9").started());
+    gate(env, "g9").release();
+    await waitFor("queued turn held", () => gate(env, "g10").started());
+    assert.equal((await c.request({ type: "get_state", sessionId: id })).data.isStreaming, true, "the queued turn reports streaming");
+    gate(env, "g10").release();
+    await waitFor("queued turn done", async () => (await assistantTexts(c, id)).includes("tool-done:gate:g10") && (await isIdle(c, id)));
+    await waitFor("agent_settled after each turn", () => c.events.filter((e) => e.event?.type === "agent_settled").length === 2);
+    const types = c.events.map((e) => e.event?.type);
+    assert.equal(types.lastIndexOf("agent_settled") > types.lastIndexOf("agent_end"), true, "agent_settled follows the queued turn");
+  });
+
+  it("a second client steering while the first client's turn is still starting is queued for that turn", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const a = await client();
+    const b = await client();
+    const id = await createSession(a, env);
+    a.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "tool g4" })}\n`);
+    b.sendRaw(`${JSON.stringify({ id: "s1", type: "steer", sessionId: id, message: "from b" })}\n`);
+    const [prompted, steered] = await Promise.all([a.responseFor("p1"), b.responseFor("s1")]);
+    assert.equal(prompted.success, true, JSON.stringify(prompted));
+    assert.equal(steered.success, true, JSON.stringify(steered));
+    await waitFor("tool to start", () => gate(env, "g4").started());
+    gate(env, "g4").release();
+    await waitFor("turn done", async () => (await isIdle(a, id)) && llmCalls(env).length >= 2);
+    assert.ok(llmCalls(env).some((call) => call.messages.some((m) => m.role === "user" && m.text === "from b")), "b's steer reached an LLM call");
+    assert.equal(a.events.filter((e) => e.event?.type === "agent_start").length, 1);
   });
 });

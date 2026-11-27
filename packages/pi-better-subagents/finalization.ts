@@ -8,6 +8,7 @@
 import { buildCompletionDelivery } from "./completion.ts";
 import { collectRunFailures, failurePath } from "./failures.ts";
 import { observeFailures } from "./shared-failure-observations.ts";
+import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
 import {
     classifyChildExit,
     type ChildExitOutcome,
@@ -19,12 +20,17 @@ import {
     effectiveStatus,
     isFinalResultStatus,
     readMeta,
+    updateParkRecord,
     writeMeta,
     type RunMeta,
 } from "./registry.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
+import { evaluateParkDisposition, type ParkDisposition } from "./worker-waits.ts";
+import { reconcileRun, type ProcessProbe, type ReconcileResult } from "./health.ts";
 
 export interface FinalizeHooks {
+    /** Recovery proved the original writer gone; the exit observer was lost. */
+    recoveredWriterExit?: boolean;
     renderWidget?: () => void;
     notify?: (message: string, level: "info" | "warning") => void;
     sendMessage?: (
@@ -38,6 +44,22 @@ export interface FinalizeResult {
     meta?: RunMeta;
     outcome?: ChildExitOutcome;
     delivery?: { content: string; options: Record<string, unknown> };
+    /** Present when this exit was a park or looked like one but could not be proven. */
+    park?: ParkDisposition;
+}
+
+/** The current management owner calls this only for an interrupted, unobserved writer. */
+export function reconcileInterruptedRun(meta: RunMeta, probe: ProcessProbe, now: number, hooks: FinalizeHooks = {}): {
+    reconciliation: ReconcileResult; finalization?: FinalizeResult;
+} {
+    const reconciliation = reconcileRun(meta, probe, now);
+    if ((meta.status === "running" || meta.status === "orphaned") && meta.supervisionInterruptedAt !== undefined && reconciliation.status === "lost") {
+        const run = parseRunForLifecycle(meta.id);
+        if (run.sawEnd && run.unmatchedToolCalls.length === 0) {
+            return { reconciliation, finalization: finalizeRun(meta.id, null, { ...hooks, recoveredWriterExit: true }) };
+        }
+    }
+    return { reconciliation };
 }
 
 /**
@@ -50,43 +72,87 @@ export function finalizeRun(
     code: number | null,
     hooks: FinalizeHooks = {},
 ): FinalizeResult {
-    const meta = readMeta(id);
+    const initial = readMeta(id);
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation, but never overwrites a true terminal record.
-    if (!meta || !canExitFinalize(meta.status)) return { applied: false };
+    if (!initial || !canExitFinalize(initial.status)) return { applied: false };
 
     // Lifecycle authority streams the complete NDJSON log; result text stays bounded.
     const r = parseRunForLifecycle(id);
     const outcome = classifyChildExit(code, r);
-    collectRunFailures(id, meta.cwd, true);
-    if (!outcome.incomplete && code !== null) {
+    collectRunFailures(id, initial.cwd, true);
+    // A run can now end exit 0 as failed (a final request the model could not
+    // serve), so "not incomplete and has an exit code" no longer means success.
+    const completed = outcome.status === "completed";
+    if (completed && code !== null) {
         observeFailures(failurePath(id), ["orphaned", "lost"].map((status) => ({
             id: `supervision:${status}:exit-recovered`, operation: `supervision:${status}`,
             kind: "recovered" as const, incidents: [`supervision:${status}`],
         })));
     }
-    if (code !== 0 || outcome.incomplete) {
+    if (!completed) {
+        const summary = outcome.incomplete ? "Child exit evidence is incomplete"
+            : outcome.diagnostics.modelError ? `Child exited with code ${code}: ${outcome.diagnostics.modelError}`
+            : `Child exited with code ${code}`;
         observeFailures(failurePath(id), [{ id: `exit:${code ?? "unknown"}:${outcome.classification}`,
             operation: "child-exit", kind: outcome.incomplete ? "incomplete" : "failure",
-            category: "exit", summary: outcome.incomplete ? "Child exit evidence is incomplete" : `Child exited with code ${code}` }]);
+            category: "exit", summary }]);
     }
-    meta.status = outcome.status;
-    meta.lifecycleClassification = outcome.classification;
-    if (outcome.incomplete) meta.failureReason = "incomplete-stream";
-    meta.exitCode = code;
-    meta.endedAt = Date.now();
+    // A clean park finishes this ATTEMPT, not the assignment. It is only accepted
+    // with a durable park record whose saved-conversation checkpoint still
+    // verifies; a failed, incoherent or unverifiable exit stays an ordinary exit
+    // and the recorded wait is held for its owner.
+    const park = evaluateParkDisposition({
+        runId: id,
+        // Preserve a verified staged checkpoint for post-restart park recovery.
+        // The coordinator still requires writer-exit and lease-release proof.
+        cleanExit: (code === 0 || (code === null && hooks.recoveredWriterExit === true))
+            && completed && !outcome.incomplete && !outcome.diagnostics.modelError,
+    });
+    const parked = park.parked && park.record !== undefined;
+    const endedAt = Date.now();
+    const meta = writeMeta(initial, { patch: current => {
+        if (!canExitFinalize(current.status)) return undefined;
+        const patch: Partial<RunMeta> = {
+            status: outcome.status,
+            lifecycleClassification: outcome.classification,
+            ...(outcome.incomplete ? { failureReason: "incomplete-stream" } : {}),
+            exitCode: code,
+            endedAt,
+        };
+        if (parked && park.record) patch.park = park.record;
+        if (current.callback !== false
+            && current.completionCallbackPendingAt === undefined
+            && current.completionCallbackSentAt === undefined
+            && current.completionCallbackSuppressedAt === undefined) {
+            if (parked) {
+                // The continuation reports the assignment's result.
+                patch.completionCallbackSuppressedAt = endedAt;
+                patch.completionCallbackSuppressedReason = `parked on wait ${park.record?.waitId} generation ${park.record?.generation}`;
+            } else {
+                patch.completionCallbackPendingAt = endedAt;
+            }
+        }
+        return patch;
+    } });
+    if (!meta) return { applied: false };
     const callback = meta.callback !== false;
-    if (callback
-        && meta.completionCallbackPendingAt === undefined
-        && meta.completionCallbackSentAt === undefined
-        && meta.completionCallbackSuppressedAt === undefined) {
-        meta.completionCallbackPendingAt = meta.endedAt;
+    commitAssignmentTerminal(meta);
+    if (!parked && park.record) {
+        // A park disposition existed but could not be proven on exit. Hold it in
+        // both durable copies (park.json + metadata) so nothing resumes it; the
+        // host wrapper reports the same state to the coordinator.
+        updateParkRecord(id, {
+            phase: "held",
+            heldReason: park.reason ?? "the exit was not a clean park",
+        });
     }
-    writeMeta(meta);
 
     const label = meta.name ? `${meta.name} (${id})` : id;
-    const verdict = outcome.verdict;
-    const el = fmtElapsed(meta.endedAt - meta.startedAt);
+    const verdict = parked
+        ? `parked · waiting for ${park.record?.waitId ?? "its dependency"}`
+        : outcome.verdict;
+    const el = fmtElapsed(endedAt - meta.startedAt);
     const spend = fmtSpend(r.usage);
     const humanStat = `${el}${spend ? ` · ${spend}` : ""}`;
     const stat = el;
@@ -98,8 +164,8 @@ export function finalizeRun(
     // Best-effort human toast. ctx may be stale by now; never let it throw.
     try {
         hooks.notify?.(
-            `Subagent ${label} ${verdict} · ${humanStat}`,
-            meta.status === "completed" ? "info" : "warning",
+            `Subagent ${label} ${parked ? verdict : `${verdict} · ${humanStat}`}`,
+            meta.status === "completed" || parked ? "info" : "warning",
         );
     } catch {
         /* ignore */
@@ -118,7 +184,9 @@ export function finalizeRun(
         lifecycleClassification: outcome.classification,
         resultText: r.finalText || r.lastActivity || "",
     });
-    if (callback) {
+    // A parked attempt sends nothing to the model: its assignment is still open
+    // and the same conversation resumes to interpret the result.
+    if (callback && !parked) {
         hooks.sendMessage?.(
             { customType: "subagent-complete", content: delivery.content, display: true },
             delivery.options,
@@ -130,6 +198,7 @@ export function finalizeRun(
         meta: readMeta(id),
         outcome,
         delivery,
+        ...(park.parked || park.record ? { park } : {}),
     };
 }
 
@@ -144,7 +213,7 @@ export function buildSubagentResultText(id: string): string | null {
 /** Optional paging/raw evidence for the registered result tool. */
 export function buildSubagentResultPayload(
     id: string,
-    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown },
+    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown; lines?: unknown; include?: unknown; history?: unknown; tail?: unknown },
     healthLine = "",
     scopeKey = `parent:${process.pid}`,
 ): string | null {

@@ -66,23 +66,36 @@ export async function startHost(label: string, provider?: string, options: { api
   const root = shortDir(`cx-${label}-`);
   const home = join(root, "home");
   const model = await startMockModel();
-  writeMockConfig(home, model.port, provider, options.apiKeyLogin === true);
-  if (options.apiKeyLogin) {
-    const login = spawnSync(CODEX_BIN, ["login", "--with-api-key"], { env: { ...process.env, CODEX_HOME: home }, input: "sk-test-not-a-real-key\n", encoding: "utf8" });
-    assert.equal(login.status, 0, login.stderr);
+  let daemon: CodexDaemon | undefined;
+  let client: DaemonClient | undefined;
+  try {
+    writeMockConfig(home, model.port, provider, options.apiKeyLogin === true);
+    if (options.apiKeyLogin) {
+      const login = spawnSync(CODEX_BIN, ["login", "--with-api-key"], { env: { ...process.env, CODEX_HOME: home }, input: "sk-test-not-a-real-key\n", encoding: "utf8" });
+      assert.equal(login.status, 0, login.stderr);
+    }
+    const serverDir = join(root, "srv");
+    daemon = await startCodexDaemon({ serverDir, codex: { bin: CODEX_BIN, home } });
+    client = await DaemonClient.connect(daemon.socketPath);
+    const ownedDaemon = daemon, ownedClient = client;
+    cleanups.push(async () => {
+      ownedClient.close();
+      await ownedDaemon.stop();
+      spawnSync(CODEX_BIN, ["app-server", "daemon", "stop"], { env: { ...process.env, CODEX_HOME: home }, timeout: 30_000 });
+      // `daemon stop` leaves the managed copy's pid-update-loop running; it would outlive the test for good.
+      spawnSync("pkill", ["-f", `${home}/packages/app-server-daemon`]);
+      await model.close();
+    });
+    return { root, home, serverDir, daemon, client, model, env: { CODEX_HOME: home, PI_SERVER_DIR: serverDir, PI_CODEX_BIN: CODEX_BIN } };
+  } catch (error) {
+    // Ownership has not reached the normal cleanup stack yet. Preserve the
+    // startup error while retiring every resource this partial host acquired.
+    try { client?.close(); await daemon?.stop(); }
+    catch (cleanupError) { console.error("Partial Codex host cleanup failed:", cleanupError); }
+    try { await model.close(); }
+    catch (cleanupError) { console.error("Partial Codex model cleanup failed:", cleanupError); }
+    throw error;
   }
-  const serverDir = join(root, "srv");
-  const daemon = await startCodexDaemon({ serverDir, codex: { bin: CODEX_BIN, home } });
-  const client = await DaemonClient.connect(daemon.socketPath);
-  cleanups.push(async () => {
-    client.close();
-    await daemon.stop();
-    spawnSync(CODEX_BIN, ["app-server", "daemon", "stop"], { env: { ...process.env, CODEX_HOME: home }, timeout: 30_000 });
-    // `daemon stop` leaves the managed copy's pid-update-loop running; it would outlive the test for good.
-    spawnSync("pkill", ["-f", `${home}/packages/app-server-daemon`]);
-    await model.close();
-  });
-  return { root, home, serverDir, daemon, client, model, env: { CODEX_HOME: home, PI_SERVER_DIR: serverDir, PI_CODEX_BIN: CODEX_BIN } };
 }
 
 /** Make a real thread on the host: the app-server runs one turn against the mock model. */
@@ -134,7 +147,7 @@ export async function installPlugin(host: Host): Promise<void> {
   assert.match(listed.stdout, /pi-remote@pi-remote\s+installed, enabled/);
 }
 
-export const REMOTE_CLI = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts")];
+export const REMOTE_CLI = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts"), "--agent", "codex"];
 
 export function remote(args: string[], env: Record<string, string> = {}): Promise<CliResult> {
   return run([...REMOTE_CLI, ...args], env);

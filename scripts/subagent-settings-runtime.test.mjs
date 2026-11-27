@@ -3,11 +3,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { Type } from "typebox";
 
 const sdkUrl = process.env.PI_CODEMODE_TEST_SDK_DIR
@@ -18,6 +19,21 @@ const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
   ? new URL("../../pi-ai/dist/index.js", sdkUrl).href
   : import.meta.resolve("@earendil-works/pi-ai"));
 const settingsType = "pi-better-subagents-settings";
+const root = mkdtempSync(join(tmpdir(), "pi-subagent-settings-runtime-"));
+const agentDir = join(root, "agent");
+const previousEnv = Object.fromEntries(["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP"]
+  .map((key) => [key, process.env[key]]));
+let runtimeOwner;
+process.env.PI_CODING_AGENT_DIR = agentDir;
+for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = root;
+after(async () => {
+  await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);
+  removeOwnedFixture(root);
+  for (const [key, value] of Object.entries(previousEnv)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+});
+runtimeOwner = await prepareOwnedRuntime(agentDir);
 
 function textContent(message) {
   return typeof message.content === "string" ? message.content
@@ -37,11 +53,7 @@ function snapshotFromResult(result, expected) {
 }
 
 test("real Pi refreshes live parent occupancy and source revisions during one foreground run", { timeout: 10_000 }, async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "pi-subagent-settings-runtime-"));
-  const agentDir = join(root, "agent");
   const configPath = join(agentDir, "settings.json");
-  const previousEnv = Object.fromEntries(["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP"]
-    .map((key) => [key, process.env[key]]));
   process.env.PI_CODING_AGENT_DIR = agentDir;
   // Registry reconciliation and shutdown must never see the user's real children.
   for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = root;
@@ -89,7 +101,6 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      rmSync(root, { recursive: true, force: true });
     }
   });
   const { default: subagentsExtension } = await import("../packages/pi-better-subagents/index.ts");
@@ -189,24 +200,22 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
       entry.customType === settingsType || entry.message?.customType === settingsType), false,
     "request-local settings must not enter the stored transcript");
   }
-  function settingsBlock(index, mode, cap, snapshot) {
-    const blocks = contexts[index].filter((message) => message.role === "custom" && message.customType === settingsType);
-    assert.equal(blocks.length, 1, `request ${index + 1} has exactly one settings custom block`);
-    const text = textContent(blocks[0]);
-    assert.match(text, new RegExp(`(?:maxConcurrent|Concurrent subagents|Concurrency limit)[\\s\"':=\\x60*-]+${cap}\\b`, "i"));
-    assert.ok(text.includes(delegationPrompt(mode)), "each request contains the complete current delegation prompt");
+  function settingsPolicy(index, mode, cap, snapshot) {
+    // The policy sits at the end of the system prompt: outside the compaction
+    // window and inside the cached prefix, so it is not re-sent as a conversation
+    // message on every request.
+    const prompt = requests[index].context.systemPrompt ?? "";
+    assert.match(prompt, new RegExp(`Concurrency limit: ${cap} \\(`), "the system prompt carries the cap");
+    assert.ok(prompt.includes(delegationPrompt(mode)), "the system prompt carries the complete delegation prompt");
     if (snapshot) {
-      assert.deepEqual(blocks[0].details, snapshot, "context and inspection agree on every structured field");
-      assert.ok(text.includes(snapshot.revision), "the readable context exposes the inspection revision");
-      for (const [label, value] of [["Running", snapshot.runningCount], ["reserved", snapshot.pendingCount],
-        ["Occupied slots", snapshot.occupiedSlots], ["Available slots", snapshot.availableSlots]]) {
-        assert.match(text, new RegExp(`${label}:\\s*${value}\\b`), "provider-visible occupancy agrees with inspection");
-      }
+      assert.ok(prompt.includes(snapshot.revision), "the system prompt exposes the settings revision");
+      assert.equal(prompt.includes("Available slots"), false,
+        "live occupancy is pulled through inspection, never pushed into the prompt");
     }
-    const delivered = requests[index].context.messages.filter((message) => message.role === "user" && textContent(message) === text);
-    assert.equal(delivered.length, 1, "the recording provider receives the full custom block exactly once");
+    const blocks = contexts[index].filter((message) => message.role === "custom" && message.customType === settingsType);
+    assert.equal(blocks.length, 0, "settings are not injected into conversation messages");
     assertEphemeral();
-    return text;
+    return prompt;
   }
   // These are real processes with IPC readiness, not Pi/LLM launches. Keep the
   // metadata alive after exit to distinguish process liveness from stored status.
@@ -254,11 +263,11 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
   assert.match(pages[0].before, /Concurrent subagents\s+3/);
   assert.match(pages[0].after, /Concurrent subagents\s+7/);
   assert.equal(requests.length, 1, "opening and applying settings while busy does not start a model request");
-  const oldText = settingsBlock(0, "adaptive", 3, initialSnapshot);
+  const oldText = settingsPolicy(0, "adaptive", 3, initialSnapshot);
   releaseTool.resolve();
   const second = await nextRequest(1);
   assert.equal(agentStarts, 1);
-  assert.equal(settlements, 0, "the new settings reach the same foreground run before settlement");
+  assert.equal(settlements, 0, "a mid-run settings edit applies to admission and inspection without restarting the run");
   const entriesBeforeInspection = structuredClone(stateEntries());
   second.finish();
   const third = await nextRequest(2);
@@ -267,8 +276,8 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
     runningCount: 1, pendingCount: 0, occupiedSlots: 1, availableSlots: 6 };
   const capSnapshot = snapshotFromResult(inspectionResults[0], expected);
   assert.equal(oldText.includes(capSnapshot.revision), false, "a cap edit changes the content fingerprint");
-  settingsBlock(1, "adaptive", 7, capSnapshot);
-  settingsBlock(2, "adaptive", 7, capSnapshot);
+  settingsPolicy(1, "adaptive", 3, initialSnapshot);
+  settingsPolicy(2, "adaptive", 3, initialSnapshot);
   assert.deepEqual(stateEntries(), entriesBeforeInspection, "inspection does not mutate session settings");
   assert.deepEqual(registry.readMeta(owned.meta.id), owned.meta, "inspection does not rewrite live metadata");
   assert.deepEqual(registry.readMeta(foreign.meta.id), foreign.meta);
@@ -295,13 +304,13 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
   const modeSnapshot = snapshotFromResult(inspectionResults[1], { ...emptyExpected, delegationMode: "coordinator",
     sources: { delegationMode: "session", maxConcurrent: "session" } });
   assert.notEqual(modeSnapshot.revision, capSnapshot.revision, "mode changes update the fingerprint");
-  settingsBlock(3, "coordinator", 7, modeSnapshot);
+  settingsPolicy(3, "adaptive", 3, initialSnapshot);
   fourth.finish();
   const fifth = await nextRequest(4);
   const repeated = snapshotFromResult(inspectionResults[2], { ...emptyExpected, delegationMode: "coordinator",
     sources: { delegationMode: "session", maxConcurrent: "session" } });
   assert.equal(repeated.revision, modeSnapshot.revision, "unchanged settings retain their content fingerprint");
-  settingsBlock(4, "coordinator", 7, repeated);
+  settingsPolicy(4, "adaptive", 3, initialSnapshot);
   assert.deepEqual(stateEntries(), entriesAfterModeEdit, "repeated inspection remains read-only");
   assert.equal(readFileSync(configPath, "utf8"), savedConfig, "session UI edits do not save global defaults");
 
@@ -310,7 +319,7 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
   const sixth = await nextRequest(5);
   const configExpected = { ...initialSnapshot, runningCount: 0, occupiedSlots: 0, availableSlots: 3 };
   const configured = snapshotFromResult(inspectionResults[3], configExpected);
-  settingsBlock(5, "adaptive", 3, configured);
+  settingsPolicy(5, "adaptive", 3, initialSnapshot);
   await session.prompt("/subagents cap 3");
   const entriesAfterSameValue = structuredClone(stateEntries());
   sixth.finish();
@@ -319,7 +328,7 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
   const sameValue = snapshotFromResult(inspectionResults[4], { ...configuredValues,
     sources: { delegationMode: "config", maxConcurrent: "session" } });
   assert.notEqual(sameValue.revision, configuredRevision, "source-only config-to-session changes revise the fingerprint");
-  settingsBlock(6, "adaptive", 3, sameValue);
+  settingsPolicy(6, "adaptive", 3, initialSnapshot);
   assert.deepEqual(stateEntries(), entriesAfterSameValue, "same-value inspection does not append settings entries");
   await session.prompt("/subagents save");
   const entriesAfterSave = structuredClone(stateEntries());
@@ -327,7 +336,7 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
   const eighth = await nextRequest(7);
   const saved = snapshotFromResult(inspectionResults[5], configExpected);
   assert.equal(saved.revision, configured.revision, "saving unchanged values restores the config-sourced revision");
-  settingsBlock(7, "adaptive", 3, saved);
+  settingsPolicy(7, "adaptive", 3, initialSnapshot);
   assert.deepEqual(stateEntries(), entriesAfterSave, "inspection after saving remains read-only");
   assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), JSON.parse(savedConfig),
     "saving the same values only changes their source, not the numeric default");

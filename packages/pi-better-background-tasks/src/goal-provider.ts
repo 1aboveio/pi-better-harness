@@ -1,8 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { listMetas, listMetasForOrigin, onMetaChanged } from "./registry.js";
+import { listMetas, onMetaChanged } from "./registry.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import type { DurableTaskProjection } from "./observed-waits.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";
+import { backgroundGoalObservation, onBackgroundObservation } from "./work-observation.js";
 
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
@@ -25,19 +28,26 @@ export interface GoalBackgroundProviderSnapshot {
   providerId: string;
   label?: string;
   items: GoalBackgroundWorkItem[];
+  nextDeadline?: number | null;
 }
 
 export function collectBackgroundTaskGoalActivity(
   metas: BackgroundTaskMeta[] = listMetas(),
   ctx?: ExtensionContext,
   now = Date.now(),
+  durable: readonly DurableTaskProjection[] = [],
 ): GoalBackgroundProviderSnapshot {
+  const items = [
+    ...metas.filter((meta) => isVisibleGoalActivity(meta, ctx, now)).map(backgroundTaskToGoalItem),
+    ...durable.filter((task) => isVisibleDurableGoalActivity(task, ctx, now)).map(durableTaskToGoalItem),
+  ];
+  const deadlines = items.filter(item => item.terminal && typeof item.endedAt === "number")
+    .map(item => item.endedAt! + TERMINAL_GOAL_ACTIVITY_RETENTION_MS).filter(deadline => deadline > now);
   return {
     providerId: "background-tasks",
     label: "Background Tasks",
-    items: metas
-      .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
-      .map(backgroundTaskToGoalItem),
+    items,
+    nextDeadline: deadlines.length ? Math.min(...deadlines) : null,
   };
 }
 
@@ -46,8 +56,37 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
       id: "background-tasks",
       label: "Background Tasks",
-      getActivity: (ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(listMetasForOrigin(getGoalActivityOrigin(ctx)), ctx),
-      onActivityChanged: onMetaChanged,
+      scope: "session",
+      activityVersion: 1,
+      getActivity: async (ctx: ExtensionContext, options?: { cachedOnly?: boolean }) => {
+        const snapshot = await backgroundGoalObservation(pi, ctx, options?.cachedOnly);
+        if (!snapshot && options?.cachedOnly) return { providerId: "background-tasks", coverage: "unverified", items: [], nextDeadline: null };
+        if (snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
+        const durable = snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta);
+        const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
+        const activity = collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
+        const deadlines = [activity.nextDeadline, snapshot.nextDeadline].filter((value): value is number => typeof value === "number" && value > Date.now());
+        return { ...activity, nextDeadline: deadlines.length ? Math.min(...deadlines) : null };
+      },
+      // A durable operation change must refresh Goal activity even though it
+      // never writes a mutable legacy registry meta.
+      onActivityChanged: (notify: () => void, ctx?: ExtensionContext) => {
+        const offRuntime = onBackgroundObservation(pi, notify);
+        const offMeta = onMetaChanged(meta => {
+          if (ctx && meta && !belongsToGoalActivitySession(meta, ctx)) return;
+          notify();
+        });
+        const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(change => {
+          if (ctx && (change.workspace !== ctx.cwd || change.sessionId !== ctx.sessionManager.getSessionId())) return;
+          if (ctx && change.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === change.branchId)) return;
+          notify();
+        });
+        return () => {
+          offRuntime();
+          offMeta();
+          offDurable?.();
+        };
+      },
     });
   };
 
@@ -74,6 +113,7 @@ function belongsToGoalActivitySession(meta: BackgroundTaskMeta, ctx: ExtensionCo
   const origin = meta.callbackOrigin;
   if (origin) {
     if (origin.cwd !== active.cwd) return false;
+    if (origin.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === origin.branchId)) return false;
     if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
     return true;
   }
@@ -89,6 +129,52 @@ function getGoalActivityOrigin(ctx: ExtensionContext) {
     sessionId = undefined;
   }
   return { cwd: ctx.cwd, sessionId };
+}
+
+function isVisibleDurableGoalActivity(
+  task: DurableTaskProjection,
+  ctx: ExtensionContext | undefined,
+  now: number,
+): boolean {
+  if (task.dismissedAt !== undefined) return false;
+  if (ctx) {
+    const active = getGoalActivityOrigin(ctx);
+    if (task.owner.workspace !== active.cwd) return false;
+    if (task.owner.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === task.owner.branchId)) return false;
+    if (active.sessionId || task.owner.sessionId) {
+      if (task.owner.sessionId !== active.sessionId) return false;
+    }
+  }
+  if (!task.terminal) return true;
+  if (!ctx) return true;
+  if (task.endedAt === undefined) return true;
+  return now - task.endedAt < TERMINAL_GOAL_ACTIVITY_RETENTION_MS;
+}
+
+function durableTaskToGoalItem(task: DurableTaskProjection): GoalBackgroundWorkItem {
+  const item: GoalBackgroundWorkItem = {
+    id: task.id,
+    status: task.status,
+    active: task.active,
+    terminal: task.terminal,
+    attention: task.attention,
+    startedAt: task.startedAt,
+    details: {
+      durable: true,
+      operationId: task.operationId,
+      kind: task.kind,
+      cwd: task.cwd,
+      command: task.command,
+      argv: task.argv,
+      logPath: task.logPaths.stdout,
+      lastProgressAt: task.endedAt ?? task.startedAt,
+      waits: task.waits.map((wait) => `${wait.waitId}:${wait.phase}`),
+      ...(task.reason ? { reason: task.reason } : {}),
+    },
+  };
+  if (task.name !== undefined) item.label = task.name;
+  if (task.endedAt !== undefined) item.endedAt = task.endedAt;
+  return item;
 }
 
 function backgroundTaskToGoalItem(meta: BackgroundTaskMeta): GoalBackgroundWorkItem {

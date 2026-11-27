@@ -9,9 +9,15 @@ export const EVENT_REGISTER_PROVIDER = "pi-better-goal:register-provider";
 export const EVENT_ACTIVITY = "pi-better-goal:activity";
 export const EVENT_TERMINAL_ATTENTION = "pi-better-goal:terminal-attention";
 
+/** Session-local transition and synchronous inspection of verified foreground/worker idleness. */
+export const sessionIdleEvent = (sessionId: string) => `pi-better-goal:idle:${sessionId}`;
+export type SessionIdleState = boolean | "checking";
+export interface SessionIdleInspection { idle?: SessionIdleState; verify?: boolean }
+
 export type ActivityCategory =
   | "foreground-running"
   | "background-running"
+  | "unverified"
   | "idle-waiting"
   | "complete";
 
@@ -40,19 +46,29 @@ export interface BackgroundWorkItem {
 
 export interface BackgroundProviderSnapshot {
   providerId: string;
+  /** Omitted by legacy providers; unverified observations cannot prove drain. */
+  coverage?: "verified" | "unverified";
   label?: string;
   items: BackgroundWorkItem[];
+  /** Absolute milliseconds; null means no time-dependent change is owed. */
+  nextDeadline?: number | null;
+  /** Legacy providers cost at most one collection per compatibility interval. */
+  compatibilityIntervalMs?: number;
 }
 
 export interface BackgroundActivityProvider {
   id: string;
+  /** v1 requires notifications and an explicit nextDeadline (including null). */
+  activityVersion?: 1;
   label?: string;
-  getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
-  onActivityChanged?(notify: () => void): () => void;
+  /** Passive foreground updates can use existing subscriptions without opening a connection. */
+  getActivity(ctx: ExtensionContext, options?: { cachedOnly?: boolean }): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
+  onActivityChanged?(notify: () => void, ctx?: ExtensionContext): () => void;
 }
 
 export interface ActivitySnapshot {
   version: 1;
+  coverage?: "verified" | "unverified";
   category: ActivityCategory;
   foregroundRunning: boolean;
   backgroundRunning: boolean;
@@ -71,12 +87,11 @@ export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
  * resume a goal on their own. An `interrupt` pause may be resumed by the agent
  * with `goal_resume` when the user clearly says to proceed. A paused goal
  * without a reason (`/goal pause`, an unavailable command or workflow) resumes
- * only through `/goal resume` or the resume hotkey. `permission-blocker` also
- * requires those human controls, and releases just one same-scope retry while
- * keeping its separate blocker/release history.
+ * only through `/goal resume` or the resume hotkey. Permission failure reports
+ * are diagnostics and never create a pause reason.
  */
-/** Why a goal paused: escape, a permission hold, or a workflow handing back unfinished work for the user's answer. */
-export type GoalPauseReason = "interrupt" | "permission-blocker" | "handback";
+/** Why a goal paused: escape, or a workflow handing back unfinished work for the user's answer. */
+export type GoalPauseReason = "interrupt" | "handback";
 
 export interface GoalUsage {
   tokensUsed: number;

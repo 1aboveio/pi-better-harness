@@ -118,12 +118,14 @@ export interface CallbackBatchHost {
   /** Older Pi shares this object; newer Pi supplies per-extension wrappers. */
   events?: object;
   sendMessage(
-    message: { customType: string; content: string; display: boolean },
+    message: { customType: string; content: string; display: boolean; details?: unknown },
     options: Record<string, unknown>,
   ): unknown;
 }
 
 export interface CallbackBatchEvent {
+  receiptId?: string;
+  inspectId?: string;
   source: CallbackSource;
   id: string;
   label: string;
@@ -155,6 +157,8 @@ export interface CallbackBatchEvent {
 }
 
 export interface UrgentCallbackEvent {
+  /** Durable recipient transcript identity for handoff/receipt crash recovery. */
+  receiptId?: string;
   source: CallbackSource;
   /** Notification identity (dedupe/receipts). */
   id: string;
@@ -205,6 +209,8 @@ export interface CallbackBatcher {
   toolEnded(toolCallId: string): Promise<boolean>;
   deliverUrgent(event: UrgentCallbackEvent): boolean | Promise<boolean>;
   cancel(): void;
+  /** Await already-started handoffs after the owner has cancelled scheduling. */
+  settled(): Promise<void>;
   pendingCount(): number;
 }
 
@@ -331,8 +337,8 @@ function boundedStatus(value: unknown): string {
   return count < notes.length ? `${kept}${omission(notes.length - count)}` : kept;
 }
 
-function inspectFor(event: Pick<CallbackBatchEvent, "id" | "detailTool">): string {
-  const id = boundedField(event.id, MAX_ID_BYTES);
+function inspectFor(event: Pick<CallbackBatchEvent, "id" | "detailTool" | "inspectId">): string {
+  const id = boundedField(event.inspectId ?? event.id, MAX_ID_BYTES);
   return event.detailTool === "bg_task_status"
     ? `bg_task_status id=${id}`
     : `subagent_result id=${JSON.stringify(id)}`;
@@ -563,6 +569,7 @@ export function createCallbackBatcher(
   const pending = new Map<string, PendingEvent>();
   const inFlight = new Set<string>();
   const urgentInFlight = new Set<string>();
+  const urgentSettlements = new Set<Promise<boolean>>();
   const handedOff = new Map<string, number>();
   const activeTools = new Set<string>();
   let sequence = 0;
@@ -603,7 +610,7 @@ export function createCallbackBatcher(
 
   const enqueue = (event: CallbackBatchEvent): boolean => {
     if (event.callback === false) return false;
-    const key = eventKey(event);
+    const key = completionKey(event);
     if (pending.has(key) || inFlight.has(key)) return false;
     pending.set(key, { event, sequence: sequence++ });
     schedule(windowMs);
@@ -664,6 +671,7 @@ export function createCallbackBatcher(
     const representedItems = deliverable.filter(([, item]) => representedSet.has(item.event));
     const overflowItems = deliverable.filter(([, item]) => !representedSet.has(item.event));
 
+    const receiptDetails = { completionEventIds: representedItems.map(([, item]) => item.event.receiptId).filter((id): id is string => Boolean(id)) };
     try {
       // Pi may defer the requested run while settled handlers finish, leaving
       // isIdle() true. Permit no second handoff until a run starts.
@@ -673,12 +681,14 @@ export function createCallbackBatcher(
           customType: "background-completion-batch",
           content: packed.text,
           display: true,
+          ...(receiptDetails.completionEventIds.length ? { details: receiptDetails } : {}),
         },
         // Newer Pi requires triggerTurn for steering too; false only appends
         // a custom message at the turn boundary without continuing the agent.
         { deliverAs: mode, triggerTurn: true },
       );
     } catch {
+      receiptDetails.completionEventIds.length = 0;
       awaitingRun = false;
       for (const [key] of deliverable) inFlight.delete(key);
       const retryItems = [...deliverable, ...pending.entries()]
@@ -737,14 +747,17 @@ export function createCallbackBatcher(
     urgentInFlight.add(key);
     try {
       const handoff = host.sendMessage(
-        { customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true },
+        { customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true,
+          ...(event.receiptId ? { details: { urgentEventId: event.receiptId } } : {}) },
         { deliverAs: "followUp", triggerTurn: true },
       );
       if (isPromiseLike(handoff)) {
-        return Promise.resolve(handoff).then(
+        const settlement = Promise.resolve(handoff).then(
           () => acknowledge(),
           () => false,
-        ).finally(() => urgentInFlight.delete(key));
+        ).finally(() => { urgentInFlight.delete(key); urgentSettlements.delete(settlement); });
+        urgentSettlements.add(settlement);
+        return settlement;
       }
       const acknowledged = acknowledge();
       urgentInFlight.delete(key);
@@ -791,6 +804,10 @@ export function createCallbackBatcher(
       return pending.size > 0 ? api.flush() : true;
     },
     deliverUrgent,
+    async settled() {
+      await flushPromise;
+      await Promise.all([...urgentSettlements]);
+    },
     cancel() {
       cancelTimer();
       pending.clear();
@@ -881,6 +898,23 @@ function globalState(): SharedCallbackBatcherState {
 
 function eventKey(event: Pick<CallbackBatchEvent, "source" | "id" | "status">): string {
   return `${event.source}\u0000${event.id}\u0000${event.status}`;
+}
+
+/**
+ * Ordinary completion identity is the run/task id, not the status wording (#624).
+ *
+ * The status field is a snapshot taken when a notification is enqueued (failure
+ * notes, observation gaps, timing reason). Including it in the key meant a
+ * not-yet-delivered run whose status changed between enqueues entered the
+ * pending map twice; one flush then rendered both rows and the caller saw one
+ * completion twice. Urgent events keep the status in their key: those are
+ * distinct transitions (orphaned, lost, a timing wake, a failure key), not
+ * restatements of a single ordinary completion. The first queued snapshot is the
+ * one delivered; a later status wording for the same id is dropped rather than
+ * re-queued, and the durable result stays the authority for failure detail.
+ */
+function completionKey(event: Pick<CallbackBatchEvent, "source" | "id">): string {
+  return `${event.source}\u0000${event.id}`;
 }
 
 function eventDisposition(

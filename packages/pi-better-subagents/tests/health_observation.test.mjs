@@ -851,14 +851,16 @@ describe("extractChildEventFactsFromLog — incremental reading", () => {
         assert.ok(still.facts.lastCompaction, "state survived for a recently read run");
     });
 
-    it("drops the oldest retained events rather than growing without bound", () => {
+    it("retains structural facts without retaining large event payloads", () => {
         const id = startLog("sa_hobs_budget");
+        append(id, { type: "tool_execution_start", toolCallId: "old", toolName: "bash", at: NOW - 10_000 });
         // 9 MiB of fact-relevant events, past the 8 MiB retention budget.
         for (let i = 0; i < 9; i++) {
             append(id, { type: "tool_execution_update", at: NOW - 9_000 + i, note: "z".repeat(1024 * 1024) });
         }
         const read = extractChildEventFactsFromLog(id, { now: NOW });
-        assert.equal(read.rawLog.eventsDropped, true, "a drop is reported, not silent");
+        assert.equal(read.rawLog.eventsDropped, undefined, "source payloads are folded without a lossy retention window");
+        assert.equal(read.facts.activeTools[0].toolCallId, "old");
         assert.equal(read.facts.lastMeaningfulAt, NOW - 9_000 + 8, "surviving events still fold");
     });
 

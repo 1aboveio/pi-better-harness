@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 export interface SettingsLink {
   id: string;
   label: string;
+  description?: string;
   command: string;
   open(ctx: ExtensionCommandContext): Promise<void> | void;
 }
@@ -10,6 +11,7 @@ export interface SettingsLink {
 export interface SettingsControl {
   id: string;
   label: string;
+  description?: string;
   values: string[];
   get(): string;
   change(value: string, ctx: ExtensionCommandContext): Promise<void> | void;

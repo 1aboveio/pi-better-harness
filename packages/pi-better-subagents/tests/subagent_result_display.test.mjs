@@ -13,6 +13,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { writeMeta, runDir, logPathFor } from "../registry.ts";
 import { buildSubagentResultText } from "../finalization.ts";
 import { subagentResultTool } from "../tools.ts";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
+
+const stopRuntime = await startWorkRuntimeFixture();
 
 const THIS_PID = process.pid;
 const diskIds = [];
@@ -21,7 +25,9 @@ function trackDisk(id) {
     return id;
 }
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     for (const id of diskIds) {
         try { rmSync(runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
     }
@@ -91,6 +97,7 @@ describe("subagent_result folded TUI display", () => {
         const tool = subagentResultTool(TypeStub);
 
         const result = await tool.execute("tc", { id });
+        assert.equal(result.details.hasFinalAnswer, true);
         const full = textOf(result);
         assert.equal(full, buildSubagentResultText(id), "model-facing content must equal the bounded result formatter output");
         assert.match(full, /result-line-18/, "model-facing content must keep the full bounded result");

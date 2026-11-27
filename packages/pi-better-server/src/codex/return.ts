@@ -11,6 +11,7 @@ import { DaemonClient } from "../client.ts";
 import { moveSession, type MoveResult } from "../move/orchestrate.ts";
 import { defaultServerDir, socketPathFor } from "../paths.ts";
 import { resolveSession } from "../remote/sessions.ts";
+import { shellQuote } from "../startup/runtime.ts";
 import { preflightCodexProvider } from "./preflight.ts";
 import { readRolloutMeta } from "./rollout.ts";
 import { startCodexDaemon, type CodexDaemon } from "./daemon.ts";
@@ -41,7 +42,7 @@ export function isCodexHost(client: DaemonClient): boolean {
 }
 
 /** The local Codex daemon: the one already running in `serverDir`, else one that lives for this command. */
-async function localDaemon(serverDir: string, codex: CodexRuntimeOptions | undefined): Promise<{ client: DaemonClient; runtime: CodexRuntime; stop(): Promise<void> }> {
+async function localDaemon(serverDir: string, codex: CodexRuntimeOptions | undefined): Promise<{ client: DaemonClient; runtime: CodexRuntime; /** True when a daemon was already running and keeps the thread loaded after this command. */ managed: boolean; stop(): Promise<void> }> {
   let started: CodexDaemon | undefined;
   let client: DaemonClient;
   try {
@@ -59,11 +60,24 @@ async function localDaemon(serverDir: string, codex: CodexRuntimeOptions | undef
   return {
     client,
     runtime: started?.runtime ?? new CodexRuntime(codex),
+    managed: started === undefined,
     async stop() {
       client.close();
       await started?.stop();
     },
   };
+}
+
+/**
+ * How to continue a returned thread. While this machine's daemon is running, its app-server is the thread's one
+ * writer, so a standalone `codex resume` / `codex exec resume` is refused ("already has an active writer"):
+ * go through the daemon instead. When the daemon only lived for the return, nothing holds the thread and
+ * plain `codex resume` works.
+ */
+export function resumeHint(cwd: string, sessionId: string, managed: boolean, serverDir: string): string {
+  if (!managed) return `cd ${shellQuote(cwd)} && codex resume ${sessionId}`;
+  const env = serverDir === defaultServerDir() ? "" : `PI_SERVER_DIR=${shellQuote(serverDir)} `;
+  return `${env}pi-remote attach ${sessionId} --agent codex  (or: ${env}pi-remote steer ${sessionId} --agent codex "<message>")`;
 }
 
 export async function returnCodexThread(options: ReturnCodexOptions): Promise<ReturnCodexResult> {
@@ -90,7 +104,7 @@ export async function returnCodexThread(options: ReturnCodexOptions): Promise<Re
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     });
-    return { ...result, resumeCommand: `cd ${result.cwd} && codex resume ${result.sessionId}` };
+    return { ...result, resumeCommand: resumeHint(result.cwd, result.sessionId, local.managed, serverDir) };
   } finally {
     await local.stop();
   }

@@ -1,0 +1,26 @@
+role.review has no defaults.skills; the global defaultSkills value supplies the exposure.
+
+Agents / Reviewer
+[Settings]   Instructions   Files
+Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list
+
+  > Model     openai/gpt-6-astra                                              bundled
+    Effort    medium                                                          bundled
+    Skills    inherit                                                         global
+    Reset to bundled
+    Restores model/effort; keeps the role prompt.
+
+  Model and effort are session edits. Skills save to the definition.
+
+  ID       role.review
+  Scope    bundled
+  Tier     frontier
+  Actual   not resolved
+
+  Launch resolution
+  The catalog definition has no blocking diagnostic, but that is not launchability. Inject model a
+  vailability and effort support before launching. No actual model was selected here.
+
+Showing 1-16 of 16 lines
+
+Ctrl+S Save defaults

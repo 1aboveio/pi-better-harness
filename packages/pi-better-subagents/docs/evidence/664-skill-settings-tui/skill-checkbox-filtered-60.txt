@@ -1,0 +1,13 @@
+# Checkbox picker filtered to test-quality; the hidden better-review stays checked
+# width: 60
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Search > test                                             
+> [x] test-quality                                          
+    Write tests that catch real bugs.
+  ✓ Apply selection (2 checked)
+  + Add skill path…
+  2 checked · 1 checked hidden by filter
+  0 checked applies No skill catalog, not discovery.

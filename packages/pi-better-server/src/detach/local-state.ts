@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { MoveRecovery } from "../move/orchestrate.ts";
 
@@ -10,6 +10,8 @@ export interface LocalRecord {
   /** owned: usable here (also after a return). fenced: a detach is in flight. moved: a daemon owns it. */
   state: "owned" | "fenced" | "moved";
   epoch: number;
+  /** The canonical writer after a return; older retained snapshots stay read-only. */
+  sessionFile?: string;
   moveId?: string;
   /** Where the workspace lived before the session left; `return` rebuilds it there by default. */
   cwd?: string;
@@ -59,8 +61,12 @@ export function localRecovery(host: string | undefined): MoveRecovery {
 }
 
 /** The reason this machine must not write to the session, or undefined when it may. */
-export function localBlockedReason(stateDir: string, sessionId: string): string | undefined {
+export function localBlockedReason(stateDir: string, sessionId: string, sessionFile?: string): string | undefined {
   const record = readLocalRecord(stateDir, sessionId);
+  if (record?.state === "owned" && record.sessionFile && sessionFile && resolve(record.sessionFile) !== resolve(sessionFile)) {
+    const path = `'${record.sessionFile.replaceAll("'", `'\\''`)}'`;
+    return `This retained session snapshot is read-only. Resume the returned conversation with \`pi --session ${path}\`.`;
+  }
   const hostFlag = record?.host ? ` --host ${record.host}` : "";
   if (record?.state === "moved") {
     return `This session moved to ${record.host ?? record.movedTo ?? "a daemon"}. Bring it back with \`pi-remote return ${sessionId}${hostFlag}\`, or follow it with \`pi-remote tail\` / \`steer\`.`;

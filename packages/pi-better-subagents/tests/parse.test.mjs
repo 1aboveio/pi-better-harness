@@ -29,6 +29,9 @@ function uniqueRunId(prefix) {
 const PARSE_RUN_ID = uniqueRunId("sa_parse_test_parse");
 const TAIL_RUN_ID = uniqueRunId("sa_parse_test_tail");
 
+/** Verbatim provider error from pi-better-model-router 0.1.2 after a timed-out candidate. */
+const MODEL_ERROR = "Model router: no eligible Flash model is available. Check Pi's model catalog and provider login.";
+
 function writeLog(id, lines) {
     mkdirSync(runDir(id), { recursive: true });
     writeFileSync(logPathFor(id), lines.join("\n"), "utf-8");
@@ -98,6 +101,45 @@ describe("parseRun", () => {
         assert.equal(r.lastActivity, "partial answer");
         assert.equal(r.sawEnd, false);
         assert.deepEqual(r.toolCalls, ["bash"]);
+    });
+
+    it("does not treat a stopped or truncated turn as a model failure", () => {
+        for (const [stopReason, errorMessage] of [
+            ["aborted", "Request was aborted"],
+            ["length", "The response hit the output token limit"],
+            ["stop", ""],
+        ]) {
+            writeLog(PARSE_RUN_ID, [
+                event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason, errorMessage } }),
+                event("agent_end", { messages: [], willRetry: false }),
+            ]);
+            assert.equal(parseRun(PARSE_RUN_ID).modelError, undefined, `${stopReason} is a stop, not a provider failure`);
+        }
+    });
+
+    it("reports the last unrecovered model error and clears it after a served request", () => {
+        writeLog(PARSE_RUN_ID, [
+            event("message_end", { message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." } }),
+            event("auto_retry_start", { attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." }),
+            event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "toolUse" } }),
+            event("auto_retry_end", { success: true, attempt: 1 }),
+        ]);
+        assert.equal(parseRun(PARSE_RUN_ID).modelError, undefined, "a later served request clears the failure");
+
+        writeLog(PARSE_RUN_ID, [
+            event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "first sentence" }], stopReason: "toolUse" } }),
+            event("message_end", { message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." } }),
+            event("auto_retry_start", { attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." }),
+            event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "" }], api: "pi-virtual", provider: "router", model: "deepseek-flash-auto", stopReason: "error", errorMessage: MODEL_ERROR } }),
+            event("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: MODEL_ERROR }], willRetry: false }),
+            event("auto_retry_end", { success: false, attempt: 1, finalError: MODEL_ERROR }),
+            event("agent_settled", { aborted: false }),
+        ]);
+        const r = parseRun(PARSE_RUN_ID);
+
+        assert.equal(r.modelError, MODEL_ERROR, "the terminal failure survives, not the earlier partial answer");
+        assert.equal(r.finalText, "first sentence", "partial text is still parsed, but is no longer the whole story");
+        assert.equal(r.sawEnd, true);
     });
 
     it("surfaces recent tool events from a huge log without whole-file reads", () => {

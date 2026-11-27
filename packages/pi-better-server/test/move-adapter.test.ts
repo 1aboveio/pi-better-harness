@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type { DaemonClient } from "../src/client.ts";
+import { CodexMoveAdapter } from "../src/codex/adapter.ts";
+import { CodexRuntime } from "../src/codex/runtime.ts";
+import { createBundle, sha256File } from "../src/core/bundle.ts";
 import type { AgentMoveAdapter, ImportRequest, MovePreflightContext } from "../src/core/adapter.ts";
 import { MoveHost } from "../src/core/move-host.ts";
 import { OwnershipStore } from "../src/core/ownership.ts";
 import { moveSession } from "../src/move/orchestrate.ts";
+import { PiMoveAdapter } from "../src/move/pi-adapter.ts";
+import { SessionRegistry } from "../src/registry.ts";
 import type { MoveCommand } from "../src/protocol.ts";
 
 const roots: string[] = [];
@@ -171,5 +178,110 @@ describe("move core with a second agent adapter", () => {
     assert.match(String((results[1] as PromiseRejectedResult).reason), /already started/);
     assert.match(String((results[2] as PromiseRejectedResult).reason), /was aborted/);
     await assert.rejects(host.handle({ type: "move_write", moveId: "move-race-2", offset: 0, data: "" } as MoveCommand), /not started or was aborted/);
+  });
+
+  describe("importSession throws after ownership is acquired", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+
+    function makeRepo(root: string): string {
+      const repo = join(root, "repo");
+      mkdirSync(repo);
+      git(repo, "init", "-q", "-b", "main");
+      writeFileSync(join(repo, "a.txt"), "one\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "base");
+      return repo;
+    }
+
+    /** Send `bundlePath` to the target host as one inbound move and commit it. */
+    async function commitBundle(host: MoveHost, bundlePath: string, sessionId: string, moveId: string): Promise<void> {
+      const data = readFileSync(bundlePath);
+      await host.handle({ type: "move_begin", moveId, sessionId, size: statSync(bundlePath).size, sha256: sha256File(bundlePath) } as MoveCommand);
+      await host.handle({ type: "move_write", moveId, offset: 0, data: data.toString("base64") } as MoveCommand);
+      await host.handle({ type: "move_commit", moveId } as MoveCommand);
+    }
+
+    it("Pi: ownership is released, the registry entry is restored and the destination is removed", async () => {
+      const root = mkdtempSync(join(tmpdir(), "move-adapter-"));
+      roots.push(root);
+      const repo = makeRepo(root);
+      const transcript = join(root, "session.jsonl");
+      writeFileSync(transcript, '{"type":"session"}\n');
+      const bundle = join(root, "bundle.tar");
+      createBundle({
+        cwd: repo,
+        outFile: bundle,
+        agent: { kind: "pi", version: PI_VERSION, extensions: {} },
+        session: { id: "session-pi-1", metadata: { cwdName: "ws" } },
+        ownership: { epoch: 3, from: "source-daemon", moveId: "move-pi-1" },
+        sessionFiles: [{ name: "session.jsonl", path: transcript }],
+      });
+
+      const targetDir = join(root, "target");
+      mkdirSync(targetDir);
+      class FailingRegistry extends SessionRegistry {
+        override async adopt(): Promise<never> {
+          throw new Error("adopt failed after acquire");
+        }
+      }
+      const registry = new FailingRegistry({ serverDir: targetDir });
+      const adapter = new PiMoveAdapter(registry, targetDir);
+      const host = new MoveHost(adapter, targetDir, join(targetDir, "moves"));
+
+      await assert.rejects(commitBundle(host, bundle, "session-pi-1", "move-pi-1"), /adopt failed after acquire/);
+      assert.equal(adapter.ownership.peek("session-pi-1"), undefined, "ownership was released");
+      assert.equal(registry.entry("session-pi-1"), undefined, "no registry entry is left");
+      assert.equal(existsSync(join(targetDir, "workspaces", "session-pi-1", "ws")), false, "the destination was removed");
+      assert.equal(existsSync(join(targetDir, "imported", "session-pi-1")), false, "the copied transcript was removed");
+      // The session can be moved in again afterwards.
+      adapter.assertCanImport("session-pi-1");
+    });
+
+    it("Codex: ownership is released, the rollout is removed and the destination is removed", async () => {
+      const root = mkdtempSync(join(tmpdir(), "move-adapter-"));
+      roots.push(root);
+      const repo = makeRepo(root);
+      const threadId = "0198a000-0000-7000-8000-000000000494";
+      const rolloutRelPath = `2026/10/17/rollout-2026-10-17T10-00-00-${threadId}.jsonl`;
+      const rollout = join(root, "rollout.jsonl");
+      copyFileSync(join(here, "fixtures", "codex-rollout.jsonl"), rollout);
+      const bundle = join(root, "bundle.tar");
+      createBundle({
+        cwd: repo,
+        outFile: bundle,
+        agent: { kind: "codex", version: "9.9.9", extensions: {} },
+        session: { id: threadId, metadata: { cwdName: "ws" } },
+        ownership: { epoch: 3, from: "source-daemon", moveId: "move-codex-1" },
+        sessionFiles: [{ name: rolloutRelPath.split("/").at(-1)!, path: rollout }],
+        stateFiles: [{ name: "codex-thread.json", content: JSON.stringify({ rolloutRelPath, originalCwd: "/original/workspace" }) }],
+      });
+
+      const targetDir = join(root, "target");
+      const home = join(root, "codex-home");
+      mkdirSync(targetDir);
+      mkdirSync(home);
+      const runtime = new CodexRuntime({ home, bin: "codex-not-run" });
+      runtime.version = () => "9.9.9";
+      const calls: string[] = [];
+      const app = {
+        call: async (method: string) => {
+          calls.push(method);
+          if (method === "thread/read") throw new Error("app-server cannot read the rollout");
+          return {};
+        },
+      };
+      runtime.ensureDaemon = async () => ({ status: "running", socketPath: "unused", cliVersion: "9.9.9" });
+      runtime.client = async () => app as never;
+      const adapter = new CodexMoveAdapter(runtime, targetDir);
+      const host = new MoveHost(adapter, targetDir, join(targetDir, "moves"));
+
+      await assert.rejects(commitBundle(host, bundle, threadId, "move-codex-1"), /app-server cannot read the rollout/);
+      assert.ok(calls.includes("thread/read"), "the failure happened after the rollout was written");
+      assert.equal(adapter.ownership.peek(threadId), undefined, "ownership was released");
+      assert.equal(runtime.rolloutPath(threadId), undefined, "the imported rollout was removed");
+      assert.ok(calls.includes("thread/delete"), "the app-server's row for the thread was dropped");
+      assert.equal(existsSync(join(targetDir, "workspaces", threadId, "ws")), false, "the destination was removed");
+      adapter.assertCanImport(threadId);
+    });
   });
 });

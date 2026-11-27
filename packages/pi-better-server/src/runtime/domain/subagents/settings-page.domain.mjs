@@ -1,0 +1,357 @@
+// Generated fixed launch domain from packages/pi-better-subagents/settings-page.ts. Do not edit directly.
+import * as Tui from "@earendil-works/pi-tui";
+import { isConcurrencyCap } from "./config.domain.mjs";
+import { DELEGATION_MODES } from "./delegation.domain.mjs";
+import { createSkillPicker } from "./skill-picker.domain.mjs";
+import { isTimingMinutes, validatedTimingMinutes } from "./timing.domain.mjs";
+const rows = [
+    { kind: "mode", label: "Delegation mode" },
+    { kind: "cap", label: "Concurrent subagents" },
+    { kind: "workspace", label: "Git workspace" },
+    { kind: "timeout", label: "Run timeout" },
+    { kind: "toolWait", label: "Tool-wait alert" },
+    { kind: "stuck", label: "No-progress alert" },
+    { kind: "skills", label: "Skill exposure" },
+    { kind: "choose", label: "Selected skills" },
+    { kind: "agents", label: "Agents" },
+    { kind: "reset", label: "Reset to defaults" },
+];
+const labelWidth = Math.max(...rows.map(({ label }) => Tui.visibleWidth(label)));
+const SKILL_MODES = [
+    { mode: "inherit", label: "Discover automatically" },
+    { mode: "none", label: "No skill catalog" },
+    { mode: "explicit", label: "Selected skills" },
+];
+const MAX_TIMEOUT = "24 hours";
+function parseRunTimeout(input) {
+    const text = input.trim();
+    if (["no limit", MAX_TIMEOUT].includes(text.toLowerCase()))
+        return 0;
+    const minutes = Number(text);
+    if (!text || !isTimingMinutes(minutes) || minutes > 1440) {
+        throw new Error("Enter 24 hours or a duration up to 1440 minutes.");
+    }
+    return minutes;
+}
+function skillLabel(mode) {
+    return SKILL_MODES.find((entry) => entry.mode === mode).label;
+}
+function cycleSkillMode(mode) {
+    return mode === "inherit" ? "none" : "inherit";
+}
+function skillSource(settings) {
+    if (settings.skillsSource === "session")
+        return "Source: this session (unsaved)";
+    if (settings.skillsSource === "config")
+        return "Source: config defaultSkills";
+    return "Source: discovery default";
+}
+function settingValue(kind, s) {
+    switch (kind) {
+        case "mode": return s.mode;
+        case "cap": return String(s.maxConcurrent);
+        case "workspace": return s.gitWorkspace === "worktree" ? "Worktree" : "Clone";
+        case "timeout": return s.maxMinutes === 0 || s.maxMinutes >= 1440 ? MAX_TIMEOUT : `${s.maxMinutes} min`;
+        case "toolWait": return s.toolWaitMinutes === 0 ? "Off" : `${s.toolWaitMinutes} min`;
+        case "stuck": return s.stuckMinutes === 0 ? "Off" : `${s.stuckMinutes} min`;
+        case "skills": return skillLabel(s.skillsMode);
+        case "choose": return s.skillsMode === "explicit" ? `${s.skillsPaths.length} checked` : "Choose…";
+        case "agents": return "Open";
+        case "reset": return "Restore";
+    }
+}
+function description(kind, s) {
+    switch (kind) {
+        case "mode": return {
+            manual: "Delegate when you ask or when the active workflow requires it.",
+            adaptive: "Delegate independent work when a suitable agent is available.",
+            coordinator: "Delegate work covered by an agent role. Keep coordination and verification in the foreground.",
+        }[s.mode];
+        case "cap": return "Set how many subagents can run at the same time.";
+        case "workspace": return s.gitWorkspace === "worktree"
+            ? "Create a linked worktree that shares the repository’s Git metadata."
+            : "Create a separate local clone for each isolated Git workspace.";
+        case "timeout": return "Stop a subagent when its run reaches this limit. The maximum is 24 hours.";
+        case "toolWait": return "Notify the parent when a tool call stays open this long. Enter 0 to turn this alert off.";
+        case "stuck": return "Notify the parent after this long without progress. Time spent waiting for a tool is excluded. Enter 0 to turn this alert off.";
+        case "skills": return "Choose how new subagents discover skills.\n" + skillSource(s);
+        case "choose": return "Choose the skills to load for new subagents.";
+        case "agents": return "Browse agent roles and edit their profiles in /agents.";
+        case "reset": return "Restore saved defaults for this session, including its workspace, limits, and skills.";
+    }
+}
+function primaryKey(action, excludeSpace = false) {
+    const key = Tui.getKeybindings().getKeys(action).find(key => !excludeSpace || key !== "space");
+    if (!key)
+        return undefined;
+    if (key === "escape")
+        return "Esc";
+    return key.split("+").map(part => part.length === 1 ? part : part[0].toUpperCase() + part.slice(1)).join("+");
+}
+function shortcuts(kind, editing) {
+    const cancel = primaryKey("tui.select.cancel");
+    const confirm = primaryKey(editing ? "tui.input.submit" : "tui.select.confirm", !editing);
+    const change = confirm ? `${confirm}/Space` : "Space";
+    const verb = kind === "agents" || kind === "choose" ? "open" : kind === "reset" ? "restore" : "change";
+    const actions = editing ? [confirm && `${confirm} to apply`]
+        : kind === "timeout" ? ["Space for 24 hours", confirm && `${confirm} to edit minutes`]
+            : [`${change} to ${verb}`];
+    if (!editing)
+        actions.push("Ctrl+S to save defaults");
+    if (cancel)
+        actions.push(`${cancel} to ${editing ? "cancel" : "go back"}`);
+    return actions.filter(Boolean).join(" · ");
+}
+export function createSubagentSettingsPage(theme, handlers, requestRender, close, getHeight = () => process.stdout.rows ?? 30) {
+    const input = new Tui.Input();
+    let focused = false;
+    let row = 0;
+    let editing;
+    let picker;
+    let rememberedSkillPaths;
+    let viewportStart = 0;
+    let message = "";
+    let error = false;
+    function report(text, failed = false) {
+        message = text;
+        error = failed;
+        requestRender();
+    }
+    function startEditing(target, value) {
+        editing = target;
+        input.setValue(value);
+        input.handleInput("\x05");
+        input.focused = focused;
+        report("");
+    }
+    function finishEditing(text) {
+        input.focused = false;
+        editing = undefined;
+        report(text);
+    }
+    function openSkillPicker(initial, previousMode) {
+        picker = createSkillPicker({
+            theme,
+            skills: handlers.discoverSkills?.() ?? [],
+            selected: initial,
+            requestRender,
+            getHeight,
+            title: "Selected skills",
+            apply(paths) {
+                try {
+                    if (paths.length === 0) {
+                        handlers.changeSkills("none", []);
+                        rememberedSkillPaths = [];
+                        report("No skills checked. Skill exposure set to No skill catalog.");
+                        return { ok: true, message: "No skill catalog selected." };
+                    }
+                    handlers.changeSkills("explicit", paths);
+                    rememberedSkillPaths = [...paths];
+                    report(`${paths.length} skill${paths.length === 1 ? "" : "s"} selected.`);
+                    return { ok: true, message: `${paths.length} selected.` };
+                }
+                catch (cause) {
+                    return { ok: false, message: cause instanceof Error ? cause.message : String(cause) };
+                }
+            },
+            finish() { picker = undefined; requestRender(); },
+            cancel() {
+                picker = undefined;
+                report(previousMode === "explicit" ? "Skill selection unchanged." : "Skill mode unchanged.");
+                requestRender();
+            },
+        });
+        picker.focused = focused;
+        requestRender();
+    }
+    function action(settings, selected, key) {
+        try {
+            if (selected.kind === "workspace") {
+                handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
+                report("Session workspace updated.");
+            }
+            else if (selected.kind === "mode") {
+                const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(settings.mode) + 1) % DELEGATION_MODES.length];
+                handlers.changeMode(next);
+                report("Session mode updated.");
+            }
+            else if (selected.kind === "cap") {
+                startEditing({ kind: "cap" }, String(settings.maxConcurrent));
+            }
+            else if (selected.kind === "toolWait") {
+                startEditing({ kind: "toolWait" }, String(settings.toolWaitMinutes));
+            }
+            else if (selected.kind === "stuck") {
+                startEditing({ kind: "stuck" }, String(settings.stuckMinutes));
+            }
+            else if (selected.kind === "timeout") {
+                if (key === " ") {
+                    handlers.changeTiming("maxMinutes", 0);
+                    report("Run timeout set to 24 hours.");
+                }
+                else {
+                    startEditing(selected, settings.maxMinutes === 0 || settings.maxMinutes >= 1440 ? MAX_TIMEOUT : String(settings.maxMinutes));
+                }
+            }
+            else if (selected.kind === "skills") {
+                if (settings.skillsMode === "explicit")
+                    rememberedSkillPaths = [...settings.skillsPaths];
+                const next = cycleSkillMode(settings.skillsMode);
+                handlers.changeSkills(next, []);
+                report(`Skill exposure: ${skillLabel(next).toLowerCase()}.`);
+            }
+            else if (selected.kind === "choose") {
+                openSkillPicker(settings.skillsMode === "explicit" ? settings.skillsPaths : rememberedSkillPaths ?? [], settings.skillsMode);
+                return;
+            }
+            else if (selected.kind === "agents") {
+                handlers.openAgents?.();
+            }
+            else {
+                handlers.reset();
+                rememberedSkillPaths = undefined;
+                report("Session settings reset to saved defaults.");
+            }
+        }
+        catch (cause) {
+            report(cause instanceof Error ? cause.message : String(cause), true);
+        }
+    }
+    const submit = (value) => {
+        const target = editing;
+        if (!target)
+            return;
+        if (target.kind === "cap") {
+            const cap = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
+            if (!isConcurrencyCap(cap)) {
+                report("Enter a positive whole number.", true);
+                return;
+            }
+            try {
+                handlers.changeCap(cap);
+                finishEditing("Session cap updated.");
+            }
+            catch (cause) {
+                report(cause instanceof Error ? cause.message : String(cause), true);
+            }
+            return;
+        }
+        const key = target.kind === "toolWait" ? "toolWaitMinutes"
+            : target.kind === "stuck" ? "stuckMinutes" : "maxMinutes";
+        try {
+            const minutes = target.kind === "timeout" ? parseRunTimeout(value) : validatedTimingMinutes(value.trim(), key);
+            handlers.changeTiming(key, minutes);
+            finishEditing(target.kind === "toolWait" ? "Tool-wait alert updated."
+                : target.kind === "stuck" ? "No-progress alert updated." : "Timeout updated.");
+        }
+        catch (cause) {
+            report(cause instanceof Error ? cause.message : String(cause), true);
+        }
+    };
+    input.onSubmit = submit;
+    input.onEscape = () => {
+        input.focused = false;
+        editing = undefined;
+        report("Edit cancelled.");
+    };
+    return {
+        get focused() { return focused; },
+        set focused(value) {
+            focused = value;
+            input.focused = editing !== undefined && value;
+            if (picker)
+                picker.focused = value;
+        },
+        invalidate() { input.invalidate(); picker?.invalidate(); },
+        handleInput(data) {
+            if (picker) {
+                picker.handleInput(data);
+                requestRender();
+                return;
+            }
+            const settings = handlers.get();
+            if (editing) {
+                input.handleInput(data);
+                requestRender();
+                return;
+            }
+            const selected = rows[row];
+            const keys = Tui.getKeybindings();
+            if (keys.matches(data, "tui.select.cancel"))
+                close();
+            else if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down")) {
+                row = Math.max(0, Math.min(rows.length - 1, row + (keys.matches(data, "tui.select.up") ? -1 : 1)));
+                message = "";
+            }
+            else if (keys.matches(data, "tui.select.confirm") || data === " ")
+                action(settings, selected, data);
+            else if (Tui.matchesKey(data, "ctrl+s")) {
+                const result = handlers.save();
+                if (result.ok) {
+                    rememberedSkillPaths = settings.skillsMode === "explicit" ? [...settings.skillsPaths] : undefined;
+                }
+                report(result.message, !result.ok);
+            }
+            requestRender();
+        },
+        render(width) {
+            if (picker)
+                return picker.render(width);
+            const settings = handlers.get();
+            const w = Math.max(1, Math.floor(width));
+            const height = Math.max(1, Math.floor(getHeight()));
+            const valueColumn = 2 + labelWidth + 2;
+            const body = [];
+            let selectedStart = 0;
+            let selectedEnd = 0;
+            for (const [index, entry] of rows.entries()) {
+                const active = index === row;
+                const value = settingValue(entry.kind, settings);
+                const stacked = valueColumn + Math.max(Tui.visibleWidth(value), editing?.kind === entry.kind ? 8 : 0) > w;
+                const column = stacked ? Math.min(4, Math.max(0, w - 1)) : valueColumn;
+                const valueText = editing?.kind === entry.kind
+                    ? input.render(Math.max(1, w - column))[0] ?? ""
+                    : active ? theme.inverse(value) : theme.fg("muted", value);
+                const label = (active ? "> " : "  ") + theme.fg(active ? "accent" : "text", entry.label);
+                if (active)
+                    selectedStart = body.length;
+                if (stacked) {
+                    const valueLines = Tui.wrapTextWithAnsi(valueText, Math.max(1, w - column));
+                    body.push(label, ...valueLines.map(line => " ".repeat(column) + line));
+                }
+                else {
+                    body.push(label + " ".repeat(valueColumn - Tui.visibleWidth(label)) + valueText);
+                }
+                if (active)
+                    selectedEnd = body.length;
+            }
+            const selected = rows[row].kind;
+            const hint = shortcuts(selected, editing !== undefined);
+            const wrap = (text, color) => Tui.wrapTextWithAnsi(text, Math.max(1, w - 2)).map(line => "  " + theme.fg(color, line));
+            const help = wrap(description(selected, settings), "text");
+            const feedback = [
+                ...(settings.timingError ? wrap(settings.timingError, "error") : []),
+                ...(settings.skillsError ? wrap(`Config error: ${settings.skillsError}`, "error") : []),
+                ...(message ? wrap(message, error ? "error" : "muted") : []),
+            ];
+            const title = theme.bold(theme.fg("text", "Subagent settings"));
+            const header = height >= 6 ? [title, ""] : [];
+            // Reserve space for the focused control and validation before its help or shortcuts.
+            const footerRoom = Math.max(0, height - header.length - (selectedEnd - selectedStart));
+            const status = feedback.slice(0, footerRoom);
+            const hints = wrap(hint, "dim");
+            const footer = [...help, "", ...hints];
+            const budget = footerRoom - status.length;
+            const visibleHelp = footer.length + 1 <= budget ? ["", ...footer]
+                : editing ? hints.slice(0, budget) : help.slice(0, Math.min(budget, 2));
+            const room = Math.max(1, height - header.length - visibleHelp.length - status.length);
+            viewportStart = Math.max(0, Math.min(viewportStart, body.length - room));
+            if (selectedEnd > viewportStart + room)
+                viewportStart = selectedEnd - room;
+            if (selectedStart < viewportStart)
+                viewportStart = selectedStart;
+            return [...header, ...body.slice(viewportStart, viewportStart + room), ...visibleHelp, ...status]
+                .map(line => Tui.truncateToWidth(line, w, ""));
+        },
+    };
+}

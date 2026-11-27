@@ -27,6 +27,12 @@ process.env.PI_SUBAGENTS_TEST_ISOLATED_TMPDIR = isolated;
 process.env.TMPDIR = isolated;
 process.env.TMP = isolated;
 process.env.TEMP = isolated;
+// Durable subagent state (native sessions and compact attempt records) lives in
+// the Pi agent directory, not TMPDIR. Point both at this private root so no test
+// reads or writes the machine's real `~/.pi/agent/subagents`. Tests that need
+// their own layout override these after this preload runs.
+process.env.PI_CODING_AGENT_DIR = join(isolated, "agent");
+process.env.PI_SUBAGENT_DURABLE_DIR = join(isolated, "durable-subagents");
 
 process.on("exit", () => {
     // Only the process that created the directory removes it; children that

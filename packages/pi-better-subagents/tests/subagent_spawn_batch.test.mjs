@@ -141,6 +141,33 @@ describe("mergeJobOptions", () => {
     });
 });
 
+describe("continuation jobs in a batch", () => {
+    it("keeps session_id per job and never inherits it from shared", () => {
+        const merged = mergeJobOptions({ model: "shared/model" }, { prompt: "x", session_id: "sa_conv" });
+        assert.equal(merged.session_id, "sa_conv");
+        assert.equal(merged.model, "shared/model", "a continuation job still inherits other shared defaults");
+
+        assert.equal(mergeJobOptions({}, { prompt: "x" }).session_id, undefined);
+        assert.equal(
+            mergeJobOptions({ session_id: "sa_shared_conv" }, { prompt: "x" }).session_id,
+            undefined,
+            "shared.session_id is never copied onto a job: one shared conversation would serialize the whole batch",
+        );
+    });
+
+    it("ignores blank selectors while preserving a supplied name or id", () => {
+        const jobs = [{ prompt: "by name", session_id: "   ", session_name: "saved name" },
+            { prompt: "by id", session_id: "sa_saved", session_name: "" }];
+        assert.doesNotThrow(() => validateBatchPlan({ jobs }));
+        assert.equal(mergeJobOptions({}, jobs[0]).session_id, undefined);
+        assert.equal(mergeJobOptions({}, jobs[0]).session_name, "saved name");
+        assert.equal(mergeJobOptions({}, jobs[1]).session_id, "sa_saved");
+        assert.equal(mergeJobOptions({}, jobs[1]).session_name, undefined);
+        assert.throws(() => validateBatchPlan({ jobs: [{ ...jobs[0], session_id: "sa_saved" }] }),
+            /pass either session_id or session_name/);
+    });
+});
+
 describe("validateBatchPlan", () => {
     it("accepts a valid one-job batch", () => {
         assert.doesNotThrow(() =>

@@ -176,17 +176,61 @@ describe("pi-remote attach (tmux companion on a real daemon)", { skip: haveTmux 
     await waitFor("lease release", async () => !(await summary()).hasController);
     stopped.close();
 
+    // Another client holds the lease: attach fails clearly instead of attaching to a companion that cannot take control.
+    const holder = await Client.connect(socketPath);
+    assert.equal((await holder.request({ type: "acquire_control", sessionId })).success, true);
+    const refused = await runCli(["attach", "att", "--no-attach", "--json"]);
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /controller lease/);
+    await waitFor("dead companion to be gone", () => tmux("list-sessions", "-F", "#{session_name}").trim() === "");
+    holder.close();
+    await waitFor("holder's lease release", async () => !(await summary()).hasController);
+
     // Raise a dialog with no controller at all.
     const steered = await runCli(["steer", "att", "ask while nobody is here?"]);
     assert.equal(steered.code, 0, steered.stderr);
     await waitFor("dialog pending", async () => (await summary()).needsInput.length === 1);
 
-    const out = await runCli(["attach", "att", "--no-attach", "--json"]);
-    assert.equal(JSON.parse(out.stdout).created, true);
+    // Cold start: with no companion yet, two racing requests share one start through the inFlight map.
+    const [a, b] = await Promise.all([runCli(["attach", "att", "--no-attach", "--json"]), runCli(["attach", "att", "--no-attach", "--json"])]);
+    assert.equal(a.code, 0, a.stderr);
+    assert.equal(b.code, 0, b.stderr);
+    assert.deepEqual([JSON.parse(a.stdout).created, JSON.parse(b.stdout).created].sort(), [true, true], "both callers share the one start");
+    assert.equal(tmux("list-sessions", "-F", "#{session_name}").split("\n").filter(Boolean).length, 1);
     await waitFor("pane to replay old output", () => pane().includes("echo:typed hello"));
     await waitFor("pending dialog in the pane", () => pane().includes("? ask while nobody is here?") || pane().includes("while nobody is here?"));
     type("late answer");
     await waitFor("dialog answered from the new terminal", () => llmCalls(env).some((c) => c.messages.some((m) => m.role === "toolResult" && m.text === "answer:late answer")));
+  });
+
+  it("a move stops the running companion before the fence, so the lease is free", async () => {
+    assert.equal((await summary()).hasController, true);
+    const client = await Client.connect(socketPath);
+    const fenced = await client.request({ type: "move_fence", sessionId, moveId: "move-fence-attach" });
+    assert.equal(fenced.success, true, fenced.error);
+    assert.equal(tmux("list-sessions", "-F", "#{session_name}").trim(), "", "the companion terminal is gone");
+    await waitFor("lease release", async () => !(await summary()).hasController);
+    assert.equal((await client.request({ type: "move_unfence", sessionId, moveId: "move-fence-attach" })).success, true);
+    client.close();
+  });
+
+  it("a companion started while the fence waits for a turn is stopped when the fence is taken", async () => {
+    const client = await Client.connect(socketPath);
+    await client.request({ type: "stop_companion", sessionId });
+    await waitFor("lease release", async () => !(await summary()).hasController);
+    assert.equal((await client.request({ type: "prompt", sessionId, message: "tool g2" })).success, true);
+    await waitFor("gate g2", () => gate(env, "g2").started());
+    const fencing = client.request({ type: "move_fence", sessionId, moveId: "move-fence-wait" });
+    const started = await client.request({ type: "start_companion", sessionId });
+    assert.equal(started.success, true, started.error);
+    assert.equal((await summary()).hasController, true, "the late companion holds the lease during the wait");
+    gate(env, "g2").release();
+    const fenced = await fencing;
+    assert.equal(fenced.success, true, fenced.error);
+    assert.equal(tmux("list-sessions", "-F", "#{session_name}").trim(), "", "the late companion is gone");
+    assert.equal((await summary()).hasController, false);
+    assert.equal((await client.request({ type: "move_unfence", sessionId, moveId: "move-fence-wait" })).success, true);
+    client.close();
   });
 
   it("closing the session removes its companion", async () => {

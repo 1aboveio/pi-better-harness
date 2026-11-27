@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import harnessSettings from "../packages/pi-better-harness/extensions/settings/index.ts";
-import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import backgroundTasks from "../packages/pi-better-background-tasks/src/index.ts";
+import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const isolatedAgentDir = mkdtempSync(join(tmpdir(), "harness-settings-tests-"));
@@ -28,7 +29,7 @@ const theme = { fg: (_key, text) => text, bold: text => text, inverse: text => t
 test("settings discovery supports both load orders, deduplicates and removes conflicts", async () => {
   const pi = eventApi();
   let opened = 0;
-  const link = { id: "goal", label: "Goal", command: "/goal settings", open: async () => { opened++; } };
+  const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open: async () => { opened++; } };
   pi.bus.emit("harness-settings:register", link);
   pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
   const registry = createSettingsRegistry(pi);
@@ -61,11 +62,87 @@ test("native settings list selects package links without opening or changing the
   let page;
   let opened = false;
   const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
-  const selected = chooseHarnessSetting(ctx, [{ id: "goal", label: "Goal", command: "/goal settings", open() { opened = true; } }], "link:goal");
-  assert.match(page.render(80).join("\n"), /Goal.*\/goal settings/);
+  const selected = chooseHarnessSetting(ctx, [{ id: "sandbox", label: "Sandbox", command: "/sandbox", open() { opened = true; } }], "link:sandbox");
+  assert.match(page.render(80).join("\n"), /Sandbox settings\s+Open/);
+  assert.match(page.render(80).join("\n"), /You can also run \/sandbox/);
   page.handleInput("\r");
-  assert.equal(await selected, "link:goal");
+  assert.equal(await selected, "link:sandbox");
   assert.equal(opened, false);
+});
+
+test("Background contributes the review interval and the native selector saves it", async () => {
+  const pi = { ...eventApi(), on() {}, registerTool() {} };
+  const registry = createSettingsRegistry(pi);
+  backgroundTasks(pi);
+  registry.refresh();
+  const control = registry.controls().find(item => item.id === "background-review-interval");
+  assert.ok(control);
+  let page;
+  const ctx = { ui: { custom(build) {
+    return new Promise(resolve => { page = build({}, theme, {}, resolve); });
+  } } };
+  const opened = chooseHarnessSetting(ctx, [], undefined, undefined, [control]);
+  assert.match(page.render(100).join("\n"), /Background wait reviews\s+10 minutes/);
+  page.handleInput("\r");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(page.render(100).join("\n"), /Background wait reviews\s+15 minutes/);
+  assert.equal(JSON.parse(readFileSync(join(isolatedAgentDir, "settings.json"), "utf8")).piBetterHarness.backgroundReviewIntervalMinutes, 15);
+  page.handleInput("\x1b");
+  await opened;
+  registry.dispose();
+});
+
+test("the selected setting explains its effect at narrow and wide terminal widths", async () => {
+  let page;
+  const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
+  const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"], get: () => "flatten", change() {} };
+  const links = [{ id: "subagents", label: "Subagents", command: "/subagents settings", open() {} }];
+  const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
+  const opening = chooseHarnessSetting(ctx, links, "callbacks:while-busy", callbacks, [], view);
+  for (const width of [48, 100]) {
+    const lines = page.render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    const text = lines.join(" ");
+    assert.match(text, /Completion delivery\s+When idle/);
+    assert.match(text, /Ctrl\+S saves\s+your default/);
+    assert.doesNotMatch(text, /Tree groups related work/);
+  }
+  page.handleInput("\x1b[B");
+  const layout = page.render(48).join(" ");
+  assert.match(layout, /Navigator layout\s+Flat list/);
+  assert.match(layout, /Tree nests tasks under their\s+agent/);
+  assert.doesNotMatch(layout, /Ctrl\+S/);
+  page.handleInput("\x1b[B");
+  assert.match(page.render(100).join("\n"), /Subagent settings\s+Open/);
+  assert.match(page.render(100).join("\n"), /You can also run \/subagents settings/);
+  page.handleInput("\x1b");
+  await opening;
+});
+
+test("keyboard order groups controls with their package pages and keeps third-party contributions reachable", async () => {
+  const controls = ["tool-animation", "extra-control", "background-review-interval",
+    "goal-auto-start", "tool-output", "navigator-sticky", "outcome-todo-ledger", "tool-call-guard", "navigator-view"]
+    .map(id => ({ id, label: id, values: ["Off", "On"], get: () => "Off", change() {} }));
+  const links = ["agents", "extra-page", "sandbox", "subagents"]
+    .map(id => ({ id, label: id, command: `/${id}`, open() {} }));
+  const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
+  let page;
+  const opening = chooseHarnessSetting({ ui: { custom: build => new Promise(resolve => {
+    page = build({}, theme, {}, resolve);
+  }) } }, links, undefined, callbacks, controls);
+  const expected = [
+    "Auto-start Goals", "Project work ledger",
+    "Subagent settings", "Agent catalog", "Sandbox settings",
+    "Foreground wait guard", "Background wait reviews", "Completion delivery",
+    "Navigator layout", "Pin work panels", "tool-output", "Tool progress animation",
+    "extra-control", "extra-page",
+  ];
+  for (const label of expected) {
+    assert.ok(page.render(80).some(line => line.startsWith(`> ${label}  `)), label);
+    page.handleInput("\x1b[B");
+  }
+  page.handleInput("\x1b");
+  await opening;
 });
 
 test("selection restoration preserves ordering and rebound native navigation", async () => {
@@ -75,15 +152,15 @@ test("selection restoration preserves ordering and rebound native navigation", a
   try {
     let page;
     const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
-    const links = ["goal", "sandbox", "subagents"].map(id => ({ id, label: id, command: `/${id} settings`, open() {} }));
+    const links = ["sandbox", "subagents"].map(id => ({ id, label: id, command: `/${id} settings`, open() {} }));
     const chosen = chooseHarnessSetting(ctx, links, "link:subagents");
     assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
     const lines = page.render(80).join("\n");
-    assert.match(lines, /> subagents/);
-    assert.ok(lines.indexOf("goal") < lines.indexOf("sandbox") && lines.indexOf("sandbox") < lines.indexOf("subagents"));
-    page.handleInput("k");
-    assert.match(page.render(80).join("\n"), /> sandbox/);
+    assert.match(lines, /> Subagent settings/);
+    assert.ok(lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
     page.handleInput("j");
+    assert.match(page.render(80).join("\n"), /> Sandbox settings/);
+    page.handleInput("k");
     page.handleInput("\r");
     assert.equal(await chosen, "link:subagents");
   } finally { setKeybindings(original); }
@@ -101,11 +178,11 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Sandbox settings/); page.handleInput("\r"); }
       else page.handleInput("\x1b");
     });
   } } };
-  const link = { id: "goal", label: "Goal", command: "/goal settings", open(current) { assert.equal(current, ctx); opened++; throw new Error("Synthetic opener failure"); } };
+  const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open(current) { assert.equal(current, ctx); opened++; throw new Error("Synthetic opener failure"); } };
   pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
   harnessSettings(pi);
   handlers.get("session_start")({}, ctx);
@@ -129,7 +206,7 @@ test("hub offers callback settings without package contributions and rejects non
     pages++;
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      assert.match(page.render(80).join("\n"), /Completions while busy/);
+      assert.match(page.render(80).join("\n"), /Completion delivery/);
       page.handleInput("\x1b");
     });
   } };
@@ -157,9 +234,9 @@ test("hub autosaves callback changes in the session and saves the future default
         return new Promise(resolve => { page = build({}, theme, {}, resolve); });
       } } };
     const opening = command("", ctx);
-    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
     page.handleInput("\r");
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     assert.equal(pi.entries.length, 1);
     assert.equal(existsSync(path), false, "session autosave must not alter future defaults");
     page.handleInput("\x13");
@@ -168,16 +245,16 @@ test("hub autosaves callback changes in the session and saves the future default
     page.handleInput("\x1b");
     await opening;
     const reopening = command("", ctx);
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     page.handleInput("\r");
-    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
     const savedDefault = readFileSync(path, "utf8");
     assert.equal(pi.entries.length, 2);
     page.handleInput("\x1b");
     await reopening;
     assert.equal(readFileSync(path, "utf8"), savedDefault, "later session edits leave the saved default alone");
     const newSession = command("", { ...ctx, sessionManager: { getBranch: () => [] } });
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     page.handleInput("\x1b");
     await newSession;
     assert.deepEqual(notifications, []);
@@ -198,8 +275,8 @@ test("callback control rolls back a failed session save and reports a failed def
     save() { throw new Error("Default write unavailable"); },
   });
   page.handleInput("\r");
-  assert.match(page.render(80).join("\n"), /Wait until idle/);
-  assert.doesNotMatch(page.render(80).join("\n"), /Steer active run/);
+  assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
+  assert.doesNotMatch(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
   assert.match(page.render(80).join("\n"), /Session write unavailable/);
   page.handleInput("\x13");
   assert.match(page.render(80).join("\n"), /Default write unavailable/);
@@ -221,7 +298,7 @@ test("an invalid callback default reports once, leaves package settings usable, 
     let pages = 0;
     pi.on = () => {};
     pi.registerCommand = (_name, options) => { command = options.handler; };
-    const link = { id: "goal", label: "Goal", command: "/goal settings", open() { opened++; } };
+    const link = { id: "sandbox", label: "Sandbox", command: "/sandbox", open() { opened++; } };
     pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
     harnessSettings(pi);
     const notifications = [];
@@ -229,8 +306,8 @@ test("an invalid callback default reports once, leaves package settings usable, 
       ui: { notify: (...args) => notifications.push(args), custom(build) {
         return new Promise(resolve => {
           const page = build({}, theme, {}, resolve);
-          assert.match(page.render(80).join("\n"), /Wait until idle/);
-          if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+          assert.match(page.render(80).join("\n"), /^[ >]+Completion delivery\s+When idle/m);
+          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Sandbox settings/); page.handleInput("\r"); }
           else {
             if (pages === 2) {
               page.handleInput("\x13");
@@ -251,4 +328,66 @@ test("an invalid callback default reports once, leaves package settings usable, 
     else process.env.PI_CODING_AGENT_DIR = previous;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function selectRow(page, label) {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    if (page.render(80).some(line => line.trimStart().startsWith(`> ${label} `))) {
+      page.handleInput("\r");
+      return;
+    }
+    page.handleInput("\x1b[B");
+  }
+  assert.fail(`Could not select ${label}`);
+}
+
+test("Harness instructions start Off, allow editing while On, and keep the draft across toggles", async () => {
+  const path = join(isolatedAgentDir, "APPEND_SYSTEM.md");
+  const original = "<!-- another plugin -->\nExisting instructions";
+  writeFileSync(path, original);
+  const pi = eventApi();
+  let command;
+  pi.on = () => {};
+  pi.registerCommand = (_name, options) => { command = options.handler; };
+  harnessSettings(pi);
+
+  const customPrompt = "Use project conventions.\nCheck the tests.";
+  const edits = [undefined, customPrompt];
+  const pages = [
+    page => {
+      assert.match(page.render(80).join("\n"), /Harness instructions\s+Off/);
+      assert.doesNotMatch(page.render(80).join("\n"), /Instructions prompt/);
+      selectRow(page, "Harness instructions");
+    },
+    page => selectRow(page, "Instructions prompt"),
+    page => {
+      assert.ok(!readFileSync(path, "utf8").includes(customPrompt));
+      selectRow(page, "Instructions prompt");
+    },
+    page => {
+      assert.ok(readFileSync(path, "utf8").includes(customPrompt));
+      selectRow(page, "Harness instructions");
+    },
+    page => {
+      assert.equal(readFileSync(path, "utf8"), original);
+      selectRow(page, "Harness instructions");
+    },
+    page => {
+      assert.ok(readFileSync(path, "utf8").includes(customPrompt));
+      assert.match(page.render(80).join("\n"), /Harness instructions\s+On/);
+      page.handleInput("\x1b");
+    },
+  ];
+  const errors = [];
+  await command("", { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: {
+    notify: message => errors.push(message),
+    editor: async (_title, value) => {
+      assert.match(value, /Harness defaults/);
+      return edits.shift();
+    },
+    custom: build => new Promise(resolve => pages.shift()(build({}, theme, {}, resolve))),
+  } });
+  assert.deepEqual(errors, []);
+  assert.equal(pages.length, 0);
+  assert.equal(edits.length, 0);
 });

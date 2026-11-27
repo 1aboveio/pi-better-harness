@@ -1,5 +1,7 @@
 # Trusted Pi runtime and confined task execution
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Accepted. Supersedes the whole-child startup boundary in ADR 0005. Implementation verification is tracked with this change.

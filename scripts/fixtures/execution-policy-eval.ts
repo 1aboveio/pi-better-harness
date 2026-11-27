@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { appendExecutionPolicy } from "../../packages/pi-better-harness/extensions/execution-policy.ts";
+import { EXECUTION_POLICY_SECTION, publishExecutionPolicy } from "../../packages/pi-better-harness/extensions/execution-policy.ts";
 import { delegationPrompt } from "../../packages/pi-better-subagents/delegation.ts";
 
 /** Remote-operation simulator for evaluating model scheduling, never a shell executor. */
@@ -10,8 +10,11 @@ export default function evaluationTools(pi: ExtensionAPI): void {
   if (!trace) throw new Error("PI_EXECUTION_EVAL_TRACE is required");
   const scenario = process.env.PI_EXECUTION_EVAL_SCENARIO;
   const record = (event: Record<string, unknown>) => appendFileSync(trace, `${JSON.stringify(event)}\n`);
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${appendExecutionPolicy(event.systemPrompt)}\n\n${delegationPrompt("manual")}`,
+  // A fake prompt string is the whole point of this fixture, so it reads the
+  // section value back out rather than asking the publishing API for text.
+  const policy = publishExecutionPolicy({ sections: {} as Record<string, string> }).sections[EXECUTION_POLICY_SECTION];
+  pi.on("before_agent_start", () => ({
+    systemPrompt: `${policy}\n\n${delegationPrompt("manual")}`,
   }));
   pi.registerTool({
     name: "bg_task_spawn", label: "Simulated Background Launch",

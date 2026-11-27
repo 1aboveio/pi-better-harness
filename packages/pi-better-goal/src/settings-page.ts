@@ -6,6 +6,7 @@ const rows: { key: keyof GoalPreferences; label: string }[] = [
   { key: "autoContinue", label: "Automatic continuation" },
   { key: "conversationalResume", label: "Conversational resume" },
   { key: "pauseOnEscape", label: "Pause on Esc" },
+  { key: "autoStartFromOutcome", label: "Auto-start Goals" },
 ];
 
 export function createGoalSettingsPage(
@@ -47,7 +48,7 @@ export function createGoalSettingsPage(
     render(width: number) {
       const w = Math.max(1, Math.floor(width));
       const preferences = handlers.get();
-      const lines = [theme.fg("accent", theme.bold("  Goal settings")), ""];
+      const lines = [theme.fg("accent", theme.bold("  Goal execution settings")), ""];
       rows.forEach(({ key, label }, index) => {
         const selected = row === index;
         const title = theme.fg(selected ? "accent" : "text", (selected ? "> " : "  ") + label);

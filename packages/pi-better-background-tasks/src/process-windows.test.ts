@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdtempSync, readFileSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -6,8 +6,11 @@ import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bashSingleQuote,
+  commandExecution,
   resolveDefaultShell,
+  resolveWindowsLaunchShell,
   spawnCommand,
+  stepGateScript,
   stopProcessGroup,
   toMsysPath,
   withWindowsLogRedirect,
@@ -17,6 +20,7 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    accessSync: vi.fn(actual.accessSync),
     closeSync: vi.fn(actual.closeSync),
     existsSync: vi.fn(),
     writeSync: vi.fn(actual.writeSync),
@@ -106,12 +110,30 @@ describe("withWindowsLogRedirect", () => {
     expect(result.env).toEqual({ A: "1" });
   });
 
+  it("keeps the step gate's script and command variable after the redirect (#619)", () => {
+    const script = stepGateScript("bg_win_1");
+    const result = withWindowsLogRedirect(
+      { shell: true, command: script, cwd: "C:\\work", env: { PI_BG_STEP_GATE_COMMAND: "false; echo summary ok" } },
+      "C:\\Temp\\log.log",
+    );
+
+    // The redirect stays first, the gate script follows verbatim, and the operator's
+    // command keeps travelling in its own variable instead of being rewritten.
+    const command = result.command ?? "";
+    expect(command).toBe(`exec >> '/c/Temp/log.log' 2>&1\n${script}`);
+    expect(command.indexOf("set -e")).toBeGreaterThan(command.indexOf("exec >> "));
+    expect(result.env).toEqual({ PI_BG_STEP_GATE_COMMAND: "false; echo summary ok" });
+  });
+
   it("pins the argv trampoline shape: redirect, MSYS2 exclusion, verbatim exec", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "C:\\Git\\bin\\bash.exe");
     const result = withWindowsLogRedirect(
       { shell: false, argv: ["cmd.exe", "/c", "echo", "ok"], cwd: "C:\\work", env: { A: "1" } },
       "C:\\Temp\\log.log",
     );
     expect(result.shell).toBe(true);
+    expect(result.loginShell).toBe(false);
+    expect(commandExecution(result).execArgs[0]).toBe("-c");
     expect(result.cwd).toBe("C:\\work");
     expect(result.env).toEqual({ A: "1" });
     expect(result.command).toBe(
@@ -144,6 +166,31 @@ describe("withWindowsLogRedirect", () => {
 });
 
 describe("resolveDefaultShell", () => {
+  it("uses effective Pi shellPath before the legacy file and standard Windows candidates", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
+    fakePlatform("win32");
+    const api = { getSettings: () => ({ shellPath: "D:/Custom Git/bin/bash.exe" }) };
+    vi.mocked(accessSync).mockImplementationOnce(() => {});
+    expect(resolveWindowsLaunchShell(api)).toBe("D:/Custom Git/bin/bash.exe");
+    expect(accessSync).toHaveBeenCalledWith("D:/Custom Git/bin/bash.exe", constants.F_OK);
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "E:/override/bash.exe");
+    expect(resolveWindowsLaunchShell(api)).toBe("E:/override/bash.exe");
+  });
+
+  it("reads shellPath from agent settings on a Pi host without getSettings", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
+    fakePlatform("win32");
+    const agentDir = mkdtempSync(join(tmpdir(), "background-shell-settings-"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    try {
+      writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ shellPath: "C:/Git/bin/bash.exe" }));
+      vi.mocked(accessSync).mockImplementationOnce(() => {});
+      expect(resolveWindowsLaunchShell({})).toBe("C:/Git/bin/bash.exe");
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("prefers the PI_BETTER_BACKGROUND_TASKS_SHELL override on any platform", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "D:\\custom\\bash.exe");
     fakePlatform("win32");
@@ -161,11 +208,11 @@ describe("resolveDefaultShell", () => {
     expect(mockExists).not.toHaveBeenCalled();
   });
 
-  it("prefers the first existing Git for Windows candidate", () => {
+  it("uses the first existing Git for Windows candidate when shellPath is unavailable", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     fakePlatform("win32");
     mockExists.mockImplementation((p) => norm(String(p)) === norm("C:\\Program Files\\Git\\bin\\bash.exe"));
-    expect(resolveDefaultShell()).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
+    expect(resolveDefaultShell("Z:/missing/bash.exe")).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
   });
 
   it("prefers an earlier Git candidate over a later one", () => {
@@ -211,12 +258,14 @@ describe("resolveDefaultShell", () => {
     expect(norm(resolveDefaultShell())).toBe(norm("C:\\Program Files\\system32-tools\\bin\\bash.exe"));
   });
 
-  it("falls back to /bin/bash when nothing usable exists, so the failure is a logged spawn error", () => {
+  it("reports the unusable configured and Windows search paths when no shell exists", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     vi.stubEnv("PATH", "C:\\nowhere");
     fakePlatform("win32");
     mockExists.mockReturnValue(false);
-    expect(resolveDefaultShell()).toBe("/bin/bash");
+    expect(() => resolveDefaultShell("Z:/missing/bash.exe")).toThrow(
+      /shellPath.*PI_BETTER_BACKGROUND_TASKS_SHELL[\s\S]*Z:\/missing\/bash\.exe[\s\S]*C:\\Program Files\\Git\\bin\\bash\.exe[\s\S]*C:\\nowhere\\bash\.exe/,
+    );
   });
 });
 

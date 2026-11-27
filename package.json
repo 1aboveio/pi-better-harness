@@ -20,12 +20,17 @@
       "./packages/pi-better-background-tasks/src/index.ts",
       "./packages/pi-better-ssh/src/index.ts",
       "./packages/pi-better-goal/src/index.ts",
-      "./packages/pi-better-plan/src/index.ts",
+      "./packages/pi-better-harness/extensions/task-context/index.ts",
+      "./packages/pi-better-harness/extensions/project-context/index.ts",
       "./packages/pi-better-harness/extensions/minimal-output/index.ts",
+      "./packages/pi-better-harness/extensions/recap/index.ts",
+      "./packages/pi-better-harness/extensions/supervisor/index.ts",
       "./packages/pi-better-harness/extensions/settings/index.ts"
     ]
   },
   "scripts": {
+    "postinstall": "node scripts/sync-runtime-client.mjs",
+    "catalog:check": "node --import tsx scripts/check-agent-catalog.mjs",
     "sync:shared-log-utils": "node scripts/sync-shared-log-utils.mjs",
     "sync:shared-ssh-core": "node scripts/sync-shared-ssh-core.mjs",
     "sync:shared-sandbox-core": "node scripts/sync-shared-sandbox-core.mjs",
@@ -33,14 +38,15 @@
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "gallery:check": "node --import tsx scripts/render-package-gallery.mjs --check",
-    "test:tui-e2e": "node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/navigator-detail.tui.e2e.test.mjs scripts/plan-navigation.tui.e2e.test.mjs scripts/goal-pause.tui.e2e.test.mjs",
+    "test:tui-e2e": "node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/navigator-detail.tui.e2e.test.mjs scripts/plan-navigation.tui.e2e.test.mjs scripts/goal-pause.tui.e2e.test.mjs",
     "test:golden:sandbox": "npm run sync:shared-sandbox-core && npm run sync:task-sandbox && node scripts/run-sandbox-golden.mjs",
     "test:live-ssh": "PI_LIVE_SSH_REQUIRED=1 node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern \"live SSH\" scripts/reload-ssh-durability.e2e.test.mjs",
     "test:golden:navigator": "PI_NAVIGATOR_REQUIRE_TMUX=1 node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/navigator-detail.tui.e2e.test.mjs",
+    "test:performance": "node --import tsx scripts/performance/assignment-projection-stress.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/*.test.mjs && npm run test --workspaces --if-present",
     "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",
-    "verify": "npm run typecheck && npm test"
+    "verify": "npm run catalog:check && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -53,6 +59,7 @@
     "@earendil-works/pi-coding-agent": "^0.82.0",
     "@earendil-works/pi-tui": "^0.82.0",
     "@types/node": "^25.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "tsx": "^4.22.3",
     "typebox": "^1.1.39",
     "typescript": "^6.0.0",

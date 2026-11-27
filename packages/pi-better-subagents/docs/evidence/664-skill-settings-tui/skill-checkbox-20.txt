@@ -1,0 +1,15 @@
+# Checkbox picker · discovered skills and checked saved paths
+# width: 20
+
+  Selected skills
+  Up/Down Move · Spa
+
+  Search >          
+> [x] better-review 
+    Review the chang
+  [x] test-quality
+    Write tests that
+  ✓ Apply selection 
+  + Add skill path…
+  2 checked
+  0 checked applies 

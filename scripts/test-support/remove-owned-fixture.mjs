@@ -1,0 +1,48 @@
+import { chmodSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import assert from "node:assert/strict";
+import { inspectDaemonOwner } from "../../packages/pi-better-server/src/daemon-owner.ts";
+
+export async function prepareOwnedRuntime(agentDir) {
+  // Fixture setup owns the canonical build prerequisite, once per test process.
+  await import("../sync-runtime-client.mjs");
+  // Cleanup-only entry points do not require the generated standalone client.
+  const { ensureRuntime } = await import("../../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs");
+  await ensureRuntime({ agentDir });
+  const owner = inspectDaemonOwner(join(agentDir, "server"));
+  assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+  return owner.owner;
+}
+
+/** The caller captures the daemon identity when its private runtime becomes ready. */
+export async function stopOwnedRuntime(serverDir, expectedOwner) {
+  const owner = inspectDaemonOwner(serverDir);
+  if (owner.status === "missing" || owner.status === "dead") return;
+  assert.equal(owner.status, "live", "fixture runtime ownership must be known before cleanup");
+  assert.deepEqual(owner.owner, expectedOwner, "cleanup must not stop a replacement runtime");
+  try { process.kill(owner.owner.pid, "SIGTERM"); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const current = inspectDaemonOwner(serverDir);
+    if (current.status === "missing" || current.status === "dead") return;
+    // Release unlinks the token before removing its directory. An ambiguous
+    // observation is not exit proof; wait within the existing deadline.
+    if (current.status !== "ambiguous") assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
+    assert.ok(Date.now() < deadline, `fixture runtime ${owner.owner.pid} did not stop`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
+/** Only for a fixture created by this test, after its processes have stopped. */
+export function removeOwnedFixture(root) {
+  function unsealDirectories(directory) {
+    chmodSync(directory, 0o700);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) unsealDirectories(join(directory, entry.name));
+    }
+  }
+  // File modes and symlink targets are never changed, including sealed artifacts.
+  unsealDirectories(root);
+  rmSync(root, { recursive: true, force: true });
+}

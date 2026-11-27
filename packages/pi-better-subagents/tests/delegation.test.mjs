@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,32 +6,64 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { register } from "node:module";
 import { getSharedCapacityGate, _resetSharedCapacityGateForTests } from "../capacity.mjs";
+import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+
+const agentDir = mkdtempSync(join(tmpdir(), "delegation-runtime-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+const foregrounds = [];
+
+after(async () => {
+    const serverDir = join(agentDir, "server");
+    const owner = inspectDaemonOwner(serverDir);
+    for (const foreground of foregrounds) {
+        await foreground.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "shutdown" }, foreground.context());
+    }
+    await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+    removeOwnedFixture(agentDir);
+});
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
 const { setConfigForTests, setConfigPathForTests, loadConfig, writeSubagentSettings, normalizeConcurrencyCap } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
+const { resolveRunTiming, TIMING_ENV } = await import("../timing.ts");
 
-function harness() {
+function harness(options = {}) {
+    let startedContext;
     const handlers = new Map();
     const commands = new Map();
     const tools = new Map();
     const notifications = [];
-    const entries = [];
+    const entries = options.entries ?? [];
     const events = new EventEmitter();
     extension({
         events,
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         registerTool(tool) { tools.set(tool.name, tool); },
         registerCommand(name, command) { commands.set(name, command); },
-        on(name, handler) { handlers.set(name, handler); },
-    });
+        on(name, handler) {
+            handlers.set(name, name === "session_start" ? (event, ctx) => {
+                startedContext = ctx;
+                return handler(event, ctx);
+            } : handler);
+        },
+    }, managedDomainPort());
     const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } }, sessionManager: { getBranch: () => entries } };
+    // Retain the actual SDK start context; never synthesize shutdown authority.
+    foregrounds.push({ handlers, context: () => startedContext ?? ctx });
     const mode = () => { const request = {}; events.emit(DELEGATION_MODE_REQUEST, request); return request.mode; };
-    const context = (messages = []) => handlers.get("context")({ type: "context", messages }, ctx).messages;
-    const prompt = () => context().map(message => message.content).join("\n");
-    return { handlers, commands, tools, notifications, entries, ctx, mode, prompt, context };
+    // pi renders the base followed by every published section, in publication
+    // order; the handler returns nothing, so the prompt is assembled here.
+    const systemPrompt = (base = "base system prompt") => {
+        const options = { sections: {} };
+        handlers.get("before_agent_start")({ type: "before_agent_start", systemPrompt: base, systemPromptOptions: options }, ctx);
+        return [base, ...Object.values(options.sections).filter(Boolean)].join("\n\n");
+    };
+    const prompt = () => systemPrompt();
+    return { handlers, commands, tools, notifications, entries, ctx, mode, prompt, systemPrompt };
 }
 
 test("effective settings replace stale context and share live reservations with spawn admission", async () => {
@@ -50,8 +82,9 @@ test("effective settings replace stale context and share live reservations with 
         assert.equal(reserved.occupiedSlots, 2);
         assert.equal(reserved.availableSlots, 2);
         assert.equal(reserved.revision, original.revision, "occupancy changes do not change the settings revision");
-        const priorMessages = [{ role: "user", content: "Keep my prompt", timestamp: 1 }, ...h.context()];
-        const previousText = priorMessages.at(-1).content;
+        const basePrompt = "base system prompt";
+        const beforeEdit = h.systemPrompt(basePrompt);
+        assert.ok(beforeEdit.includes(delegationPrompt("adaptive")), "the configured mode reaches the system prompt");
         const historySize = h.entries.length;
         await h.commands.get("subagents").handler("cap 1", h.ctx);
         const current = (await inspect()).structuredContent;
@@ -66,16 +99,12 @@ test("effective settings replace stale context and share live reservations with 
             name.endsWith("batch") ? /0\/1 subagent slots free/ : /Max concurrent subagents \(1\)/);
         }
         await h.commands.get("subagents").handler("mode coordinator", h.ctx);
-        const messages = h.context(priorMessages);
-        const again = h.context(messages);
-        assert.equal(again.length, priorMessages.length);
-        assert.equal(again[0], priorMessages[0], "unrelated context is preserved");
-        assert.equal(priorMessages.at(-1).content, previousText, "context transformation does not mutate its input");
-        const block = again.at(-1);
-        assert.match(block.content, /Concurrency limit: 1/);
-        assert.match(block.content, /Delegation mode: coordinator/);
-        assert.doesNotMatch(block.content, /Delegation mode: adaptive/);
-        assert.equal(block.details.revision, (await inspect()).structuredContent.revision);
+        const afterEdit = h.systemPrompt(basePrompt);
+        assert.match(afterEdit, /Concurrency limit: 1/, "the cap edit reaches the system prompt");
+        assert.match(afterEdit, /Delegation mode: coordinator/);
+        assert.doesNotMatch(afterEdit, /Delegation mode: adaptive/, "the previous mode is not repeated");
+        assert.match(afterEdit.trimEnd(), /lower the limit without stopping existing runs\.$/, "the policy is the last thing in the prompt");
+        assert.ok(beforeEdit.startsWith(basePrompt), "the base prompt is preserved ahead of the policy");
         assert.equal(h.entries.length, historySize + 2, "only the two settings changes are persisted, not request snapshots");
         await h.commands.get("subagents").handler("cap 6", h.ctx);
         const increased = (await inspect()).structuredContent;
@@ -102,8 +131,8 @@ test("same-value session overrides revise provenance and saving restores the con
             const result = await h.tools.get("subagent_settings").execute();
             assert.notEqual(result.isError, true);
             assert.deepEqual(h.entries, entries, "inspection does not persist a settings snapshot");
-            assert.deepEqual(h.context().at(-1).details, result.structuredContent,
-                "the next request context and inspection agree on values, sources, and revision");
+            assert.ok(h.systemPrompt().includes(result.structuredContent.revision),
+                "the system prompt reflects the current settings revision");
             return result.structuredContent;
         };
         const configured = await inspect();
@@ -179,7 +208,7 @@ test("settings save refuses corrupt config without discarding session choices", 
         assert.equal(loadConfig().maxConcurrent, 5);
         assert.equal(normalizeConcurrencyCap(5), 5);
         for (const value of [undefined, null, 0, -1, 1.5, "8", NaN, Infinity]) {
-            assert.equal(normalizeConcurrencyCap(value), 4);
+            assert.equal(normalizeConcurrencyCap(value), 6);
         }
     } finally {
         setConfigPathForTests(undefined);
@@ -202,19 +231,144 @@ test("normalization falls back to adaptive and each prompt expresses its boundar
 
 test("/subagents action completions expose complete mode selections with context", () => {
     assert.deepEqual(subagentsArgumentCompletions(""), [
-        { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
+        { value: "history", label: "history", description: "Inspect or cancel waits from other sessions" },
+        { value: "history dismiss", label: "history dismiss", description: "Dismiss unchanged historical attention notices" },
+        { value: "settings", label: "settings", description: "Open delegation, concurrency, and timing settings" },
         { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
-        { value: "reset", label: "reset", description: "Reset session mode and cap to saved defaults" },
+        { value: "tool-wait", label: "tool-wait <minutes>", description: "Set the session tool-wait alert time; 0 turns it off" },
+        { value: "stuck", label: "stuck <minutes>", description: "Set the session no-progress alert time; 0 turns it off" },
+        { value: "reset", label: "reset", description: "Reset session mode, cap, and timing alerts to saved defaults" },
         { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
         { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
         { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
-        { value: "save", label: "save", description: "Save the current mode and cap as defaults" },
+        { value: "save", label: "save", description: "Save the current mode, cap, and timing alerts as defaults" },
     ]);
     assert.deepEqual(subagentsArgumentCompletions(" mode a")?.map((entry) => entry.value), ["mode adaptive"]);
     assert.equal(subagentsArgumentCompletions("mode invalid"), null);
     const command = harness().commands.get("subagents");
     assert.deepEqual(command.getArgumentCompletions("mode c").map((entry) => entry.value), ["mode coordinator"]);
-    assert.match(command.description, /settings.*cap <number>.*save.*reset/);
+    assert.match(command.description, /settings.*cap <number>.*tool-wait <minutes>.*save.*reset/);
+});
+
+test("session timing alerts validate, persist across reload, save, and reset independently", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delegation-timing-"));
+    const path = join(dir, "settings.json");
+    setConfigPathForTests(path);
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        const inspect = async () => (await h.tools.get("subagent_settings").execute()).structuredContent;
+        const baseline = await inspect();
+
+        await command.handler("tool-wait 3.5", h.ctx);
+        let current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 10, "the no-progress time is unchanged");
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "session", stuckMinutes: "default" });
+        assert.notEqual(current.revision, baseline.revision, "an alert-time edit changes the settings revision");
+        assert.deepEqual(h.entries.at(-1), {
+            type: "custom", customType: "pi-better-subagents-timing", data: { version: 1, toolWaitMinutes: 3.5 },
+        });
+
+        const beforeInvalid = h.entries.length;
+        for (const value of ["-1", "soon", "", "10081"]) {
+            await command.handler(`tool-wait ${value}`, h.ctx);
+            assert.equal(h.entries.length, beforeInvalid, `invalid ${JSON.stringify(value)} changes no history`);
+            assert.equal(h.notifications.at(-1).level, "warning");
+        }
+        await command.handler("stuck 0", h.ctx);
+        current = await inspect();
+        assert.equal(current.stuckMinutes, 0, "0 disables only the no-progress alert");
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "session", stuckMinutes: "session" });
+
+        // Reload restores both session overrides from the branch.
+        await h.handlers.get("session_start")({}, { ...h.ctx, mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true });
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 0);
+
+        await command.handler("save", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 0);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "config", stuckMinutes: "config" });
+        assert.equal(loadConfig().toolWaitMinutes, 3.5);
+        assert.equal(loadConfig().stuckMinutes, 0);
+        const fresh = harness();
+        assert.deepEqual(await (async () => (await fresh.tools.get("subagent_settings").execute()).structuredContent)(), current,
+            "a new extension sees the saved timing defaults and revision");
+
+        await command.handler("tool-wait 9", h.ctx);
+        await command.handler("reset", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5, "reset returns to the saved tool-wait default");
+        assert.equal(current.stuckMinutes, 0);
+    } finally {
+        setConfigPathForTests(undefined);
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("effective timing alerts honor environment precedence and expose invalid environment values", async () => {
+    const previous = {
+        tool: process.env[TIMING_ENV.toolWait],
+        stuck: process.env[TIMING_ENV.stuck],
+    };
+    setConfigForTests({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: 0, stuckMinutes: 0 });
+    process.env[TIMING_ENV.toolWait] = "7";
+    process.env[TIMING_ENV.stuck] = "13";
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        const inspect = async () => (await h.tools.get("subagent_settings").execute()).structuredContent;
+
+        let current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7);
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        assert.match(h.prompt(), /Timing alerts: tool wait 7m \(environment\); no progress 13m \(environment\)\./);
+        let launched = resolveRunTiming({ settings: loadConfig(), env: process.env, startedAt: 0 });
+        assert.equal(launched.toolWaitMs, 7 * 60_000, "inspection matches the value launch resolution uses");
+        assert.equal(launched.stuckMs, 13 * 60_000);
+
+        await command.handler("tool-wait 3", h.ctx);
+        await command.handler("stuck 4", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7, "environment still wins over the session override");
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        await command.handler("", h.ctx);
+        assert.match(h.notifications.at(-1).message, /Tool-wait alert: 7 min\. No-progress alert: 13 min\./,
+            "the settings summary matches the next launch");
+
+        delete process.env[TIMING_ENV.toolWait];
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3, "removing the environment override reveals the session choice");
+        assert.equal(current.timingSources.toolWaitMinutes, "session");
+        assert.equal(current.stuckMinutes, 13);
+        assert.equal(current.timingSources.stuckMinutes, "environment");
+
+        delete process.env[TIMING_ENV.stuck];
+        launched = resolveRunTiming({
+            settings: { ...loadConfig(), toolWaitMinutes: 3, stuckMinutes: 4 },
+            env: process.env, startedAt: 0,
+        });
+        assert.equal(launched.toolWaitMs, 3 * 60_000);
+        assert.equal(launched.stuckMs, 4 * 60_000);
+
+        process.env[TIMING_ENV.toolWait] = "soon";
+        current = await inspect();
+        assert.match(current.timingError, /PI_SUBAGENT_TOOL_WAIT_MINUTES must be a number of minutes/);
+        assert.equal(current.timingSources.toolWaitMinutes, "environment", "an invalid environment value is not hidden");
+        assert.match(h.prompt(), /Timing alert settings error: PI_SUBAGENT_TOOL_WAIT_MINUTES must be/);
+    } finally {
+        if (previous.tool === undefined) delete process.env[TIMING_ENV.toolWait];
+        else process.env[TIMING_ENV.toolWait] = previous.tool;
+        if (previous.stuck === undefined) delete process.env[TIMING_ENV.stuck];
+        else process.env[TIMING_ENV.stuck] = previous.stuck;
+        setConfigForTests(undefined);
+    }
 });
 
 test("/subagents save confirms, preserves other config, and clears the session override", async () => {
@@ -258,7 +412,7 @@ test("/subagents reports config, changes only this session, rejects invalid args
         const command = h.commands.get("subagents");
         assert.ok(command);
         await command.handler("", h.ctx);
-        assert.match(h.notifications.at(-1).message, /^Delegation mode: manual\. Concurrent subagents: 4\./);
+        assert.match(h.notifications.at(-1).message, /^Delegation mode: manual\. Concurrent subagents: 6\./);
         assert.match(h.prompt(), /Delegation mode: manual/);
         await command.handler("mode coordinator", h.ctx);
         assert.equal(h.mode(), "coordinator");

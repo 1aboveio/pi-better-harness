@@ -1,10 +1,11 @@
 import type { DaemonClient } from "../client.ts";
 import type { SessionSummary } from "../protocol.ts";
 
-export type DisplayStatus = "running" | "idle" | "needs-input" | "closed" | "error";
+export type DisplayStatus = "running" | "idle" | "needs-input" | "closed" | "moved" | "error";
 
 /** A session with an unanswered extension dialog reads as needs-input, even while its turn is paused mid-stream. */
 export function displayStatus(summary: SessionSummary): DisplayStatus {
+  if (summary.ownership === "moved") return "moved";
   if (summary.status === "closed") return "closed";
   if (summary.needsInput.length > 0) return "needs-input";
   if (summary.isStreaming) return "running";

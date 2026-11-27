@@ -1,6 +1,11 @@
 # Linux write-sandbox backend: bubblewrap
 
-Status: accepted
+> Historical decision. The current sandbox contract is in [ADR 0027](../../../../docs/adr/0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
+Status: accepted. The later [all-Off activation amendment](../../../../docs/adr/0004-foreground-sandbox-opt-in.md)
+supersedes this record's default-on launch policy. New subagents start unconfined
+unless explicitly requested or enabled by a human profile; enabled launches still
+fail closed. The default-on failure matrix below records the original policy.
 
 Refs #5 (decision record only — implementation follows separately)
 

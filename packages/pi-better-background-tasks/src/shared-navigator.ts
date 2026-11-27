@@ -1,11 +1,26 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
+import { readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
+import { setNavigatorPanel, type NavigatorPanelLayout } from "./shared-navigator-panels.ts";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
   // for sibling relative imports; loading it directly should be harmless.
+}
+
+export type NavigatorView = "tree" | "flatten";
+export function getNavigatorView(): NavigatorView { return state().view ?? "flatten"; }
+export function loadNavigatorView(): void {
+  const value = readHarnessSetting("navigatorView");
+  state().view = value === "tree" ? "tree" : "flatten";
+}
+export function setNavigatorView(value: string): void {
+  if (value !== "tree" && value !== "flatten") throw new Error("View must be tree or flatten.");
+  updateHarnessSetting("navigatorView", () => value);
+  state().view = value;
+  refreshBackgroundWorkNavigator();
 }
 
 export type BackgroundWorkStatusTone = "running" | "success" | "failed" | "warning" | "muted";
@@ -13,6 +28,14 @@ export type BackgroundWorkStatusTone = "running" | "success" | "failed" | "warni
 export type BackgroundWorkRow = {
   providerId: string;
   id: string;
+  /** Stable worker conversation identity, independent of execution attempts. */
+  agentId?: string;
+  parentAgentId?: string;
+  readOnly?: boolean;
+  treeDepth?: number;
+  lastChild?: boolean;
+
+  ownerGroupLabel?: string;
   name?: string;
   model?: string;
   effort?: string;
@@ -63,13 +86,70 @@ export type BackgroundWorkProvider = {
   showSection?(rows: BackgroundWorkRow[], now: number): boolean;
   parentRow?(now: number): BackgroundWorkRow | null;
   listRows(now: number): BackgroundWorkRow[];
+  prepareDetail?(id: string, options?: {logTailLines?: number}): void;
   detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
   armCloseLabel(row: BackgroundWorkRow): string;
   close(id: string): BackgroundWorkCloseOutcome;
   /** Return true when this detail handled the key. The navigator refreshes the sheet. */
   handleDetailInput?(id: string, data: string): boolean;
+  /** An explicit navigator interaction may attach a deferred work subscription. */
+  onOpen?(): void;
   onVisibleChanged?(notify: () => void): () => void;
 };
+
+/** UI time is independent of worker time; repeated refreshes never renew it. */
+export function createTerminalRowRetention(retentionMs = 30_000) {
+  const held = new Map<string, { row: BackgroundWorkRow; until: number }>();
+  const dismissed = new Set<string>();
+  return {
+    clear() { held.clear(); dismissed.clear(); },
+    dismiss(id: string) { held.delete(id); dismissed.add(id); },
+    merge(rows: BackgroundWorkRow[], now: number): BackgroundWorkRow[] {
+      const result: BackgroundWorkRow[] = [];
+      const present = new Set(rows.map(row => row.id));
+      for (const id of dismissed) if (!present.has(id)) dismissed.delete(id);
+      for (const row of rows) {
+        if (dismissed.has(row.id)) continue;
+        const terminal = ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status);
+        if (!terminal) { held.delete(row.id); result.push(row); continue; }
+        let entry = held.get(row.id);
+        if (!entry) { entry = {row, until: now + retentionMs}; held.set(row.id, entry); }
+        entry.row = {...row, expiresAt: entry.until};
+        if (now < entry.until) result.push(entry.row);
+      }
+      for (const [id, entry] of held) {
+        if (present.has(id)) continue;
+        if (now < entry.until) result.push(entry.row);
+        else held.delete(id);
+      }
+      return result;
+    },
+  };
+}
+
+/** A frontend-only diagnostic, never an execution record or authority to retry. */
+export async function observeNavigatorLaunch<T>(ctx: ExtensionContext, providerId: string, key: string, name: string, launch: () => Promise<T>): Promise<T> {
+  const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+  const report = (error: unknown) => {
+    const s = state();
+    if (!isNavigatorUiAvailable(s.uiCtx) || s.observationScope !== scope) return;
+    const id = `launch-error-${key}`;
+    const primary = error instanceof Error ? error.message : String(error);
+    const failures = s.launchFailures ??= new Map();
+    const identity = rowKey(providerId, id);
+    failures.set(identity, {providerId, id, name, status: "failed", statusTone: "failed", kind: "launch-error", elapsed: "", primary,
+      secondary: "Launch failed or was not confirmed; inspect before retrying.", sortStartedAt: Date.now()});
+    // Diagnostics are session-local and bounded, including expired tombstones.
+    if (failures.size > 128) failures.delete(failures.keys().next().value!);
+    refreshBackgroundWorkNavigator();
+  };
+  try {
+    const result = await launch();
+    const response = result as {isError?: boolean; content?: {type: string; text?: string}[]};
+    if (response?.isError) report(response.content?.filter(item => item.type === "text").map(item => item.text).join("\n") || "Launch request failed");
+    return result;
+  } catch (error) { report(error); throw error; }
+}
 
 type HostDeps = {
   createDefaultEditor: (tui: unknown, theme: unknown, keybindings: unknown) => unknown;
@@ -81,12 +161,19 @@ type HostDeps = {
 
 type NavigatorState = {
   providers: Map<string, BackgroundWorkProvider>;
+  view?: NavigatorView;
+  terminalRows?: Map<string, ReturnType<typeof createTerminalRowRetention>>;
+  launchFailures?: Map<string, BackgroundWorkRow>;
+  observationScope?: string;
+  registrationTokens?: Map<string, symbol>;
   unsubscribers: Map<string, () => void>;
   uiCtx?: ExtensionContext;
+  uiOwner?: symbol;
   deps?: HostDeps;
   lastHint?: string | null;
   lastMainListLines?: string[];
   lastMainListSignature?: string;
+  mainListRows?: InternalRow[];
   mainListWidgetInstalled?: boolean;
   mainListRequestRender?: () => void;
   mainListSelectedId?: string;
@@ -107,7 +194,7 @@ type NavigatorState = {
   detailOverlayRows?: number;
   dispose?: () => void;
   /** The mounted detail overlay, reused instead of stacking a second one. */
-  overlay?: { showDetail(navigatorId: string): void; focus(): void };
+  overlay?: { showDetail(navigatorId: string): void; refreshDetail(): void; focus(): void };
 };
 
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
@@ -118,6 +205,7 @@ export const NAVIGATOR_STATUS_KEY = "background-work-nav";
 export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
 export const MAIN_LIST_WIDGET_KEY = "background-work-list";
 export const DETAIL_TICK_MS = 10_000;
+export const MAIN_LIST_REFRESH_MS = 1_000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 25;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
@@ -136,6 +224,8 @@ function state(): NavigatorState {
 
 export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider): () => void {
   const s = state();
+  const token = Symbol(provider.id);
+  (s.registrationTokens ??= new Map()).set(provider.id, token);
   const previousUnsub = s.unsubscribers.get(provider.id);
   if (previousUnsub) {
     try { previousUnsub(); } catch { /* ignore */ }
@@ -151,7 +241,10 @@ export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider)
     s.unsubscribers.delete(provider.id);
   }
   refreshBackgroundWorkNavigator();
-  return () => unregisterBackgroundWorkProvider(provider.id);
+  // A stale factory must not unregister its replacement from another cached module.
+  return () => {
+    if (state().registrationTokens?.get(provider.id) === token) unregisterBackgroundWorkProvider(provider.id);
+  };
 }
 
 export function unregisterBackgroundWorkProvider(id: string): void {
@@ -162,6 +255,7 @@ export function unregisterBackgroundWorkProvider(id: string): void {
   }
   s.unsubscribers.delete(id);
   s.providers.delete(id);
+  s.registrationTokens?.delete(id);
   refreshBackgroundWorkNavigator();
 }
 
@@ -175,32 +269,35 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(_count: number): string | null {
-  // Retain the compatibility helper so refresh/reload clears any old badge.
+  // Retain the compatibility helper without publishing a badge.
   return null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
-  const hint = navigatorFooterHint(count);
-  ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
-  return hint;
+  return navigatorFooterHint(count);
 }
 
 export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: string | undefined): void }, hint: string | null | undefined): string | null {
-  ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
   return hint ?? null;
 }
 
-export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps): void {
+export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps, owner?: symbol): void {
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
+  if (s.view === undefined) { try { loadNavigatorView(); } catch { s.view = "flatten"; } }
+  const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+  if (s.observationScope !== scope) { s.terminalRows?.clear(); s.launchFailures?.clear(); }
+  s.observationScope = scope;
   s.uiCtx = ctx;
+  s.uiOwner = owner;
   s.deps = {
     ...deps,
     createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
   };
-  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+  try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
+  s.mainListRows = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
   installNavigatorEditor(ctx.ui as any, deps);
@@ -209,23 +306,36 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   refreshMainListWidget();
 }
 
-export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
+export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext, owner?: symbol): void {
   const s = state();
+  if (owner !== undefined) {
+    // Only the factory that installed the current navigator may dispose it.
+    if (s.uiOwner !== owner) return;
+  } else if (s.uiOwner !== undefined) {
+    // Ownership is never inferred: an omitted owner must not clear a navigator
+    // another cached factory (or a headless child) owns.
+    return;
+  } else if (ctx !== undefined) {
+    // Unowned navigators stay releasable by a live, matching UI context.
+    if (!isNavigatorUiAvailable(ctx) || (s.uiCtx && ctx.ui !== s.uiCtx.ui)) return;
+  }
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
   s.overlay = undefined;
   stopMainListWidget();
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
+  s.terminalRows?.clear();
+  s.launchFailures?.clear();
+  s.observationScope = undefined;
+  s.uiOwner = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
-    const ui = activeCtx.ui;
-    try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
-    try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
-    try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(activeCtx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
   s.lastMainListSignature = undefined;
+  s.mainListRows = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
@@ -241,13 +351,8 @@ export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const activeCtx = isNavigatorUiAvailable(ctx) ? ctx : s.uiCtx;
   if (!isNavigatorUiAvailable(activeCtx)) return;
   try {
-    const count = visibleCount();
-    const hint = navigatorFooterHint(count);
-    if (hint !== s.lastHint) {
-      applyNavigatorFooter(activeCtx!.ui as any, count);
-      s.lastHint = hint;
-    }
     refreshMainListWidget();
+    s.overlay?.refreshDetail();
   } catch { /* ignore */ }
 }
 
@@ -271,7 +376,6 @@ function clearMainListCloseArm(): void {
   s.mainListCloseArmTimer = undefined;
   if (!s.mainListCloseArm) return;
   s.mainListCloseArm = undefined;
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, null); } catch { /* ignore */ }
 }
 
 function refreshMainListWidget(): void {
@@ -281,18 +385,21 @@ function refreshMainListWidget(): void {
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
   const now = Date.now();
   const rows = listRows(now);
+  s.mainListRows = rows;
   s.mainListDeadlineScheduler?.cancel();
   const nextExpiry = rows.reduce<number | undefined>((next, row) => {
     if (row.expiresAt === undefined || row.expiresAt <= now) return next;
     return next === undefined ? row.expiresAt : Math.min(next, row.expiresAt);
   }, undefined);
-  if (nextExpiry !== undefined) {
-    s.mainListDeadlineScheduler?.schedule(nextExpiry - now);
+  if (rows.length) {
+    // External writers cannot notify this host. Refresh independently of paint frequency.
+    s.mainListDeadlineScheduler?.schedule(Math.min(MAIN_LIST_REFRESH_MS, nextExpiry === undefined ? Infinity : nextExpiry - now));
   }
   syncMainListSelection(rows);
   const nextSignature = rows.length ? mainListSignature(rows, {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
+    closeHint: closeHintFor(rows.find((row) => row.navigatorId === s.mainListCloseArm?.id)),
   }) : undefined;
   const changed = nextSignature !== s.lastMainListSignature;
   s.lastMainListSignature = nextSignature;
@@ -302,7 +409,7 @@ function refreshMainListWidget(): void {
   })] : undefined;
   if (!rows.length) {
     if (!s.mainListWidgetInstalled) return;
-    try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
     s.mainListWidgetInstalled = false;
     s.mainListRequestRender = undefined;
     s.lastMainListSignature = undefined;
@@ -310,7 +417,7 @@ function refreshMainListWidget(): void {
   }
   if (!s.mainListWidgetInstalled) {
     try {
-      (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+      setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown, layout) => createMainListWidget(tui, theme, deps, layout), { placement: "aboveEditor" });
       s.mainListWidgetInstalled = true;
     } catch { /* ignore */ }
   }
@@ -328,28 +435,133 @@ function themeFgFromTheme(theme: unknown): (color: string, value: string) => str
   return (color, value) => maybeTheme?.fg ? maybeTheme.fg(color, value) : value;
 }
 
-function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): Component & { dispose?(): void } {
+// Structural typing keeps keyboard-only Pi hosts (no mouse API) loading this widget unchanged.
+type WidgetMouseEvent = {
+  type: string;
+  button: string;
+  /** Coordinates local to this component, zero-based. */
+  x: number;
+  y: number;
+  width: number;
+  shift?: boolean;
+  alt?: boolean;
+  ctrl?: boolean;
+};
+
+type WidgetMouseResult = { handled: true; render: boolean };
+
+type MainListWidget = Component & {
+  dispose?(): void;
+  handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined;
+};
+
+const BACK_TO_MAIN = "← main (Esc)";
+const BACK_TARGET = "back-to-main";
+
+function highlightPointerTarget(theme: unknown, line: string, width: number): string {
+  const colors = theme as { bg?(color: string, value: string): string } | undefined;
+  return colors?.bg?.("selectedBg", line + " ".repeat(Math.max(0, width - piVisibleWidth(line))))
+    ?? themeFgFromTheme(theme)("accent", line);
+}
+
+function createPointerNavigation(targetAt: (event: WidgetMouseEvent) => string | undefined, activate: (target: string) => boolean) {
+  let hovered: string | undefined;
+  let pressed: { target: string; y: number } | undefined;
+  return {
+    get hovered() { return hovered; },
+    reset() { hovered = undefined; pressed = undefined; },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      if (event.type === "move" || event.type === "leave") {
+        const target = event.type === "leave" ? undefined : targetAt(event);
+        const changed = hovered !== target;
+        hovered = target;
+        return changed || target ? { handled: true, render: changed } : undefined;
+      }
+      if (event.button !== "left" || event.shift || event.alt || event.ctrl) {
+        pressed = undefined;
+        return undefined;
+      }
+      if (event.type === "press") {
+        const target = targetAt(event);
+        pressed = target ? { target, y: event.y } : undefined;
+        return target ? { handled: true, render: false } : undefined;
+      }
+      if (event.type !== "click") return undefined;
+      const claim = pressed;
+      pressed = undefined;
+      if (!claim || claim.y !== event.y || targetAt(event) !== claim.target || !activate(claim.target)) return undefined;
+      return { handled: true, render: true };
+    },
+  };
+}
+
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps, panelLayout: NavigatorPanelLayout = { availableRows: () => Infinity }): MainListWidget {
   const requestRender = () => tui.requestRender?.();
   state().mainListRequestRender = requestRender;
+  // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
+  let lineOwners: Array<string | undefined> = [];
+  let lineWidth = MAIN_LIST_FALLBACK_WIDTH;
+  const rowAt = (event: WidgetMouseEvent): string | undefined => {
+    const width = Number.isFinite(event.width) && event.width > 0 ? Math.floor(event.width) : lineWidth;
+    if (!Number.isFinite(event.x) || event.x < 0 || event.x >= width) return undefined;
+    if (!Number.isInteger(event.y) || event.y < 0 || event.y >= lineOwners.length) return undefined;
+    const id = lineOwners[event.y];
+    return id && state().mainListRows?.some((row) => row.navigatorId === id) ? id : undefined;
+  };
+  const pointer = createPointerNavigation(rowAt, openNavigatorRow);
   return {
     render(width: number): string[] {
-      const rows = listRows();
+      const rows = state().mainListRows ?? [];
       syncMainListSelection(rows);
       if (!rows.length) {
         state().lastMainListLines = undefined;
+        lineOwners = [];
+        pointer.reset();
         return [];
       }
-      const lines = ["", ...buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+      const layout = buildMainListLayout(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
         selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
         focused: state().mainListFocused === true,
-      })];
+      });
+      const armedRow = rows.find((row) => row.navigatorId === state().mainListCloseArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { layout.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); layout.owners.push(undefined); }
+      lineWidth = renderWidth(width);
+      // The leading gap line belongs to the widget too, so its slot stays ownerless.
+      let rawLines = ["", ...layout.lines];
+      lineOwners = [undefined, ...layout.owners];
+      const budget = Math.max(0, Math.floor(panelLayout.availableRows()));
+      if (rawLines.length > budget) {
+        const selected = state().mainListFocused ? lineOwners.indexOf(state().mainListSelectedId) : -1;
+        const count = Math.max(0, budget - 1);
+        const start = selected >= 0 ? Math.max(0, Math.min(selected - Math.floor(count / 2), rawLines.length - count)) : 2;
+        rawLines = rawLines.slice(start, start + count);
+        lineOwners = lineOwners.slice(start, start + count);
+        const visible = new Set(lineOwners.filter(Boolean));
+        if (budget > 0) {
+          const hidden = rows.length - visible.size;
+          rawLines.push(deps.truncate(hidden ? `   +${hidden} tasks` : `   ${rows.length} tasks`, renderWidth(width)));
+          lineOwners.push(undefined);
+        }
+      }
+      const lines = rawLines.map((line, index) =>
+        pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
       state().lastMainListLines = lines;
       return lines;
     },
-    invalidate() { state().lastMainListLines = undefined; },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      return pointer.handleMouse(event);
+    },
+    invalidate() {
+      state().lastMainListLines = undefined;
+      lineOwners = [];
+      pointer.reset();
+    },
     dispose() {
       const s = state();
       if (s.mainListRequestRender === requestRender) s.mainListRequestRender = undefined;
+      lineOwners = [];
+      pointer.reset();
     },
   };
 }
@@ -375,10 +587,14 @@ function listRows(now = Date.now()): InternalRow[] {
   for (const provider of providers()) {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
+    providerRows = [...providerRows, ...[...(state().launchFailures?.values() ?? [])].filter(row => row.providerId === provider.id)];
+    const retention = state().terminalRows ??= new Map();
+    if (!retention.has(provider.id)) retention.set(provider.id, createTerminalRowRetention());
+    if (isNavigatorUiAvailable(state().uiCtx)) providerRows = retention.get(provider.id)!.merge(providerRows, now);
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
     let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
     try { showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection; } catch { showSection = false; }
-    if (!showSection) continue;
+    if (!showSection && !(getNavigatorView() === "tree" && provider.parentRow)) continue;
     let parentRow: BackgroundWorkRow | null = null;
     try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
     if (parentRow) {
@@ -393,7 +609,48 @@ function listRows(now = Date.now()): InternalRow[] {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
   }
-  return rows;
+  const conversations = mergeAgentAttempts(rows);
+  return getNavigatorView() === "tree" ? treeRows(conversations) : conversations;
+}
+
+/** A resumed execution is still the same agent in either layout. */
+export function mergeAgentAttempts<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const row of rows) {
+    if (row.providerId !== "subagents" || !row.agentId) continue;
+    const previous = latest.get(row.agentId);
+    if (!previous || row.sortStartedAt > previous.sortStartedAt
+        || (row.sortStartedAt === previous.sortStartedAt && row.id > previous.id)) latest.set(row.agentId, row);
+  }
+  return rows.filter(row => row.providerId !== "subagents" || !row.agentId || latest.get(row.agentId) === row);
+}
+
+/** Two levels only: agents are peers, tasks attach by captured conversation. */
+export function treeRows<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const agents = new Map<string, T>();
+  for (const row of rows.filter(row => row.providerId === "subagents")) {
+    const key = row.agentId ?? row.id;
+    const prior = agents.get(key);
+    if (!prior || row.sortStartedAt > prior.sortStartedAt) agents.set(key, row);
+  }
+  const tasks = rows.filter(row => row.providerId !== "subagents");
+  const ordered = [...agents.entries()].sort(([a], [b]) => a === "main" ? -1 : b === "main" ? 1 : 0);
+  const result: T[] = [], attached = new Set<T>();
+  for (const [key, agent] of ordered) {
+    const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
+    result.push({...agent, treeDepth: 0});
+    children.forEach((row, i) => { result.push({...row, treeDepth: 1, lastChild: i === children.length - 1}); attached.add(row); });
+  }
+  // Never hide live work when its owner's observation has not arrived yet.
+  const missing = new Map<string, T[]>();
+  for (const row of tasks) if (!attached.has(row)) {
+    const key = row.parentAgentId ?? "main";
+    missing.set(key, [...(missing.get(key) ?? []), row]);
+  }
+  for (const [key, children] of missing) children.forEach((row, i) => result.push({...row,
+    treeDepth: 1, lastChild: i === children.length - 1,
+    ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined}));
+  return result;
 }
 
 function rowDisplayName(row: Pick<BackgroundWorkRow, "name" | "id">): string {
@@ -454,7 +711,35 @@ function buildMainListLines(
   fg: (color: string, value: string) => string,
   options: { selectedId?: string; focused?: boolean } = {},
 ): string[] {
+  return buildMainListLayout(rows, width, truncate, fg, options).lines;
+}
+
+/**
+ * The list's lines plus the navigatorId each line shows, so pointer input maps a rendered row to its
+ * stable row identity. Headers, separators and the shortcut line keep an undefined owner.
+ */
+function buildMainListLayout(
+  rows: InternalRow[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { selectedId?: string; focused?: boolean } = {},
+): { lines: string[]; owners: Array<string | undefined> } {
   const lines: string[] = [];
+  const owners: Array<string | undefined> = [];
+  const push = (line: string, owner?: string) => {
+    lines.push(line);
+    owners.push(owner);
+  };
+  if (getNavigatorView() === "tree") {
+    push(providerGroupLabel("work", fg));
+    for (const row of rows) {
+      if (row.ownerGroupLabel) push(`  ${dim(row.ownerGroupLabel, fg)}`);
+      push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
+    }
+    push(""); push(shortcutsLine(options.focused === true, fg));
+    return {lines: lines.map(line => safeTruncate(line, width, truncate)), owners};
+  }
   const grouped = new Map<string, InternalRow[]>();
   for (const row of rows) {
     const existing = grouped.get(row.providerLabel) ?? [];
@@ -466,21 +751,22 @@ function buildMainListLines(
   for (let i = 0; i < orderedLabels.length; i += 1) {
     const label = orderedLabels[i]!;
     const group = grouped.get(label)!;
-    if (i > 0) lines.push("");
-    lines.push(providerGroupLabel(label, fg));
+    if (i > 0) push("");
+    push(providerGroupLabel(label, fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
-      lines.push(formatMainListRow(row, selected === true, fg, width));
+      push(formatMainListRow(row, selected === true, fg, width), row.navigatorId);
     }
   }
-  lines.push("");
-  lines.push(shortcutsLine(options.focused === true, fg));
-  return lines.map((line) => safeTruncate(line, width, truncate));
+  push("");
+  push(shortcutsLine(options.focused === true, fg));
+  return { lines: lines.map((line) => safeTruncate(line, width, truncate)), owners };
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
+  const selected = state().mainListRows?.find(row => row.navigatorId === state().mainListSelectedId);
   const keys = focused
-    ? "↑↓ switch · Enter detail · x stop · Esc unfocus"
+    ? `↑↓ switch · Enter detail${selected?.readOnly || selected?.parentRow ? "" : " · x stop"} · Esc unfocus`
     : "← work navigator";
   return dim(keys, fg);
 }
@@ -491,22 +777,23 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
-  const prefix = selected ? fg("accent", "› ") : "  ";
-  const name = row.name || row.id;
+  const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
+  const name = rowDisplayName(row);
+  const summary = singleLine(rowSummary(row));
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
   const elapsed = singleLine(row.elapsed || "-");
-  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
-  const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
+  const elapsedWidth = Math.min(Math.max(piVisibleWidth(elapsed), 4), 12);
   const statusWidth = 2;
-  const leftPrefixWidth = visibleWidth(prefix) + statusWidth + 1;
-  const maxNameWidth = Math.max(8, Math.floor(available * 0.36));
-  const nameWidth = Math.max(8, Math.min(44, maxNameWidth, available - leftPrefixWidth - elapsedWidth - 10));
-  const rightWidth = Math.max(8, available - leftPrefixWidth - nameWidth - 1);
-  const summaryWidth = Math.max(1, rightWidth - elapsedWidth - 1);
-  const left = `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)}`;
-  const right = `${dim(fitRight(rowSummary(row), summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
-  const gap = Math.max(1, available - visibleWidth(left) - visibleWidth(right));
+  const leftPrefixWidth = piVisibleWidth(prefix) + statusWidth + 1;
+  const textWidth = Math.max(0, width - leftPrefixWidth - elapsedWidth - 2);
+  // Reserve a readable title when both texts are long. Each side can use the other's spare cells.
+  const preferredNameWidth = Math.max(8, Math.ceil(textWidth / 3), textWidth - piVisibleWidth(summary));
+  const nameWidth = Math.min(piVisibleWidth(name), textWidth, preferredNameWidth);
+  const summaryWidth = textWidth - nameWidth;
+  const left = `${prefix}${fit(status, statusWidth)} ${piTruncateToWidth(name, nameWidth)}`;
+  const right = `${dim(fitRight(summary, summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
+  const gap = Math.max(1, width - piVisibleWidth(left) - piVisibleWidth(right));
   return `${left}${" ".repeat(gap)}${right}`;
 }
 
@@ -521,16 +808,21 @@ function statusGlyph(row: InternalRow): string {
 function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
   void now;
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-  return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
+  const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
+  return { glyph, color: "accent" };
 }
 
-function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean } = {}): string {
+function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {
   return JSON.stringify({
+    view: getNavigatorView(),
     focused: options.focused === true,
+    closeHint: options.closeHint ?? null,
     selectedId: options.focused === true ? options.selectedId ?? null : null,
     rows: rows.map((row) => ({
       navigatorId: row.navigatorId,
       providerLabel: row.providerLabel,
+      parentAgentId: row.parentAgentId,
+      agentId: row.agentId,
       parentRow: row.parentRow === true,
       providerId: row.providerId,
       id: row.id,
@@ -556,6 +848,9 @@ function stableFacts(facts: string[] | undefined): string[] {
 }
 
 function rowSummary(row: InternalRow): string {
+  if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
+    return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
+  }
   if (row.providerId === "subagents") {
     const attention = row.facts?.map(singleLine).filter(Boolean);
     if (attention?.length) return `${singleLine(row.status)} · ${attention.join(" · ")}`;
@@ -585,15 +880,15 @@ function rowSummary(row: InternalRow): string {
 
 function fit(value: string, width: number): string {
   const str = singleLine(value);
-  const visible = visibleWidth(str);
-  if (visible >= width) return truncateVisible(str, width);
+  const visible = piVisibleWidth(str);
+  if (visible > width) return piTruncateToWidth(str, width);
   return str + " ".repeat(width - visible);
 }
 
 function fitRight(value: string, width: number): string {
   const str = singleLine(value);
-  const visible = visibleWidth(str);
-  if (visible >= width) return truncateVisible(str, width);
+  const visible = piVisibleWidth(str);
+  if (visible > width) return piTruncateToWidth(str, width);
   return " ".repeat(width - visible) + str;
 }
 
@@ -601,22 +896,40 @@ function singleLine(value: unknown): string {
   return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
 
+function prepareDetail(navigatorId: string, options?: {logTailLines?: number}): void {
+  const {providerId,id}=splitRowKey(navigatorId);
+  try {state().providers.get(providerId)?.prepareDetail?.(id,options);}catch {/* observation failure retains cached detail */}
+}
+
 function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   const { providerId, id } = splitRowKey(navigatorId);
+  const failed = state().launchFailures?.get(navigatorId);
+  if (failed) return {providerId, id, title: failed.name ?? "Launch failed", status: "failed", statusTone: "failed", metadata: [], evidence: {label: "Launch error", text: failed.primary}};
   const provider = state().providers.get(providerId);
   if (!provider) return null;
   try { return provider.detail(id, now, options); } catch { return null; }
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
-  if (row.parentRow) return { action: "not-closable", providerId: row.providerId, id: row.id };
+  if (row.parentRow || row.readOnly) return { action: "not-closable", providerId: row.providerId, id: row.id };
   const provider = state().providers.get(row.providerId);
+  if (state().launchFailures?.delete(row.navigatorId)) {
+    state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+    return {action: "dismissed", providerId: row.providerId, id: row.id};
+  }
   if (!provider) return { action: "missing", providerId: row.providerId, id: row.id };
-  try { return provider.close(row.id); } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
+  try {
+    const outcome = provider.close(row.id);
+    if (["dismissed", "stopped-and-dismissed"].includes(outcome.action)
+      || outcome.action === "requested" && ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status)) {
+      state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+    }
+    return outcome;
+  } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
 }
 
 function closeHintFor(row: InternalRow | undefined): string | null {
-  if (!row || row.parentRow) return null;
+  if (!row || row.parentRow || row.readOnly) return null;
   const provider = state().providers.get(row.providerId);
   if (!provider) return null;
   try { return `${provider.armCloseLabel(row)} ${row.name || row.id}`; } catch { return null; }
@@ -642,28 +955,43 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
   if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
+  const methods = new Map<PropertyKey, { original: Function; exposed: Function }>();
+  const replacements = new Map<PropertyKey, Function>();
   const proxy: any = new Proxy(inner, {
     get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (typeof value !== "function" || replacements.get(prop) === value) return value;
+      const cached = methods.get(prop);
+      if (cached && cached.original === value) return cached.exposed;
+      // Capture the method before another editor decorator replaces it.
+      // A decorator can retain this wrapper and call it as its delegate.
+      let exposed = value.bind(target);
       if (prop === "handleInput") {
-        return (data: string) => {
+        exposed = (data: string) => {
           if (target.getText?.() === "" && handleMainListInput(data, deps)) {
             return;
           }
-          target.handleInput(data);
+          value.call(target, data);
         };
       }
-      if (prop === "render" && typeof target.render === "function") {
-        return (...args: unknown[]) => {
+      if (prop === "render") {
+        exposed = (...args: unknown[]) => {
           const s = state();
           if (s.editorFocusTarget === proxy) s.editorRenders = (s.editorRenders ?? 0) + 1;
-          return target.render(...args);
+          return value.apply(target, args);
         };
       }
-      const value = Reflect.get(target, prop);
-      return typeof value === "function" ? value.bind(target) : value;
+      methods.set(prop, { original: value, exposed });
+      return exposed;
     },
     set(target, prop, value) {
-      return Reflect.set(target, prop, value);
+      const cached = methods.get(prop);
+      const restoring = cached !== undefined && value === cached.exposed;
+      if (!Reflect.set(target, prop, restoring ? cached.original : value)) return false;
+      // Preserve replacement identity so the installing decorator can undo it.
+      if (!restoring && typeof value === "function") replacements.set(prop, value);
+      else replacements.delete(prop);
+      return true;
     },
   });
   // Pi mounts and focuses whatever the factory returns; an extension that
@@ -674,6 +1002,9 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
 
 function handleMainListInput(data: string, deps: HostDeps): boolean {
   const s = state();
+  if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+    for (const provider of s.providers.values()) provider.onOpen?.();
+  }
   const rows = listRows();
   if (rows.length === 0) {
     // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
@@ -743,7 +1074,7 @@ function dismissOverlay(): void {
 
 function handleMainListCloseKey(): void {
   const row = selectedMainListRow();
-  if (!row || row.parentRow) return;
+  if (!row || row.parentRow || row.readOnly) return;
   const s = state();
   const now = Date.now();
   const arm = s.mainListCloseArm;
@@ -757,7 +1088,6 @@ function handleMainListCloseKey(): void {
   }
   clearMainListCloseArm();
   s.mainListCloseArm = { id: row.navigatorId, armedAt: now };
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
   s.mainListCloseArmTimer = setTimeout(() => {
     clearMainListCloseArm();
     refreshMainListWidget();
@@ -766,11 +1096,26 @@ function handleMainListCloseKey(): void {
   refreshMainListWidget();
 }
 
+/**
+ * Open the shared detail overlay on the row a pointer chose. Setting the selection first keeps the
+ * keyboard path identical: Enter, x and the overlay's own keys then act on the clicked row.
+ */
+function openNavigatorRow(navigatorId: string): boolean {
+  const rows = listRows();
+  if (!rows.some((row) => row.navigatorId === navigatorId)) return false;
+  clearMainListCloseArm();
+  state().mainListSelectedId = navigatorId;
+  refreshMainListWidget();
+  openNavigator();
+  return true;
+}
+
 function openNavigator(): void {
   const s = state();
   const ctx = s.uiCtx;
   const deps = s.deps;
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
+  for (const provider of s.providers.values()) provider.onOpen?.();
   const rows = listRows();
   if (rows.length === 0) return;
   const selectedId = selectedMainListRow()?.navigatorId ?? rows[0]!.navigatorId;
@@ -815,6 +1160,7 @@ function openNavigator(): void {
       }, selectedId);
       overlayRef = {
         showDetail: (navigatorId) => component.showDetail(navigatorId),
+        refreshDetail: () => component.refreshDetail(),
         focus: () => {
         if (s.overlay !== overlayRef) return;
         try { handle?.focus?.(); } catch { /* ignore */ }
@@ -844,14 +1190,18 @@ function createOverlayComponent(
   onClosed: () => void,
   initialDetailId: string,
 ) {
+  let editorRendersSeen = state().editorRenders ?? 0;
+  let sawLiveEditor = liveEditorMounted(tui) === true;
   // The overlay only ever shows one row's detail; the rail below it is the list.
   const overlayState: OverlayState = { rows: initialRows, selected: 0 };
   let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
   const expandedSections = new Set<string>();
+  const initializedSections = new Set<string>();
   let detailId: string = initialDetailId;
   const initialRow = initialRows.find((row) => row.navigatorId === detailId);
+  prepareDetail(detailId,{logTailLines:logTailRows});
   let detail: BackgroundWorkDetail | null = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? (initialRow ? fallbackDetail(initialRow) : null);
-  applyDefaultExpandedSections(detail, expandedSections);
+  applyDefaultExpandedSections(detail, expandedSections, initializedSections);
   {
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
     if (idx >= 0) overlayState.selected = idx;
@@ -861,6 +1211,22 @@ function createOverlayComponent(
   let closed = false;
   let transcriptDetail: BackgroundWorkDetail | null = null;
   let transcriptComponent: Component | null = null;
+  let pointerTargets: Array<string | undefined> = [];
+  let pointerWidth = 0;
+  const pointer = createPointerNavigation((event) => {
+    if (closed || !Number.isInteger(event.y) || !Number.isFinite(event.x) || event.x < 0 || event.x >= pointerWidth) return undefined;
+    const target = pointerTargets[event.y];
+    if (target === BACK_TARGET) return event.x >= 3 && event.x < 3 + visibleWidth(BACK_TO_MAIN) ? target : undefined;
+    return target && listRows().some((row) => row.navigatorId === target) ? target : undefined;
+  }, (target) => {
+    if (target === BACK_TARGET) { backToMain(); return true; }
+    refreshRows();
+    const index = overlayState.rows.findIndex((row) => row.navigatorId === target);
+    if (index < 0) return false;
+    selectOverlayRow(index);
+    openDetail();
+    return true;
+  });
 
   const fg = (color: string, value: string) => theme?.fg ? theme.fg(color, value) : value;
 
@@ -871,13 +1237,14 @@ function createOverlayComponent(
   const detailScheduler = createRenderScheduler(() => {
     if (closed) return;
     detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+    applyDefaultExpandedSections(detail, expandedSections, initializedSections);
     requestRender();
     startDetailTimer();
   });
 
-  function refreshRows(): void {
+  function refreshRows(rows = listRows()): void {
     const selectedId = state().mainListSelectedId ?? overlayState.rows[overlayState.selected]?.navigatorId;
-    overlayState.rows = listRows();
+    overlayState.rows = rows;
     const nextIdx = selectedId ? overlayState.rows.findIndex((row) => row.navigatorId === selectedId) : -1;
     overlayState.selected = nextIdx >= 0 ? nextIdx : Math.min(overlayState.selected, Math.max(0, overlayState.rows.length - 1));
   }
@@ -898,7 +1265,6 @@ function createOverlayComponent(
     closeArmTimer = undefined;
     if (closeArm) {
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
     }
   }
 
@@ -923,8 +1289,10 @@ function createOverlayComponent(
     clearCloseArm();
     detailId = row.navigatorId;
     expandedSections.clear();
+    initializedSections.clear();
+    prepareDetail(detailId,{logTailLines:logTailRows});
     detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
-    applyDefaultExpandedSections(detail, expandedSections);
+    applyDefaultExpandedSections(detail, expandedSections, initializedSections);
     startDetailTimer();
     requestRender();
   }
@@ -939,9 +1307,14 @@ function createOverlayComponent(
     try { done(null); } catch { /* ignore */ }
   }
 
+  function backToMain(): void {
+    unfocusMainList();
+    close();
+  }
+
   function handleCloseKey(): void {
     const row = selectedRow();
-    if (!row || row.parentRow) return;
+    if (!row || row.parentRow || row.readOnly) return;
     const now = Date.now();
     if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {
       clearCloseArm();
@@ -967,30 +1340,32 @@ function createOverlayComponent(
     }
     clearCloseArm();
     closeArm = { id: row.navigatorId, armedAt: now };
-    try { applyCloseConfirmFooter((state().uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
     closeArmTimer = setTimeout(() => {
       closeArmTimer = undefined;
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
       requestRender();
     }, CLOSE_ARM_MS);
     closeArmTimer.unref?.();
     requestRender();
   }
 
-  let editorRendersSeen: number | undefined;
   /**
-   * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
-   * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
-   * its own non-container component still renders ours, so the wrapper also counts as live while it
-   * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+   * Close when a replacement editor takes over while the sheet is open (#332).
+   * A wrapper inside another extension's editor still counts as live if it rendered since
+   * the last overlay frame. Pi renders the editor before it composites overlays.
    */
   function closeIfEditorReplaced(): void {
-    const rendersBefore = editorRendersSeen;
     const renders = state().editorRenders ?? 0;
+    const rendered = renders !== editorRendersSeen;
     editorRendersSeen = renders;
-    state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
-    if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore) return;
+    state().editorRenderedLastFrame = rendered;
+    if (closed) return;
+    const mounted = liveEditorMounted(tui);
+    if (rendered || mounted === true) {
+      sawLiveEditor = true;
+      return;
+    }
+    if (mounted !== false || !sawLiveEditor) return;
     // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
     queueMicrotask(() => {
       if (closed) return;
@@ -1003,15 +1378,22 @@ function createOverlayComponent(
   return {
     render(width: number) {
       closeIfEditorReplaced();
-      refreshRows();
-      const railLines = buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
+      // The main-list refresh owns provider I/O; streaming paints reuse its snapshot.
+      refreshRows(state().mainListRows ?? []);
+      const rail = buildMainListLayout(overlayState.rows, width, deps.truncate, fg, {
         selectedId: selectedRow()?.navigatorId,
         focused: true,
       });
+      const armedRow = overlayState.rows.find((row) => row.navigatorId === closeArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { rail.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); rail.owners.push(undefined); }
+      const railLines = rail.lines;
       const editorLines = renderEditorLines(width);
       const bottomLines = [...railLines, ...editorLines];
       const overlayRows = state().detailOverlayRows;
       const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
+      const backControl = pointer.hovered === BACK_TARGET
+        ? highlightPointerTarget(theme, BACK_TO_MAIN, visibleWidth(BACK_TO_MAIN)) : undefined;
       let contentLines: string[];
       if (detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
@@ -1024,18 +1406,30 @@ function createOverlayComponent(
           width,
           deps.truncate,
           fg,
-          { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows },
+          { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows, backControl },
         );
       } else {
         transcriptDetail = null;
         transcriptComponent = null;
-        contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false });
+        contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false, backControl });
       }
-      if (overlayRows === undefined || detailRows === undefined) return [...contentLines, ...bottomLines];
-      const fittedContent = contentLines.slice(0, detailRows);
-      while (fittedContent.length < detailRows) fittedContent.push("");
-      // A terminal shorter than rail + editor keeps the bottom rows (the input frame) and drops the top.
-      return [...fittedContent, ...bottomLines].slice(-Math.max(1, overlayRows));
+      const fittedContent = detailRows === undefined ? contentLines : contentLines.slice(0, detailRows);
+      if (detailRows !== undefined) while (fittedContent.length < detailRows) fittedContent.push("");
+      const contentTargets = fittedContent.map((_, index) => index === 1 ? BACK_TARGET : undefined);
+      const allLines = [...fittedContent, ...bottomLines];
+      const allTargets = [...contentTargets, ...rail.owners, ...editorLines.map(() => undefined)];
+      // Match hit targets to the same viewport clipping as the visible lines.
+      const start = overlayRows === undefined ? 0 : Math.max(0, allLines.length - Math.max(1, overlayRows));
+      pointerTargets = allTargets.slice(start);
+      pointerWidth = renderWidth(width);
+      return allLines.slice(start).map((line, index) => {
+        if (!pointer.hovered || pointerTargets[index] !== pointer.hovered) return line;
+        if (pointer.hovered === BACK_TARGET) return line;
+        return highlightPointerTarget(theme, line, width);
+      });
+    },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      return pointer.handleMouse(event);
     },
     handleInput(data: string) {
       if (closed) return;
@@ -1054,7 +1448,7 @@ function createOverlayComponent(
       else if (deps.matchKey(data, "left")) {
         const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
         if (mainIdx >= 0) selectOverlayRow(mainIdx);
-        close();
+        backToMain();
       }
       else if (deps.matchKey(data, "enter")) {
         const row = selectedRow();
@@ -1073,18 +1467,29 @@ function createOverlayComponent(
         const key = data === "m" || data === "M" ? "m" : "ctrl+s";
         if (!row || !provider?.handleDetailInput?.(row.id, key)) return;
         detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
         refreshMainListWidget();
         requestRender();
       }
       else if (data === "l" || data === "L") {
         logTailRows = cycleLogTailRows(logTailRows);
+        prepareDetail(detailId,{logTailLines:logTailRows});
         if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
         requestRender();
       }
       else if (deps.matchKey(data, "escape")) {
-        unfocusMainList();
-        close();
+        backToMain();
       }
+    },
+    /** Observation arrival updates this row without resetting selection or folded sections. */
+    refreshDetail() {
+      if (closed) return;
+      prepareDetail(detailId,{logTailLines:logTailRows});
+      detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+      applyDefaultExpandedSections(detail, expandedSections, initializedSections);
+      startDetailTimer();
+      requestRender();
     },
     /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
     showDetail(navigatorId: string) {
@@ -1098,8 +1503,10 @@ function createOverlayComponent(
     },
     /** Close the overlay (done), e.g. when the navigator is disposed. */
     dismiss() { close(); },
-    invalidate() { transcriptComponent?.invalidate(); },
+    invalidate() { pointer.reset(); pointerTargets = []; transcriptComponent?.invalidate(); },
     dispose() {
+      pointer.reset();
+      pointerTargets = [];
       clearCloseArm();
       detailScheduler.dispose();
     },
@@ -1136,14 +1543,14 @@ function buildTranscriptDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { minRows?: number; maxRows?: number; bottomFooter?: boolean; logTailRows?: number } = {},
+  options: { minRows?: number; maxRows?: number; bottomFooter?: boolean; logTailRows?: number; backControl?: string } = {},
 ): string[] {
-  const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
+  const actions = [...(detail.footerActions ?? ["x close"])].join(" · ");
   const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
   let shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
   const lines: string[] = [
     fg("accent", rule(detail.title, width)),
-    dim(`   ← main · ${actions}`, fg),
+    `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`,
     "",
     `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
   ];
@@ -1167,7 +1574,7 @@ function buildTranscriptDetailLines(
   lines.push(...shownTranscriptLines);
   lines.push("");
   if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
-  const footerLines = [dim(`   ← main · ${actions}`, fg), dim(rule("", width), fg)];
+  const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
   return lines.map((line) => safeTruncate(line, width, truncate));
@@ -1223,10 +1630,10 @@ function buildDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; maxRows?: number; bottomFooter?: boolean } = {},
+  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; maxRows?: number; bottomFooter?: boolean; backControl?: string } = {},
 ): string[] {
   if (!detail) {
-    const lines = [rule("Work unavailable", width), dim("   ← back · Esc close", fg), ""];
+    const lines = [rule("Work unavailable", width), `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}`, ""];
     if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
     const footerLines = [dim(rule("", width), fg)];
     padBeforeFooter(lines, footerLines.length, options.minRows);
@@ -1239,8 +1646,8 @@ function buildDetailLines(
   const foldedAction = toggleableSectionId
     ? (options.expandedSections?.has(toggleableSectionId) ? "Enter collapse" : "Enter expand")
     : null;
-  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25", "Esc close"].filter(Boolean).join(" · ");
-  lines.push(dim(`   ← back · ${actions}`, fg));
+  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25"].filter(Boolean).join(" · ");
+  lines.push(`   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`);
   lines.push("");
   lines.push(`   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`);
   if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
@@ -1296,7 +1703,7 @@ function buildDetailLines(
   }
   lines.push("");
   if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
-  const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
+  const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
   return lines.map((line) => safeTruncate(line, width, truncate));
@@ -1314,8 +1721,12 @@ function firstToggleableSectionId(detail: BackgroundWorkDetail | null | undefine
   return detail && isFoldableEvidence(detail) ? EVIDENCE_SECTION_ID : undefined;
 }
 
-function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expandedSections: Set<string>): void {
+function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expandedSections: Set<string>, initializedSections: Set<string>): void {
   for (const section of detail?.foldedSections ?? []) {
+    if (initializedSections.has(section.id)) continue;
+    // Details can arrive after a running row's fallback. Initialize each section
+    // on first arrival, then preserve the user's choice across observations.
+    initializedSections.add(section.id);
     if (section.expandedByDefault) expandedSections.add(section.id);
   }
 }
@@ -1481,9 +1892,9 @@ function fill(glyph: string, label: string, width: number): string {
 }
 
 function safeTruncate(line: string, width: number, truncate: (s: string, width: number) => string): string {
-  if (visibleWidth(line) <= width) return line;
+  if (piVisibleWidth(line) <= width) return line;
   const cut = truncate(line, width);
-  return visibleWidth(cut) > width ? truncateVisible(cut, width) : cut;
+  return piVisibleWidth(cut) > width ? piTruncateToWidth(cut, width) : cut;
 }
 
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))", "g");

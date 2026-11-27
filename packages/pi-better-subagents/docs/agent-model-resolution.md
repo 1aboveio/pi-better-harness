@@ -1,6 +1,6 @@
 # Agent model resolution
 
-Resolver for DEV-23 model and effort choices. `model-resolution.ts` and `tier-policy.ts` do not spawn a child and do not edit the catalog. Lifecycle calls them before `spawnSubagentRun`.
+Resolver for DEV-23 model and effort choices. `model-resolution-core.ts` owns portable resolution; `model-resolution.ts` supplies Pi's effort-support helper. Neither spawns a child or edits the catalog. Lifecycle calls the Pi adapter before `spawnSubagentRun`. Skills on other hosts use the [shared worker catalog](worker-catalog.md).
 
 Normative rules are R3, R4, R8, and the resolver half of R10. Prose parsing and real Pi delegation stay with the acceptance unit.
 

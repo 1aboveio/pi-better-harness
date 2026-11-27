@@ -1,0 +1,12 @@
+The checkbox picker lists loaded skills by name and description; none are checked for this agent.
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Search >                                                                                          
+> [ ] review                        Review a change before handoff.                                 
+  [ ] test-quality                  Write tests that catch real bugs.
+  ✓ Apply selection (0 checked)
+  + Add skill path…
+  0 checked
+  0 checked applies No skill catalog, not discovery.

@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, win32 } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { CommandResult, CommandSpec } from "./types.js";
+import type { CommandResult, CommandSpec, StepGateFailure } from "./types.js";
 
 /** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
 const WINDOWS_BASH_CANDIDATES = [
@@ -17,7 +18,8 @@ const WINDOWS_BASH_CANDIDATES = [
  * POSIX keeps `/bin/bash`. Windows has no `/bin/bash`, and the `bash.exe` found
  * on PATH is usually the WSL launcher in System32 or the WindowsApps alias,
  * either of which would run the command inside WSL instead of Windows. Prefer
- * an explicit override, then Git for Windows, then a non-WSL `bash.exe` on PATH.
+ * an explicit override, then Pi's shellPath, Git for Windows, and a non-WSL
+ * `bash.exe` on PATH.
  *
  * Resolved lazily at spawn time, not module load: env-injection extensions
  * (e.g. pi-env) may apply settings.json `env` values after this module is
@@ -25,22 +27,53 @@ const WINDOWS_BASH_CANDIDATES = [
  *
  * Exposed for tests and reuse.
  */
-export function resolveDefaultShell(): string {
+export function resolveDefaultShell(shellPath?: string): string {
   const fromEnv = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
   if (fromEnv) return fromEnv;
   if (process.platform !== "win32") return "/bin/bash";
-  for (const candidate of WINDOWS_BASH_CANDIDATES) {
+  const configured = shellPath ?? readWindowsShellSetting();
+  const tried: string[] = [];
+  if (configured?.trim()) {
+    const candidate = /^~[\\/]/.test(configured) ? win32.join(homedir(), configured.slice(2)) : configured;
+    tried.push(candidate);
+    try {
+      accessSync(candidate, constants.F_OK);
+      return candidate;
+    } catch { /* An unavailable setting leaves standard Windows discovery enabled. */ }
+  }
+  const gitCandidates = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
+    .filter((directory): directory is string => Boolean(directory))
+    .map(directory => win32.join(directory, "Git", "bin", "bash.exe"));
+  for (const candidate of new Set([...gitCandidates, ...WINDOWS_BASH_CANDIDATES])) {
+    tried.push(candidate);
     if (existsSync(candidate)) return candidate;
   }
-  for (const dir of (process.env.PATH ?? "").split(";")) {
+  for (const dir of (process.env.PATH ?? process.env.Path ?? "").split(";")) {
     const trimmed = dir.trim();
     if (!trimmed || /(^|[\\/])(system32|windowsapps)([\\/]|$)/i.test(trimmed)) continue;
-    const candidate = join(trimmed, "bash.exe");
+    const candidate = win32.join(trimmed, "bash.exe");
+    tried.push(candidate);
     if (existsSync(candidate)) return candidate;
   }
-  // Nothing usable found: keep the POSIX default so the failure surfaces as a
-  // logged spawn error for the task instead of crashing the whole host process.
-  return "/bin/bash";
+  throw new Error("No Bash executable found for Windows Background tasks. Set Pi's shellPath in settings.json or "
+    + "PI_BETTER_BACKGROUND_TASKS_SHELL to a working bash.exe. Searched:\n  " + [...new Set(tried)].join("\n  "));
+}
+
+function readWindowsShellSetting(): string | undefined {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  try {
+    const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+    return typeof settings?.shellPath === "string" ? settings.shellPath : undefined;
+  } catch { return undefined; }
+}
+
+/** Capture effective session settings before dispatching a Windows launch. */
+export function resolveWindowsLaunchShell(pi: object): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const override = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
+  if (override) return override;
+  const settings = (pi as { getSettings?(): { shellPath?: unknown } }).getSettings?.();
+  return resolveDefaultShell(typeof settings?.shellPath === "string" ? settings.shellPath : undefined);
 }
 
 /** How long a timed-out process group has to exit on SIGTERM before SIGKILL. */
@@ -66,13 +99,112 @@ export function validateCommandSpec(spec: CommandSpec): void {
 /** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. Exposed for tests and reuse. */
 export function toMsysPath(path: string): string {
   const forward = path.replace(/\\/g, "/");
-  const drive = /^([A-Za-z]):(\/.+)$/.exec(forward);
-  return drive ? `/${drive[1].toLowerCase()}${drive[2]}` : forward;
+  const [, drive, rest] = /^([A-Za-z]):(\/.+)$/.exec(forward) ?? [];
+  return drive && rest ? `/${drive.toLowerCase()}${rest}` : forward;
 }
 
 /** Single-quote a value for safe literal use in a bash script line. Exposed for tests and reuse. */
 export function bashSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Env var carrying the operator's own command into a gated launch (#619).
+ *
+ * The gate script `eval`s this value instead of concatenating it, so a command
+ * containing quotes, heredocs, or multiple lines is parsed exactly as bash would
+ * parse it alone. The value is also kept out of the spawned argv.
+ */
+export const STEP_GATE_COMMAND_ENV = "PI_BG_STEP_GATE_COMMAND";
+
+/** Longest failing-step text recorded in task metadata; the log keeps it whole. */
+export const STEP_GATE_COMMAND_CHARS = 160;
+
+/**
+ * Bash script that runs an opt-in step gate around the operator's command (#619).
+ *
+ * The gate is a bash `errexit` contract, not shell parsing: `set -e` ends the
+ * command at the first unhandled failing step with that step's exit code, so a
+ * later command — in the same list, a function, a subshell, or a command
+ * substitution — can no longer turn a red gate green. A failure the command
+ * handles itself (`|| true`, `if`/`while`/`until` conditions, `!`, `&&`/`||`
+ * lists) is not a gate failure, and a discarded process-substitution status is
+ * not one either. `set -E` lets the ERR trap name a failure inside a shell
+ * function (functions run in the main shell); the trap records only main-shell
+ * failures (`BASH_SUBSHELL` 0), so a status bash itself discards is never claimed
+ * as the verdict — an unhandled command substitution still fails its assignment
+ * in the main shell. The EXIT trap writes the verdict to stderr, where the
+ * harness reads it back, and forces a failing step's code when the command
+ * disabled errexit and would have exited 0.
+ *
+ * Exposed for tests and reuse.
+ */
+export function stepGateScript(id: string): string {
+  return [
+    "# Step gate (#619) from pi-better-background-tasks: bash errexit ends the command at its first unhandled failing step.",
+    "set -E",
+    "set -e",
+    `__pi_step_gate_id=${bashSingleQuote(id)}`,
+    "__pi_step_gate_first=0",
+    "__pi_step_gate_command=",
+    "__pi_step_gate_record() {",
+    "  __pi_step_gate_status=$?",
+    "  if [ \"${BASH_SUBSHELL:-0}\" -eq 0 ] && [ \"${__pi_step_gate_first:-0}\" -eq 0 ] && [ \"$__pi_step_gate_status\" -ne 0 ]; then",
+    "    __pi_step_gate_first=$__pi_step_gate_status",
+    "    __pi_step_gate_command=${BASH_COMMAND:-}",
+    "  fi",
+    "  return 0",
+    "}",
+    "__pi_step_gate_finish() {",
+    "  __pi_step_gate_status=$?",
+    "  if [ \"${__pi_step_gate_first:-0}\" -ne 0 ]; then",
+    "    __pi_step_gate_text=${__pi_step_gate_command//$'\\n'/ }",
+    "    printf '\\n--- step gate [%s]: first failing step exit=%s; shell exit=%s: %s ---\\n' \"$__pi_step_gate_id\" \"$__pi_step_gate_first\" \"$__pi_step_gate_status\" \"$__pi_step_gate_text\" >&2",
+    "    if [ \"$__pi_step_gate_status\" -eq 0 ]; then exit \"$__pi_step_gate_first\"; fi",
+    "  fi",
+    "  exit \"$__pi_step_gate_status\"",
+    "}",
+    "trap '__pi_step_gate_record' ERR",
+    "trap '__pi_step_gate_finish' EXIT",
+    `if [ -z "\${${STEP_GATE_COMMAND_ENV}:-}" ]; then`,
+    "  printf '\\n--- step gate [%s]: the gated command was not provided; nothing ran ---\\n' \"$__pi_step_gate_id\" >&2",
+    "  exit 125",
+    "fi",
+    `eval "\${${STEP_GATE_COMMAND_ENV}}"`,
+  ].join("\n");
+}
+
+/**
+ * Read the gate's verdict marker from a task log (#619). Bash writes it as the last
+ * line of stderr, so log retention cannot turn a red gate green; a missing marker
+ * only costs the failing command's name, never the verdict carried by the exit code.
+ *
+ * Exposed for tests and reuse.
+ */
+export function parseStepGateFailure(logText: string, id: string): StepGateFailure | undefined {
+  const marker = `--- step gate [${id}]: first failing step exit=`;
+  let found: StepGateFailure | undefined;
+  for (const rawLine of logText.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith(marker) || !line.endsWith(" ---")) continue;
+    const match = /^--- step gate \[[^\]]+\]: first failing step exit=(-?\d+); shell exit=(-?\d+): (.*) ---$/.exec(line);
+    if (!match || match[3] === undefined) continue;
+    const stepExitCode = Number(match[1]);
+    const shellExitCode = Number(match[2]);
+    if (!Number.isInteger(stepExitCode) || stepExitCode === 0) continue;
+    // The marker is the newest evidence, and the shell writes only the first failing step.
+    found = {
+      stepExitCode,
+      shellExitCode: Number.isInteger(shellExitCode) ? shellExitCode : null,
+      command: boundedStepCommand(match[3]),
+    };
+  }
+  return found;
+}
+
+function boundedStepCommand(value: string): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > STEP_GATE_COMMAND_CHARS ? `${oneLine.slice(0, STEP_GATE_COMMAND_CHARS - 1)}…` : oneLine;
 }
 
 /**
@@ -95,6 +227,10 @@ export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): Comm
     return {
       ...spec,
       shell: true,
+      // The trampoline only redirects and execs an absolute program; sourcing
+      // the login profile (/etc/profile and friends) adds seconds of cold-start
+      // cost on a Windows runner and nothing the exec needs.
+      loginShell: false,
       // The MSYS2 runtime rewrites POSIX-looking argv (e.g. `/c`, `/opt/x.sh`)
       // when exec'ing native Windows binaries. Node spawn passed argv verbatim,
       // so conversion is disabled to keep raw-argv semantics unchanged. The
@@ -404,7 +540,8 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
     const [command, ...args] = spec.argv!;
     return { execPath: command!, execArgs: args };
   }
-  return { execPath: resolveDefaultShell(), execArgs: ["-lc", spec.command!] };
+  const resolved = process.platform === "win32" ? spec.resolvedWindowsShell : undefined;
+  return { execPath: resolved ?? resolveDefaultShell(), execArgs: [spec.loginShell === false ? "-c" : "-lc", spec.command!] };
 }
 
 /** Stdio for a spawned task: stdin is always ignored; stdout/stderr are piped (collected) or ignored (redirected into the log by the child itself). */

@@ -33,6 +33,8 @@ describe("catalog package", () => {
             "roles/role.developer.md",
             "roles/role.reviewer.md",
             "roles/role.architect.md",
+            "roles/role.supervisor.md",
+            "roles/role.writer.md",
         ]) {
             assert.ok(packed.includes(role), `pack is missing ${role}`);
         }

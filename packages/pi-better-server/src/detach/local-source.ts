@@ -12,7 +12,7 @@ import { createBundle, sha256File } from "../core/bundle.ts";
 import { readChunk } from "../core/transfer.ts";
 import { SERVER_EXTENSION_VERSIONS } from "../handshake.ts";
 import type { MoveEndpoint, MoveRecovery } from "../move/orchestrate.ts";
-import { localDaemonId, localRecovery, movesDir, readLocalRecord, removeMoveDir, writeLocalRecord } from "./local-state.ts";
+import { localBlockedReason, localDaemonId, localRecovery, movesDir, readLocalRecord, removeMoveDir, writeLocalRecord } from "./local-state.ts";
 
 export interface LocalSessionInfo {
   sessionId: string;
@@ -47,11 +47,13 @@ export class LocalSource implements MoveEndpoint {
 
   async call(command: Record<string, unknown>): Promise<{ data?: unknown }> {
     const moveId = command.moveId as string | undefined;
+    if (moveId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$/.test(moveId)) throw new Error("Invalid moveId");
+    if (command.sessionId !== undefined && command.sessionId !== this.options.session.sessionId) throw new Error("Source sessionId does not match the local session");
     switch (command.type) {
       case "move_fence":
         return { data: await this.fence(moveId!, typeof command.waitMs === "number" ? command.waitMs : 30_000) };
       case "move_export":
-        return { data: this.export(moveId!) };
+        return { data: this.export(moveId!, command.includeWorkspace as boolean | undefined, command.compression as "gzip" | "none" | undefined) };
       case "move_read": {
         const file = join(movesDir(this.options.stateDir), moveId!, "bundle.tar");
         if (!existsSync(file)) throw new Error(`No exported bundle for move ${moveId}`);
@@ -71,6 +73,7 @@ export class LocalSource implements MoveEndpoint {
         const { session, stateDir } = this.options;
         const record = readLocalRecord(stateDir, session.sessionId);
         if (record?.state !== "fenced") throw new Error(`Session ${session.sessionId} is not fenced`);
+        if (moveId && record.moveId !== moveId) throw new Error(`Session ${session.sessionId} is fenced by another move`);
         const { moveId: fencedBy, ...rest } = record;
         writeLocalRecord(stateDir, { ...rest, state: "owned" });
         if (fencedBy) removeMoveDir(stateDir, fencedBy);
@@ -90,12 +93,16 @@ export class LocalSource implements MoveEndpoint {
       if (Date.now() >= deadline) throw new Error("The session is mid-turn; wait for it to finish (or press Esc) and retry");
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
-    const epoch = previous?.epoch ?? 0;
-    writeLocalRecord(stateDir, { sessionId: session.sessionId, state: "fenced", epoch, moveId, cwd: session.cwd, ...(this.options.host ? { host: this.options.host } : {}) });
+    const settled = readLocalRecord(stateDir, session.sessionId);
+    if (settled && settled.state !== "owned") throw new Error(`Session ${session.sessionId} is already fenced or moved`);
+    const reason = localBlockedReason(stateDir, session.sessionId, session.sessionFile);
+    if (reason) throw new Error(reason);
+    const epoch = settled?.epoch ?? 0;
+    writeLocalRecord(stateDir, { sessionId: session.sessionId, sessionFile: session.sessionFile, state: "fenced", epoch, moveId, cwd: session.cwd, ...(this.options.host ? { host: this.options.host } : {}) });
     return { daemonId: localDaemonId(), epoch };
   }
 
-  private export(moveId: string): { size: number; sha256: string; files: number; worktreeFiles: number; excluded: number } {
+  private export(moveId: string, includeWorkspace?: boolean, compression?: "gzip" | "none"): { size: number; sha256: string; files: number; worktreeFiles: number; excluded: number } {
     const { session, stateDir } = this.options;
     const record = readLocalRecord(stateDir, session.sessionId);
     if (record?.state !== "fenced" || record.moveId !== moveId) throw new Error(`Session ${session.sessionId} is not fenced by move ${moveId}`);
@@ -105,6 +112,8 @@ export class LocalSource implements MoveEndpoint {
     const outFile = join(dir, "bundle.tar");
     const hasTranscript = session.sessionFile !== undefined && existsSync(session.sessionFile);
     const manifest = createBundle({
+      ...(includeWorkspace !== undefined ? { includeWorkspace } : {}),
+      ...(compression !== undefined ? { compression } : {}),
       cwd: session.cwd,
       outFile,
       agent: { kind: "pi", version: PI_VERSION, extensions: { ...SERVER_EXTENSION_VERSIONS } },

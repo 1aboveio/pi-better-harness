@@ -12,22 +12,62 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 
 ## Core Features
 
+### Activity Provider Contract
+
+New providers register `activityVersion: 1`, `getActivity(ctx)`, and
+`onActivityChanged(notify, ctx)`. Each snapshot supplies `nextDeadline` as an
+absolute millisecond timestamp or `null`. Notifications observe the captured
+workspace, session, and branch; they do not authorize a model turn. Goal owns
+continuation admission and transcript writes. Callbacks from replaced execution
+generations are ignored. Deadline timers are cancelled while the Goal is held,
+paused, complete, or foreground-busy, and recalculated on re-entry.
+
+Unversioned providers retain legacy compatibility: at most one scheduled
+collection every 2,000 ms per provider while observation is needed. This cost is
+reported as `compatibilityIntervalMs` in its activity snapshot. Notifying
+providers are cached between events and deadlines, even when legacy providers
+need a compatibility check. A v1 provider without notifications is refused; it
+never falls back to a global scanner. Elapsed-clock rendering reads only session
+memory and does not collect activity.
+
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
-- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. All three controls default to `on`. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; **Pause on Esc** controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, and `/goal settings pause-on-escape on|off`; bare `/goal settings` prints the saved values outside the TUI.
-- `escape` pauses the active goal by default, and it stays paused while you talk to the agent. With **Pause on Esc** off, observed editor Escape leaves the goal active while preserving native streaming interruption and menu/dialog cancellation. Automatic continuation remains independent. Hosts without terminal/focus inspection and unknown custom editors retain generic abort-to-pause behavior because they cannot identify Escape reliably. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. The status line shows the available resume path, and paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
+- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Automatic continuation, conversational resume, and **Pause on Esc** default to `on`. **Auto-start Goals** defaults to `off` and is also available directly on the `/harness-settings` main page. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; Pause on Esc controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, `/goal settings pause-on-escape on|off`, or `/goal settings auto-run on|off`; bare `/goal settings` prints the saved values outside the TUI.
+- `escape` pauses the active goal by default, and it stays paused while you talk to the agent. With **Pause on Esc** off, observed editor Escape leaves the goal active while preserving native streaming interruption and menu/dialog cancellation. Automatic continuation remains independent. Hosts without terminal/focus inspection and unknown custom editors retain generic abort-to-pause behavior because they cannot identify Escape reliably. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. Paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
 - A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a sticky hold recoverable with `/goal resume` or `alt+g`. Conversation, changed callback results, and background drains do not reopen an exhausted hold. Delays saturate at Node's timer limit, and observed background drains reset non-held progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
+- Permission failure reports remain available to the agent as diagnostic evidence. They do not pause Goal or require a one-turn `/goal resume` release. The agent can retry, wait, or continue other authorized work; tool and sandbox permissions remain enforced independently. Repeated unchanged work still reaches the ordinary no-progress hold. Legacy permission-paused goals resume normally with `/goal resume` or `alt+g`.
 - An observable-progress stall state for active goals.
+
+## Goal & Todo in Harness
+
+Harness saves the Goal objective, its acceptance criteria, boundaries and Todo steps.
+The Goal extension manages execution, including timing, pause, resume and completion
+checks. `/goal` shows the current Goal and its execution status. Use `/goal pause`
+or `/goal resume` on a saved Goal or unfinished Todo, including older checklists.
+Explicit resume starts work once. Pausing stores the hold before interrupting the
+foreground turn. Already delegated tasks keep their execution owners.
+
+In `/harness-settings`, **Auto-start Goals** defaults to Off. Turn it on to start a newly
+saved Goal with acceptance criteria, explicitly reopened work, or an issue workflow
+invoked with `/skill:rush-issues` or `/skill:resolve-issues`. Saving a checklist, opening a session and changing a setting do not
+start execution. A workflow-owned Goal keeps its coordinator and completion gates.
+
+A Goal with recorded acceptance criteria requires completion evidence for each criterion.
+If the criteria are empty, verify the objective. Open Todo steps and open items in an
+associated work ledger block agent-requested completion. The user can mark a running
+Goal complete directly with `/goal complete`. Explicitly reopening completed work
+with `update_todo({ goal: { objective, status: "active" } })` keeps its Todo and original workflow checks. With auto-start off, use `/goal resume` to restart it.
 
 ## Settings Storage
 
 Goal preferences are saved only in Pi's global `~/.pi/agent/settings.json` under
 `piBetterHarness.goal` (or `$PI_CODING_AGENT_DIR/settings.json` when overridden).
 The payload retains `version: 1` and the boolean `autoContinue`,
-`conversationalResume`, and `pauseOnEscape` fields; omitted controls default to
-`true`. Updates preserve other Pi settings and other `piBetterHarness` keys.
+`conversationalResume`, `pauseOnEscape`, and `autoStartFromOutcome` fields. The
+first three default to `true`; `autoStartFromOutcome` defaults to `false`.
+Updates preserve other Pi settings and other `piBetterHarness` keys.
 
 On first read, an existing `extensions/pi-better-goal-preferences.json` in the
 agent directory is validated and migrated when the global Goal key is absent.
@@ -56,6 +96,17 @@ metadata:
 Invoking the alias (`/skill:resolve-issues`, or `/goal /skill:resolve-issues task`) records the target coordinator, with the target's registered path, as the workflow owner, so its task plan, continuation instructions, and plan tools behave exactly as if the target had been invoked. The target must be a registered `workflow-role: coordinator` skill; an unregistered target, a non-coordinator target, or a chain of aliases is refused with a notice.
 
 After every successful context compaction (Pi's `session_compact` event) while a coordinator owns the session, the goal extension re-injects the skill so the model sees it before its next step; the compaction summary keeps run state but not the skill's rules, and the summary itself is left unchanged. If the skill directory ships `scripts/rehydrate.mjs` (checked first) or `rehydrate.mjs`, it runs as `node <script> --cwd <session cwd>` (no shell, 10-second timeout, stderr ignored) and its trimmed stdout becomes the message; empty output injects nothing, so the script decides whether a run is in progress. Without a script, or when it fails or times out, the message is: "Your context was just compacted while you coordinate the `<name>` workflow. Before your next step, read `<SKILL.md path>` in full, with no line limit." The message is a `workflow-rehydrate` custom message: inside a running agent loop (or before an overflow retry) it steers the next model call; otherwise it is appended without starting a turn.
+
+### Scheduler-backed workflow gates
+
+A coordinator that ships the resolve-issues scheduler (`scripts/next-actions.mjs` in its skill directory, or in a sibling `resolve-issues` skill) keeps its Goal from ending while the run still has work. The extension first runs `node next-actions.mjs --run <run dir> --slots 1 --peek --json` (read-only, 20-second timeout), where the run directory is the folder of the task plan bound through `update_todo` with `workflow.path` and `workflow.revision`. For completion and handback only, if the sole due action is `sync`, it reruns with `--sync` to obtain a fresh issue tree. This live check has a four-minute timeout to accommodate the tree fetcher's network attempts and follow-ups. Because `--peek` suppresses scheduler bookkeeping but not issue-tree cache writes, the live check uses a temporary copy of the scheduler's plan, tree, bookkeeping, review, and result inputs; it does not write the bound run. Heartbeat probes never request live synchronization. A failed or incomplete tree fetch that produces `sync` still refuses completion or handback; cached evidence is not treated as live. Output that is not a well-formed due list is a failure, not an empty run: a due entry without an `action` invalidates the whole answer instead of being dropped, so it cannot hide due work.
+
+How a gate reports an unverifiable run follows the workflow that owns it. The issue workflows (`rush-issues` and `resolve-issues`) always have a scheduler available (rush-issues through its `resolve-issues` dependency), so only that scheduler can declare their run finished: a missing plan, a missing scheduler, a scheduler error, a timeout, or invalid output refuses completion and leaves the Goal active and the workflow bound. A coordinator that ships no scheduler, such as a release workflow, has no run authority to consult, so its completion gate keeps the fail-open warning that avoids deadlocking it.
+
+- **Completion.** `update_goal` complete is refused, with each due action (action, unit, first 200 characters of detail), unless the scheduler reports `finish` and nothing else is due (an empty due list means workers are still running, so it is refused too). An unverifiable issue-workflow run is refused as well, with the step that restores it: bind the task plan with `update_todo({workflow:{path,revision}})`, rebind the run with `/skill:<coordinator>`, or fix the scheduler. The Goal stays active.
+- **Pause.** `release_workflow` is refused unless every unfinished unit is quiet (nothing due for it) or blocked `human-decision` with `humanItem` 2-5. A unit blocked `retry-ci` or any other reason the run retries itself, or a `human-decision` item 1, is named in the refusal and the Goal stays active. Execution failures keep the fail-open warning here, so a genuine human hold can always hand the run back.
+- **Auto-bind.** With **Auto-start Goals** on, invoking `/skill:rush-issues` or `/skill:resolve-issues` with no active goal (none, or a completed one) creates and activates a Goal whose objective is the invocation text, exactly as `/goal <invocation>` would, without sending the command a second time. A paused or active Goal is left alone.
+- **Wait timer.** When the scheduler's only due action is `wait` with a "next automatic attempt is at <ISO time>" detail, the next automatic continuation is scheduled for that time (at most the maximum timer delay, at least 5 seconds) and the wake-up is not counted as a no-progress retry. Other due work, or an unparseable time, uses the ordinary retry schedule. `autoContinue` off disables this timer.
 
 When `pi-better-plan` is installed, it defers its prompt, checklist, and `update_plan` tool to a skill-owned task plan. Skills without this metadata retain normal goal and plan behavior. The skill itself owns its planning format and worker policy; the harness does not enumerate skills or impose a shared workflow schema. The former `pi-better-plan-workflow: coordinator` metadata remains supported for installed skills.
 

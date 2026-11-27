@@ -3,10 +3,11 @@
  * Creation, import, and reload stay on `/agents`, where confirmation can be
  * collected. This module does not write files.
  */
-import { presentCatalog, presentCatalogEntry, type LaunchEnricher } from "./agent-inspection.ts";
+import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type ReadSkillDefaults } from "./agent-inspection.ts";
 import { canonicalCatalogId } from "./catalog-schema.ts";
 import { defaultUserRoot, loadCatalog } from "./catalog-store.ts";
 import { withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
+import { openSharedCatalog } from "./shared-catalog.ts";
 
 type TypeModule = {
     Object: (value: unknown) => unknown;
@@ -24,10 +25,13 @@ export interface DiscoveryHost {
 }
 
 export interface DiscoveryDeps {
+    sharedCatalog?: boolean;
     userRoot?: string;
     bundledRoot?: string;
     projectConfigDirName?: string;
     enrich?: LaunchEnricher;
+    /** Live session/config default skill choice; absent keeps the legacy config read. */
+    readSkillDefaults?: ReadSkillDefaults;
     sessionSettings?: AgentSessionSettings;
     resolveHost?: (ctx: { cwd: string; isProjectTrusted(): boolean }) => DiscoveryHost;
 }
@@ -70,16 +74,21 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
                 return toolError(`agents_catalog action must be list or inspect, got ${JSON.stringify(action ?? "")}. It does not create, import, reload, or launch. Nothing was written.`);
             }
             const host = resolveHost(ctx, deps);
-            const snapshot = withAgentSessionSettings(loadCatalog(host), host.sessionSettings ?? deps.sessionSettings?.snapshot());
+            const remote = (deps.sharedCatalog ?? !deps.userRoot) ? await openSharedCatalog(host.cwd, host.userRoot, "catalog-tool", host.projectTrusted) : undefined;
+            let snapshot;
+            try {
+                snapshot = remote ? await remote.get(host.sessionSettings ?? deps.sessionSettings?.snapshot())
+                    : withAgentSessionSettings(loadCatalog(host), host.sessionSettings ?? deps.sessionSettings?.snapshot());
+            } finally { remote?.close(); }
             if (action === "list") {
-                const listed = presentCatalog(snapshot, deps.enrich);
+                const listed = presentCatalog(snapshot, deps.enrich, deps.readSkillDefaults);
                 return {
                     content: [{ type: "text" as const, text: listed.text }],
                     details: { action, wrote: false, revision: listed.revision, entries: listed.entries, diagnostics: listed.diagnostics },
                 };
             }
             if (!params.id?.trim()) return toolError("inspect needs a role name or agent id. Call agents_catalog with action list to see them. Nothing was written.");
-            const view = presentCatalogEntry(snapshot, canonicalCatalogId(params.id), deps.enrich);
+            const view = presentCatalogEntry(snapshot, canonicalCatalogId(params.id), deps.enrich, deps.readSkillDefaults);
             return {
                 content: [{ type: "text" as const, text: view.text }],
                 details: { action, wrote: false, view },

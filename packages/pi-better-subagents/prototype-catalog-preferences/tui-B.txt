@@ -1,0 +1,34 @@
+  Agents / Developer  ·  prototype
+  A · Tabs   [B · Split view]   C · Compact inline
+
+  role.developer  ·  user definition
+
+  Runtime preferences                                      │  Role instructions
+  Saved separately from the Markdown definition.           │  Source: user override
+                                                           │
+  › Model                                                  │  Implement the requested change in the existing system
+      deepseek/deepseek-flash                              │  and own focused tests. Preserve behavior the task did
+      user definition                                      │  not ask to change, and record what you verified.
+                                                           │
+    Effort                                                 │  Product policy belongs to Product Manager. Architecture
+      high                                                 │  belongs to Architect. Independent review belongs to
+      user definition                                      │  Reviewer.
+                                                           │
+    Use bundled definition                                 │
+    Keeps model/effort; archives user Markdown.            │
+    Save defaults                                          │
+                                                           │
+  Effective: deepseek/deepseek-flash · high                │
+
+
+
+
+
+
+
+
+
+  Sample user override loaded. No real files are read or changed.
+
+  1/2/3 layout · Tab section · ↑↓ select/scroll · Enter change
+  Ctrl+S save · n fresh session · u bundle update · r reset · q quit

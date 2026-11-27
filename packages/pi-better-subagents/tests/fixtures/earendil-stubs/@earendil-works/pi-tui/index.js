@@ -1,5 +1,6 @@
 export class Input {}
 export class SelectList {}
+export function wrapTextWithAnsi(text) { return [text]; }
 export const Key = {
     Enter: 'enter',
     Escape: 'escape',

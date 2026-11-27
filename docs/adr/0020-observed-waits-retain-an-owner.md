@@ -1,0 +1,155 @@
+# Observed waits retain an execution owner
+
+## Status
+
+Accepted. This record owns the coordinator protocol for observed waits, including assignment-local continuation (#708), terminal outcomes (#710), bounded repair (#711) and outage reconciliation (#712). The [original lifecycle proposal](../plans/observed-waits-design.md) gives the design history.
+
+## Decision
+
+### Wait ownership
+
+**A workflow waiting for an external event must have a registered observer and an owner to receive its result.** The observer performs mechanical execution or state observation. The owner is the parent session or worker conversation that interprets the terminal evidence and decides what happens next. A registered observer must have a recoverable supervision path; an identifier pointing to an unsupervised task does not satisfy the invariant.
+
+Use background operations for established commands and external waits. Use model execution for judgment before an operation and interpretation after it. A worker may retain necessary synchronous checks, including long ones; duration alone does not determine ownership. A command-only polling assignment does not become model work because its requested final report is detailed.
+
+A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution. Stopping an assignment's owned background tasks is governed by [ADR 0025](0025-assignment-terminal-task-cleanup.md) and does not apply to parking.
+
+For Background dependencies, a stall alert can reach the owning session while its wait is pending. All dependencies must reach a terminal state before the wait delivers its completion notification. [Background task policy](0028-background-task-policy.md#waits-and-callbacks)
+
+### Assignment-local continuation (#708)
+
+An assigned worker retains execution authority independently of its parent's
+Goal and active session or branch. Its captured recipient is delivery identity,
+not execution authority. A compatible supervisor may resume the same saved
+conversation without activating that parent. Parent Goal pause, completion,
+clearing and replacement affect parent execution only.
+
+Admission preserves captured scope and intersects current mandatory permissions;
+missing expected permission authority is a refusal. Exact wait generation,
+cancellation epoch, launch token, writer safety and capacity remain mandatory.
+Parked workers reserve no slot after proven writer exit. Without a compatible
+host, ready work remains queued. Legacy pending records retain their captured
+policy; absent policy is refused rather than reconstructed from a new parent.
+Cross-package capability negotiation must explicitly refuse incompatible hosts.
+
+## Terminal Assignment Outcomes (#710)
+
+The coordinator commits an immutable terminal assignment decision and a typed,
+parent-addressed outbox event in one transaction. Dependency-ready events remain
+worker admission inputs. A terminal assignment disarms its linked waits without
+inventing interpretation or proving process exit. Published claims and writer
+lease identities remain available for independent reconciliation. Evidence pins
+move to the outcome; delivery receipts do not release them. Only the recorded
+parent's explicit disposition of the exact inspected outcome revision releases
+that outcome's obligations. Runtime adapters must validate current read authority
+and captured recipient identity before exposing bounded evidence or delivery.
+
+Storage version 3 migrates versions 1 and 2 transactionally and refuses newer versions.
+Hosts must advertise outcome support explicitly. A dependency-only host cannot
+claim to provide durable assignment delivery. The repair and outage sections
+below specify the later additions to this protocol.
+
+Each launch records its immutable assignment, attempt, worker and parent binding
+before dispatch. Automatic continuations retain that assignment; explicit
+follow-ups receive a new assignment ID even in the same saved conversation.
+Terminal waits are dispatch-disarmed, not acknowledged. They retain unresolved
+facts without occupying the pending-wait slot of a new assignment. Outcome pins
+preserve their original operation/revision identity, including dependencies that
+settle after the assignment fails.
+
+The Subagents finalizer supplies ordinary terminal decisions to the coordinator.
+For ordinary work without dependencies, `report_assignment_result` uses the same
+authenticated child bridge independently of Background capability. Subagents retains
+a versioned exact-attempt report and bounded artifact snapshots under captured and
+current read authority. Reports derive identity from registration, reject conflicting
+retries and stale writers, and do not terminalize live work. Ordinary finalization
+validates the retained report after coherent exit and required wait interpretation;
+incomplete reports cannot be overridden by earlier completion acknowledgements.
+Missing reports remain unverified. Crash, cancellation and writer fences retain
+precedence. Explicit follow-ups receive a fresh assignment and never copy reports.
+Parent delivery and exact-revision disposition remain separate from worker judgment.
+The existing callback batcher uses the stable outcome event as its notification
+identity and the attempt as its retrieval identity. Recipient transcript entries
+are reconciled before replay; a callback receipt remains distinct from inspection
+and exact-revision consumption through `subagent_result`. Parent execution admission
+controls automatic model continuation, not visibility of a committed outcome. If
+admission is refused while the captured session and branch are attached, append a
+visible notification with `triggerTurn: false` and retain its transcript receipt.
+A paused, completed or replaced Goal must not silently hide success or failure.
+Notification does not resume the Goal, consume the outcome, or retry the task;
+receipt reconciliation prevents later reload or Goal changes from duplicating it.
+Recorded branch anchors
+must remain on the recipient's branch. Current file-read permissions apply to
+bounded dependency evidence reads; neither foreign-session overrides nor outcome
+inspection confer worker acknowledgement or mutation authority. Standalone
+packages negotiate assignment outcome capability v1 when registering the worker
+bridge, and refuse an incompatible host instead of silently dropping delivery.
+
+## Bounded Autonomous Repair (#711)
+
+An unacknowledged published worker exit is reconciled against its exact claim,
+launch token, cancellation epoch, saved checkpoint and proven writer/lease exit.
+The coordinator records at most one repair per assignment, wait generation and
+structured fault (category, original checkpoint and exact dependency revisions).
+Attempt IDs, prose and observation times never define a new fault. Accounting
+commits before the existing launcher can dispatch; capacity deferral and retries
+of an existing launch token do not spend another allowance. Restart and host
+replacement read the same accounting. Repeated faults commit the #710 terminal
+failure and parent event without manufacturing interpretation. Explicit stop
+disarms repair; uncertain writers retain their fences. No background command is
+rerun. Missing history or authority is failure, not a manual recovery workflow.
+After terminal failure, later independent exact writer-exit and lease-release
+proof still reconciles the published claim through the terminal-aware hold
+contract. This neither reopens the outcome nor spends repair allowance or
+acknowledges dependency interpretation. Held terminal waits remain observable
+for this proof-only reconciliation, including after parent outcome consumption.
+Storage v4 adds durable repair records; older hosts must refuse that version.
+Read-only assignment observers support v4's unchanged wait/outcome fields using
+an explicit version allowlist. Observation never creates or migrates storage;
+unknown versions or unavailable required fields remain unverified.
+The outage observation journal remains #712's responsibility.
+
+## Coordinator Outage Observations (#712)
+
+Conversation storage retains version-1 observation reports under its existing
+durable root. A report identifies the assignment, wait generation, published
+claim and observed revision (cancellation epoch and exact dependency revisions
+when available). Its content-addressed identity excludes error prose and time.
+It is evidence for reconciliation, never a second wait scheduler or terminal
+authority. A local unverified observation means Waiting, not a committed hold.
+
+Compatible hosts advertise `outageReconciliation: 1`. Before parking, conversation
+storage must accept a durable probe; failure refuses parking and reports degraded
+supervision. Reports survive host replacement. Replay consults current coordinator
+records, preserves consumed/cancelled generations, and uses existing fenced repair
+and terminal-outcome transactions. A resolved report is a receipt of reconciliation,
+not worker interpretation or parent consumption. It releases no pins or fences.
+Crashes before that receipt replay the same claim; coordinator repair accounting
+and terminal-event identity remain authoritative. Unsupported hosts retain reports
+without claiming repair or durable delivery. Storage schema v4 remains unchanged:
+the separately versioned evidence format adds no coordinator table.
+
+A cancelled-publication observation has a distinct stable cancellation marker.
+It may reconcile only the exact writer's exit and released lease, never repair
+or execution admission. A held/disarmed coordinator wait or advanced cancellation
+epoch does not suppress that proof. The cancelled cache and terminal outcome stay
+immutable; observation receipts do not acknowledge the worker's dependency wait.
+
+## Context and trade-off
+
+Session `01a1a186-2daa-7346-ac9e-24b10043ade9` used background delivery watchers, then delegated merge monitoring to a Bash-only subagent that made 33 Bash calls, including repeated sleeps, before the user corrected it. The parent combined mechanical waiting with a rich final report. Keeping these phases separate preserves model ownership without paying for model turns to observe unchanged state.
+
+When this decision was proposed, saved-conversation continuation provided history, a new attempt, writer exclusivity and fresh admission. Background supervision depended on the attached session. Dependency-triggered continuation required a durable wait and a supervisor that could recover it.
+
+This extends [ADR 0016](0016-unified-execution-concurrency.md). That ADR introduced scheduling guidance without an automatic scheduler; this decision adds dependency-driven resumption for the recorded worker. It preserves the workflow and Goal authorities in [ADR 0018](0018-harness-outcome-todo.md) and the verified tool boundaries in [ADR 0007](0007-trusted-runtime-task-boundary.md) and [ADR 0017](0017-background-adapter-admission.md).
+
+## Consequences
+
+Each wait retains its assignment and generation through repair, terminal outcome
+and delivery. [Assignment progress](0022-assignment-progress-projection.md)
+defines the evidence required for completion. [Server and notifications](0029-notification-delivery.md)
+defines how the recorded recipient receives the event.
+
+Plans retain deliverables rather than watcher processes. A waiting deliverable references its operation and owner; absent supervision is visible as unmonitored work, not reported as healthy waiting. Worker parking releases active capacity without erasing the assignment. Restart, cancellation, permissions and duplicate events must preserve this relationship.
+
+Broad bans on long commands, model subagents used solely as pollers, and child processes kept idle to preserve context are rejected as the default design. Domain watchers retain their own state and evidence contracts: for example, merge observation uses an appropriate stateful delivery watcher, rather than replacing it with a stateless predicate.

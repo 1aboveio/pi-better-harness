@@ -1,0 +1,55 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { renderCompactTaskHeader } from "../../extensions/task-context/compact-task-header.js";
+import { changeLedgerPreference, parseOutcomeTodoPreferences } from "../../extensions/task-context/preferences.js";
+
+const theme = { fg: (_color: string, value: string) => value };
+
+test("the task header groups its subtitle with progress and runtime without changing saved text", () => {
+  const subtitle = "Deliver checkout\nwith a working\t支付 flow";
+  for (const width of [1, 4, 8, 20, 40, 80, 120]) {
+    const lines = renderCompactTaskHeader("2/8 complete", width, theme, { subtitle, disclosure: "▸", runtime: { status: "active", clock: "2:14" } });
+    assert.equal(lines.length, 3);
+    assert.ok(lines.every(line => visibleWidth(line) <= width), `fits ${width} terminal cells`);
+    if (width >= 40) {
+      assert.match(lines[0]!, /^todo ▸  2\/8 complete\s+goal active  2:14$/);
+      assert.equal(lines[2], "");
+    }
+    if (width >= 80) assert.equal(lines[1], "  Deliver checkout with a working 支付 flow");
+  }
+  assert.equal(subtitle, "Deliver checkout\nwith a working\t支付 flow");
+  const lines = renderCompactTaskHeader(undefined, 40, theme, { subtitle: "A".repeat(100) });
+  assert.equal(lines[0], "todo", "an outcome alone must not invent checklist progress");
+  assert.match(stripVTControlCharacters(lines[1]!), /\.\.\.$/);
+});
+
+test("the existing Todo header adds one bounded ledger count line without a second widget", () => {
+  const ledger = "ledger 1/3 complete · 2 open · 1 blocked · next: Ship API";
+  for (const width of [1, 12, 40, 80]) {
+    const lines = renderCompactTaskHeader("0/2 complete", width, theme, {
+      subtitle: "Deliver checkout",
+      disclosure: "▸",
+      runtime: { status: "active", clock: "2:14" },
+      ledger,
+    });
+    assert.equal(lines.length, 4, "header, subtitle, ledger, and one blank row, with no extra widget");
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    if (width >= 80) {
+      assert.equal(lines[1], "  Deliver checkout");
+      assert.equal(lines[2], `  ${ledger}`);
+    }
+    assert.equal(lines[3], "");
+  }
+});
+
+test("changing ledger settings preserves legacy fields without requiring them", () => {
+  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, ledger: false });
+  const legacy = Object.freeze({ version: 1, enabled: false, display: false, custom: 7 });
+  assert.deepEqual(parseOutcomeTodoPreferences(legacy), { version: 1, ledger: false });
+  assert.deepEqual(changeLedgerPreference(legacy, true), { ...legacy, ledger: true });
+  for (const invalid of [null, [], false, { version: 2 }, { version: 1, ledger: "On" }]) {
+    assert.throws(() => changeLedgerPreference(invalid, true), /Invalid outcomeTodo/);
+  }
+});

@@ -4,6 +4,12 @@ import { dirname, join } from "node:path";
 import { isPermissionBlocker, permissionBlockerKey, type PermissionBlocker } from "./shared-permission-blocker.js";
 import { EXTENSION_NAME } from "./types.js";
 
+/**
+ * Permission failure reports are diagnostics. This ledger records observed
+ * blockers so `/goal` and `get_goal` can show them; it never pauses a goal,
+ * limits resume, suppresses continuation/wakes/audits, or grants permission.
+ * Tool and sandbox enforcement remain the only authority.
+ */
 export const MAX_PERMISSION_BLOCKERS = 32;
 export const MAX_PERMISSION_RECORDS = 128;
 
@@ -13,7 +19,6 @@ export type PermissionRecord =
 
 export interface PermissionHold {
   blockers: PermissionBlocker[];
-  retryPending: boolean;
   recordCount: number;
   saturated: boolean;
 }
@@ -26,10 +31,9 @@ export function logicalPermissionBlockerKey(blocker: PermissionBlocker): string 
   });
 }
 
-/** Replay only compact goal-owned authority records, independently of progress resets. */
+/** Replay the goal's compact diagnostic records, independently of progress resets. */
 export function currentPermissionHold(ctx: ExtensionContext, goalId: string): PermissionHold {
   const blockers = new Map<string, PermissionBlocker>();
-  let retryPending = false;
   let recordCount = 0;
   let saturated = false;
   for (const entry of ctx.sessionManager.getBranch()) {
@@ -41,7 +45,6 @@ export function currentPermissionHold(ctx: ExtensionContext, goalId: string): Pe
     if (data.version !== 1 || typeof data.at !== "number" || !Number.isFinite(data.at) ||
         (data.kind === "permission-hold" && !isPermissionBlocker(data.blocker))) {
       saturated = true;
-      retryPending = false;
       recordCount += 1;
       continue;
     }
@@ -49,20 +52,15 @@ export function currentPermissionHold(ctx: ExtensionContext, goalId: string): Pe
       const key = logicalPermissionBlockerKey(data.blocker);
       if (blockers.has(key) || blockers.size < MAX_PERMISSION_BLOCKERS) blockers.set(key, compactBlocker(data.blocker));
       else saturated = true;
-      retryPending = false;
-    } else if (data.kind === "permission-release" && blockers.size > 0) {
-      retryPending = !saturated;
-    } else if (data.kind === "permission-retry-finished") {
-      retryPending = false;
     } else if (data.kind === "permission-gap") {
       saturated = true;
-      retryPending = false;
-    } else continue;
+    }
+    // Legacy release records remain countable history but carry no authority.
     recordCount += 1;
-    // Reserve room to record an incomplete scope and consume an outstanding release.
+    // Reserve room to record an incomplete scope.
     if (recordCount >= MAX_PERMISSION_RECORDS - 2) saturated = true;
   }
-  return { blockers: [...blockers.values()], retryPending, recordCount, saturated };
+  return { blockers: [...blockers.values()], recordCount, saturated };
 }
 
 function compactBlocker(blocker: PermissionBlocker): PermissionBlocker {
@@ -130,21 +128,10 @@ export function reportedPermissionGap(pi: ExtensionAPI, toolName: string, detail
   return typeof omitted === "number" && Number.isSafeInteger(omitted) && omitted > 0;
 }
 
-export function permissionRecord(goalId: string, kind: "permission-release" | "permission-retry-finished" | "permission-gap"): PermissionRecord {
-  return { version: 1, kind, goalId, at: Math.floor(Date.now() / 1000) };
+export function permissionGapRecord(goalId: string): PermissionRecord {
+  return { version: 1, kind: "permission-gap", goalId, at: Math.floor(Date.now() / 1000) };
 }
 
 export function permissionHoldRecord(goalId: string, blocker: PermissionBlocker): PermissionRecord {
   return { version: 1, kind: "permission-hold", goalId, blocker: compactBlocker(blocker), at: Math.floor(Date.now() / 1000) };
-}
-
-export function permissionInstruction(hold: PermissionHold): string {
-  return [
-    hold.retryPending
-      ? "The human explicitly released ONE bounded retry of the held operation and scope below. This is not a permission grant or evidence of success."
-      : "The goal is paused for a permission blocker. Answer ordinary questions, but do not advance goal or workflow work. Only /goal resume or alt+g releases one bounded retry; goal_resume cannot release it.",
-    ...hold.blockers.map((blocker) => `- ${blocker.context}: ${blocker.resource}; operation=${blocker.operation}; basis=${blocker.basis}; remoteOutcome=${blocker.remoteOutcome}` +
-      (blocker.runId ? `; runId=${blocker.runId}` : "") + (blocker.policySnapshotId ? `; policySnapshotId=${blocker.policySnapshotId}` : "")),
-    "Keep the same operation and scope. Do not switch to foreground execution, copy credentials, change authentication, or broaden permissions. Changed worker settings require a fresh worker; retain the logical operation identity. Runtime-observed refusals and agent-reported blockers are distinct. Unknown remote outcome is never evidence of success.",
-  ].join("\n");
 }

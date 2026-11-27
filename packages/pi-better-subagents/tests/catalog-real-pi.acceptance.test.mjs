@@ -8,8 +8,9 @@
  * Default npm test skips this file. A skip is not T13/T14/T26 evidence.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, fork } from "node:child_process";
+import { once } from "node:events";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -32,6 +33,132 @@ const LEGACY_MODEL = "xai/grok-4.3";
 const LEGACY_EFFORT = "low";
 const FOREGROUND_MODEL = "xai/grok-4.7";
 const FOREGROUND_EFFORT = "high";
+
+describe("catalog real SDK host admission", { concurrency: false }, () => {
+    it("isolates two actual Pi SDK processes and their branches through one server", { timeout: 30000 }, async () => {
+        const { startWorkRuntimeFixture } = await import("./work-runtime-fixture.mjs");
+        const parent = join(repoRoot, ".work/758"); mkdirSync(parent, { recursive: true });
+        const root = mkdtempSync(join(parent, "multi-sdk-")), agentDir = join(root, "agent"); mkdirSync(agentDir);
+        const children = [];
+        let stop, sequence = 0;
+        const call = async (child, params) => {
+            const id = ++sequence, result = once(child, "message"); child.send({ id, ...params });
+            const [message] = await result; assert.equal(message.id, id); assert.equal(message.error, undefined); return message.result;
+        };
+        try {
+            stop = await startWorkRuntimeFixture({ ...process.env, PI_CODING_AGENT_DIR: agentDir });
+            for (const name of ["Alpha", "Beta"]) {
+                const cwd = join(root, name); mkdirSync(join(cwd, ".pi/agents/roles"), { recursive: true });
+                writeFileSync(join(cwd, ".pi/agents/roles/ephemeral.md"), `---\nschema: pi-agent/v1\nkind: role\nid: role.ephemeral\nname: ${name}\n---\n${name} instructions.\n`);
+                const child = fork(new URL("./fixtures/catalog-sdk-host.mjs", import.meta.url), [], {
+                    execArgv: ["--import", "tsx"], env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CATALOG_WORKSPACE: cwd }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+                });
+                children.push(child); let errors = ""; child.stderr.on("data", data => { errors += data; });
+                const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
+                assert.equal(ready.ready, true);
+            }
+            const [a, b] = children;
+            const alpha = await call(a, { action: "inspect" }), beta = await call(b, { action: "inspect" });
+            assert.equal(alpha.view.identity.name, "Alpha"); assert.equal(beta.view.identity.name, "Beta");
+            assert.notEqual(alpha.sessionId, beta.sessionId);
+            await call(a, { action: "save", effort: "medium" });
+            await call(a, { action: "freeze" });
+            const edited = await call(a, { action: "save", effort: "high" });
+            assert.equal(edited.saved["role.ephemeral"].effort, "high"); assert.equal(edited.frozen["role.ephemeral"].effort, "medium");
+            const branchA = await call(a, { action: "branch", effort: "low" });
+            const branchB = await call(b, { action: "branch", effort: "medium" });
+            assert.equal(branchA.view.fields.effort.value, "low"); assert.equal(branchB.view.fields.effort.value, "medium");
+            const sibling = await call(a, { action: "branch", effort: "high" });
+            assert.notEqual(sibling.branchId, branchA.branchId); assert.equal(sibling.view.fields.effort.value, "high");
+            assert.equal((await call(a, { action: "revoke" })).view.found, false);
+            assert.equal((await call(b, { action: "inspect" })).view.identity.name, "Beta");
+        } finally {
+            for (const child of children) if (child.exitCode === null) { const exited = once(child, "exit"); child.send({ action: "stop" }); await exited; }
+            await stop?.(); rmSync(root, { recursive: true, force: true });
+        }
+    });
+    it("uses actual session-only trust and revokes old branch grants without persisting trust", { timeout: 30000 }, async () => {
+        const { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, ProjectTrustStore } = await import("@earendil-works/pi-coding-agent");
+        const { startWorkRuntimeFixture } = await import("./work-runtime-fixture.mjs");
+        const { default: extensionFactory } = await import("../index.ts");
+        const { openSharedCatalog } = await import("../shared-catalog.ts");
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        const parent = join(repoRoot, ".work/758"); mkdirSync(parent, { recursive: true });
+        const root = mkdtempSync(join(parent, "real-sdk-")), agentDir = join(root, "agent"), cwd = join(root, "project");
+        mkdirSync(agentDir); mkdirSync(join(cwd, ".pi/agents/roles"), { recursive: true });
+        writeFileSync(join(cwd, ".pi/agents/roles/ephemeral.md"), "---\nschema: pi-agent/v1\nkind: role\nid: role.ephemeral\nname: Ephemeral\n---\nSession-only fixture.\n");
+        const original = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = agentDir;
+        let stop, session, remote;
+        try {
+            stop = await startWorkRuntimeFixture();
+            const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+            settingsManager.setProjectTrusted(true);
+            const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true,
+                noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extensionFactory] });
+            await resourceLoader.reload();
+            ({ session } = await createAgentSession({ cwd, agentDir, resourceLoader, settingsManager, sessionManager: SessionManager.inMemory(cwd), noTools: "all" }));
+            await session.bindExtensions({ mode: "print" });
+            const ctx = session.extensionRunner.createContext();
+            assert.equal(ctx.isProjectTrusted(), true);
+            const command = session.extensionRunner.getRegisteredCommands().find(command => command.name === "agents");
+            assert.ok(command, "actual extension registered /agents");
+            await command.handler("list", ctx);
+            remote = await openSharedCatalog(cwd, agentDir);
+            const first = await remote.get();
+            assert.equal(first.roles.get("role.ephemeral").scope, "project");
+            const saved = await remote.edit({ action: "preferences", catalogId: "role.ephemeral", preferences: { model: "openai/gpt-6.1-sol", effort: "high" }, expectedRevision: first.revision });
+            assert.equal(saved.ok, true);
+            assert.equal((await remote.get()).savedSettings["role.ephemeral"].effort, "high");
+            assert.equal(new ProjectTrustStore(agentDir).get(cwd), null, "ephemeral trust was not persisted");
+            const source = join(root, "import.toml");
+            writeFileSync(source, 'name = "Imported"\ndescription = "Owned SDK import fixture."\ndeveloper_instructions = "Owned imported instructions."\n');
+            const imported = await command.handler(`import-codex "${source}" --role ephemeral --scope project`, {
+                ...ctx, hasUI: true, mode: "print", ui: { ...ctx.ui, confirm: async () => true, notify() {} },
+            });
+            assert.equal(imported.wrote, true, imported.message);
+            const runUi = (id, inputs, expected, branchEffort) => command.handler(`inspect ${id}`, {
+                ...ctx, hasUI: true, mode: "tui", ui: { ...ctx.ui, notify() {}, setWidget() {}, custom(factory) {
+                    return new Promise(resolve => {
+                        let component, saveScheduled = false;
+                        component = factory({ requestRender() {
+                            const text = component?.render(100).join("\n") ?? "";
+                            if (branchEffort && text.includes(branchEffort) && !saveScheduled) { saveScheduled = true; queueMicrotask(() => component.handleInput("\x13")); }
+                            if (text.includes(expected)) resolve();
+                        } },
+                            { fg: (_color, text) => text }, {}, resolve);
+                        component.render(100);
+                        if (branchEffort) {
+                            session.sessionManager.appendCustomEntry("pi-better-subagents-agent-settings", { version: 1, id, key: "effort", value: branchEffort });
+                            void session.extensionRunner.emit({ type: "session_tree" });
+                        } else for (const input of inputs) { component.handleInput(input); component.render(100); }
+                    });
+                } },
+            });
+            const noneKeys = ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r"];
+            assert.equal((await runUi("role.ephemeral", noneKeys, "Skills saved")).wrote, true);
+            assert.deepEqual((await remote.get()).roles.get("role.ephemeral").definition.defaults.skills, []);
+            session.sessionManager.appendCustomEntry("pi-better-subagents-agent-settings", { version: 1, id: "role.developer", key: "effort", value: "low" });
+            await session.extensionRunner.emit({ type: "session_tree" });
+            assert.equal((await runUi("role.developer", ["\x13"], "Defaults saved", "minimal")).wrote, true);
+            assert.equal((await remote.get()).savedSettings["role.developer"].effort, "minimal", "open UI revalidates changed branch grants before saving");
+            assert.equal((await runUi("role.developer", ["\x1b[B", "\x1b[B", "\x1b[B", "\r"], "Bundled model/effort restored")).wrote, true);
+            assert.equal((await runUi("role.developer", noneKeys, "Personal definition saved")).wrote, true);
+            assert.equal((await remote.get()).roles.get("role.developer").scope, "user");
+            assert.equal((await runUi("role.developer", ["p", "\r"], "Bundled instructions restored")).wrote, true);
+            assert.equal((await remote.get()).roles.get("role.developer").scope, "bundled");
+            settingsManager.setProjectTrusted(false);
+            await command.handler("list", ctx);
+            assert.equal((await remote.get()).roles.has("role.ephemeral"), false);
+            closeCatalogHost();
+        } finally {
+            remote?.close(); closeCatalogHost();
+            if (session) { await session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" }); session.dispose(); }
+            await stop?.();
+            if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
 
 describe("catalog real Pi acceptance", { concurrency: false }, () => {
     (enabled ? it : it.skip)("proves instruction to child launch with a real coordinator", { timeout: 780_000 }, async () => {
@@ -162,7 +289,7 @@ describe("catalog real Pi acceptance", { concurrency: false }, () => {
             };
             writeReport(report);
             const listText = report.phases.commands.list.join("\n");
-            for (const id of ["role.researcher", "role.explorer", "role.product-manager", "role.developer", "role.reviewer", "role.architect"]) {
+            for (const id of ["role.researcher", "role.explorer", "role.product-manager", "role.developer", "role.reviewer", "role.architect", "role.writer"]) {
                 assert.match(listText, new RegExp(id));
             }
             assert.match(report.phases.commands.create.join("\n"), /Created agent\.acceptance-dev/);
@@ -355,7 +482,7 @@ function staticUnproven() {
         "T04 second-process numeric collision",
         "T05 alias collision suffix",
         "T06 rename does not relabel an old run",
-        "T07 six preferred gpt-6 launches",
+        "T07 bundled preferred gpt-6 launches",
         "T08 model-only override matrix",
         "T11 no usable foreground",
         "T15 unavailable explicit model error",

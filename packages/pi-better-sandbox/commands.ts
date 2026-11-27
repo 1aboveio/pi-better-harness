@@ -28,11 +28,12 @@ import { DIAGNOSTICS_ACTIONS, handleDiagnosticsCommand } from "./diagnostics-com
 export const SANDBOX_COMMAND_NAME = "sandbox";
 
 export const SANDBOX_COMMAND_DESCRIPTION =
-    "Configure Main and Subagents sandbox permissions, activation defaults, and protected paths";
+    "Configure Main, Subagents, and Background tasks sandbox permissions, activation defaults, and protected paths";
 
 const USAGE = [
     "Usage:",
     "  /sandbox",
+    "  /sandbox status",
     "  /sandbox on",
     "  /sandbox off",
     "  /sandbox default on",
@@ -67,9 +68,9 @@ const NO_UI_REJECTION =
 const DEFAULT_OFF_TITLE = "Keep the foreground write sandbox off by default?";
 
 const DEFAULT_OFF_MESSAGE = [
-    "This session and future sessions will run foreground tools and local background",
-    "tasks with normal host write access until you run /sandbox on or change the",
-    "persistent default.",
+    "This session and future sessions will run foreground tools with normal host",
+    "write access until you run /sandbox on or change the persistent default.",
+    "Subagents and Background tasks keep their independent settings.",
 ].join("\n");
 
 const RESET_TITLE = "Restore the packaged write-deny defaults?";
@@ -84,6 +85,7 @@ export type SandboxCommandDeps = {
     setDefault: (enabled: boolean) => ForegroundSandboxStatus;
     /** Persist the session change before mutating enforcement. */
     setSessionEnabled?: (enabled: boolean) => ForegroundSandboxStatus;
+    describeProcessAccess?: (status: ForegroundSandboxStatus) => string;
     openPermissions?: (ctx: ExtensionCommandContext) => Promise<void>;
 };
 
@@ -94,6 +96,7 @@ export function createSandboxCommandHandler({
     onStateChange,
     setDefault,
     setSessionEnabled,
+    describeProcessAccess,
     openPermissions,
 }: SandboxCommandDeps) {
     return async function handleSandboxCommand(
@@ -112,12 +115,13 @@ export function createSandboxCommandHandler({
             return;
         }
 
-        if (subcommand === "") {
-            if (openPermissions && ctx.mode === "tui") {
-                await openPermissions(ctx);
-                return;
-            }
-            ctx.ui.notify(formatSandboxReport(controller.status()), "info");
+        if (subcommand === "" && openPermissions && ctx.mode === "tui") {
+            await openPermissions(ctx);
+            return;
+        }
+        if (subcommand === "" || subcommand === "status") {
+            const status = controller.status();
+            ctx.ui.notify([formatSandboxReport(status), describeProcessAccess?.(status)].filter(Boolean).join("\n\n"), "info");
             return;
         }
 
@@ -195,7 +199,7 @@ export function createSandboxCommandHandler({
                 ctx.ui.notify(
                     mode === "on"
                         ? `Foreground sandbox default is ON. ${status.reason}`
-                        : "Foreground sandbox default is off. Foreground tools and local background tasks are unconfined.",
+                        : "Foreground sandbox default is off. Foreground tools are unconfined; Background tasks settings are unchanged.",
                     mode === "on" && status.state !== "enabled" ? "warning" : "info",
                 );
             } catch (error) {
@@ -280,10 +284,11 @@ function announce(ctx: ExtensionCommandContext, change: () => DenyRuleReport): v
     }
 }
 
-const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics"] as const;
+const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics", "status"] as const;
 const DENY_ACTIONS = ["list", "add", "remove", "reset"] as const;
 
 const COMPLETION_DESCRIPTIONS: Readonly<Record<string, string>> = {
+    status: "Show effective Main sandbox and process-tool access",
     on: "Enable confinement for this session",
     off: "Disable confinement for this session",
     default: "Change the persistent activation default",

@@ -1,3 +1,4 @@
+import { createAssignmentProjector } from "./shared-assignment-projection.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,21 +126,25 @@ function ensureParentIndex(baseDir: string, directory: string, parentPid: number
 export function subagentStatusToItem(
   meta: SubagentRunMeta,
   status: SubagentEffectiveStatus,
+  baseDir?: string,
+  project = createAssignmentProjector({ baseDir }),
 ): BackgroundWorkItem {
-  const active = status === "running" || status === "orphaned";
+  const assignment = project(meta, status);
+  const active = assignment.state === "running" || assignment.state === "waiting";
   const unhealthy = status === "orphaned";
   const terminal = !active;
   const attention = status === "orphaned" || status === "failed" || status === "killed" || status === "lost" || status === "exited";
 
   const item: BackgroundWorkItem = {
     id: meta.id,
-    status,
+    status: assignment.state,
     active,
     unhealthy,
     terminal,
     attention,
     startedAt: meta.startedAt,
     details: {
+      assignment,
       callback: meta.callback !== false,
       batchId: meta.batchId,
       batchName: meta.batchName,
@@ -163,10 +168,11 @@ export function collectSubagentActivity(
   const parentPid = options.parentPid ?? process.pid;
   const processExists = options.processExists ?? defaultProcessExists;
   const metas = readParentSubagentMetas(options.baseDir, parentPid);
+  const project = createAssignmentProjector({ baseDir: options.baseDir });
 
   return {
     providerId: "subagents",
     label: "Subagents",
-    items: metas.map((meta) => subagentStatusToItem(meta, effectiveSubagentStatus(meta, processExists))),
+    items: metas.map((meta) => subagentStatusToItem(meta, effectiveSubagentStatus(meta, processExists), options.baseDir, project)),
   };
 }

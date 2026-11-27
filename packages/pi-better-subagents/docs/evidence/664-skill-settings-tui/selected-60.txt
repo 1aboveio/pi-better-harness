@@ -1,0 +1,15 @@
+# Selected skills · saved config
+# width: 60
+
+  Subagent settings
+
+> Delegation mode          adaptive                         
+  Concurrent subagents     6
+  Skill exposure           Selected skills
+                           Source: config defaultSkills
+  Selected skills          2 checked
+  Agents
+
+  Reset to defaults
+
+Up/Down Select · Space/Enter Change · ctrl+s Save default · 

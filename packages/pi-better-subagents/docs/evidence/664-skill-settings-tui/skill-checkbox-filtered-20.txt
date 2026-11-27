@@ -1,0 +1,13 @@
+# Checkbox picker filtered to test-quality; the hidden better-review stays checked
+# width: 20
+
+  Selected skills
+  Up/Down Move · Spa
+
+  Search > test     
+> [x] test-quality  
+    Write tests that
+  ✓ Apply selection 
+  + Add skill path…
+  2 checked · 1 chec
+  0 checked applies 

@@ -183,15 +183,36 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
         runGit(repo, `remote add origin ${upstream}`);
         runGit(repo, 'push -u origin HEAD');
 
+        // The clone can finish only after the foreground event loop sees it
+        // start. Synchronous Git deadlocks this handshake until the fixture exits.
+        const cloneStarted = join(base, 'clone-started');
+        const releaseClone = join(base, 'release-clone');
+        writeFileSync(join(stubDir, 'git'), `#!/bin/sh
+if [ "$1" = clone ]; then
+    test "$GIT_TERMINAL_PROMPT" = 0 || exit 11
+    touch ${JSON.stringify(cloneStarted)}
+    for attempt in $(seq 1 50); do
+        test -f ${JSON.stringify(releaseClone)} && break
+        sleep 0.02
+    done
+    test -f ${JSON.stringify(releaseClone)} || exit 12
+fi
+exec ${JSON.stringify(GIT_BIN)} "$@"
+`, { mode: 0o755 });
+
         const prevPath = process.env.PATH;
         process.env.PATH = `${stubDir}${prevPath ? `:${prevPath}` : ''}`;
+        const release = setInterval(() => {
+            if (existsSync(cloneStarted)) writeFileSync(releaseClone, '');
+        }, 10);
 
         try {
             const indexUrl = pathToFileURL(join(REPO_ROOT, 'index.ts')).href + `?live=${Date.now()}`;
             const { default: extensionFactory } = await import(indexUrl);
 
             const harness = createExtensionHarness(repo);
-            await extensionFactory(harness.pi);
+            const { managedDomainPort } = await import("./managed-domain-port.mjs");
+            await extensionFactory(harness.pi, managedDomainPort());
 
             const tool = harness.tools.get('subagent_spawn');
             assert.ok(tool, 'extension must register subagent_spawn');
@@ -227,6 +248,7 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             );
 
             const text = JSON.stringify(result);
+            assert.ok(existsSync(releaseClone), 'the foreground kept running during clone preparation');
             assert.match(text, /Subagent launched/, `execute must return launch confirmation, got: ${text}`);
             assert.match(text, /id=sa_/, 'execute must return a run id');
 
@@ -274,6 +296,7 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
                 }
             }
         } finally {
+            clearInterval(release);
             if (prevPath === undefined) delete process.env.PATH;
             else process.env.PATH = prevPath;
             rmSync(base, { recursive: true, force: true });
@@ -326,7 +349,8 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             const { default: extensionFactory } = await import(indexUrl);
 
             const harness = createExtensionHarness(wt);
-            await extensionFactory(harness.pi);
+            const { managedDomainPort } = await import("./managed-domain-port.mjs");
+            await extensionFactory(harness.pi, managedDomainPort());
 
             const tool = harness.tools.get('subagent_spawn');
             assert.ok(tool, 'extension must register subagent_spawn');
@@ -369,4 +393,50 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             rmSync(base, { recursive: true, force: true });
         }
     });
+});
+
+it('selects independent checkouts through single and batch launch and honors live or read-only requests', async (t) => {
+    installEarendilResolver();
+    const base = mkdtempSync(join(tmpdir(),'pi-isolation-live-'));
+    const repo = makeRepo(base,'source');
+    const bin = join(base,'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin,'pi'),'#!/bin/sh\nprintf \'{"type":"agent_end"}\\n\'\n',{mode:0o755});
+    const originalPath=process.env.PATH;
+    process.env.PATH=bin+':'+originalPath;
+    const { setConfigForTests }=await import('../config.ts');
+    const { readMeta }=await import('../registry.ts');
+    const { managedDomainPort }=await import('./managed-domain-port.mjs');
+    const { default:extension }=await import('../index.ts');
+    const harness=createExtensionHarness(repo);
+    extension(harness.pi,managedDomainPort());
+    t.after(async ()=>{
+        for(const handler of harness.handlers.get('session_shutdown')??[]) await handler({},harness.ctx);
+        process.env.PATH=originalPath;
+        setConfigForTests(undefined);
+        rmSync(base,{recursive:true,force:true});
+    });
+    const options={clean:true,sandbox:false,callback:false,tools:'read,edit',cwd:repo};
+    const single=async (overrides)=>{
+        const receipt=await harness.tools.get('subagent_spawn').execute('single',{prompt:'inspect',...options,...overrides},undefined,undefined,harness.ctx);
+        return readMeta(receipt.content[0].text.match(/id=(sa_[a-z0-9_]+)/)[1]);
+    };
+    for(const mode of ['clone','worktree']) {
+        setConfigForTests({maxConcurrent:12,...(mode==='worktree'?{gitWorkspace:mode}:{})});
+        const receipt=await harness.tools.get('subagent_spawn_batch').execute('batch',{shared:options,jobs:[{prompt:'first'},{prompt:'second'}]},undefined,undefined,harness.ctx);
+        assert.equal(receipt.details.launched.length,2,JSON.stringify(receipt));
+        const [a,b]=receipt.details.launched.map(row=>readMeta(row.id));
+        assert.equal(a.recipe.workspace.mode,mode);
+        assert.equal(b.recipe.workspace.mode,mode);
+        assert.notEqual(a.cwd,b.cwd);
+        assert.equal(lstatSync(join(a.cwd,'.git')).isDirectory(),mode==='clone');
+        writeFileSync(join(a.cwd,'README.md'),'worker');
+        assert.equal(readFileSync(join(b.cwd,'README.md'),'utf8'),'# source\n');
+        assert.equal(readFileSync(join(repo,'README.md'),'utf8'),'# source\n');
+    }
+    assert.equal((await single({tools:'read'})).cwd,repo);
+    assert.equal((await single({isolation:false})).cwd,repo);
+    const caller=join(base,'caller');
+    mkdirSync(caller);
+    assert.equal((await single({sandbox_dir:caller})).cwd,caller);
 });

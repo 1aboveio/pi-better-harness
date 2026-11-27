@@ -1,0 +1,32 @@
+The same saved override at 42 columns.
+
+Agents / Payments Developer
+[Settings]   Instructions   Files
+Tab switch · ↑↓ move · Enter · Esc
+
+    Model
+      openai/gpt-6.1-sol  inherited
+    Effort
+      high  inherited
+  > Skills
+      no skill catalog  override
+
+  Model and effort are session edits.
+  Skills save to the definition.
+
+  ID       agent.worker
+  Scope    user
+  Role     role.work
+  Tier     balanced
+  Actual   not resolved
+
+  Launch resolution
+  The catalog definition has no blocking
+   diagnostic, but that is not launchabi
+
+Showing 1-19 of 22 lines
+
+Ctrl+S Save defaults
+
+Skills saved (user): agent.worker · none
+(--no-skills)

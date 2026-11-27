@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { readRetainedResult } from "./retained-result.ts";
+import { worktreeDenialText } from "./worktree-feedback.ts";
+import { workspaceDelivery } from "./isolated-workspace.ts";
 /**
  * Model-facing subagent payloads (#312).
  *
@@ -8,6 +12,7 @@
  * omitted. Every cursor is bound to the selected session scope.
  */
 
+import { assignmentFor, assignmentDiagnostic } from "./assignment-projection.mjs";
 import { statSync } from "node:fs";
 import {
     assemblePriorityEnvelope,
@@ -37,10 +42,11 @@ import {
 } from "./lifecycle.ts";
 import { parseRun, parseRunForLifecycle, type ParsedRun } from "./parse.ts";
 import {
+    ABANDONED_LAUNCH_GRACE_MS,
     belongsToOrigin,
     effectiveStatus,
-    inspectRunMeta,
-    logPathFor,
+    inspectRunMeta, runDir,
+    evidenceLogPath,
     originOf,
     type RunCallbackOrigin,
     type RunMeta,
@@ -83,14 +89,22 @@ export interface PayloadRequest {
      * those that need action, as an incident page. Default output lists only what needs action.
      */
     history?: unknown;
+    /**
+     * Raw mode only: start from the newest retained byte and page toward the
+     * oldest one (#618). Without it, raw pages start at byte 0.
+     */
+    tail?: unknown;
 }
 
 export type LoadedRun =
-    | { kind: "ok"; meta: RunMeta }
+    | { kind: "ok"; meta: RunMeta; retained?: true }
     | { kind: "missing" }
     | { kind: "unreadable"; detail: string };
 
 export type SubagentToolSession = {
+    observeAssignment?: (id: string) => Promise<{ assignment: ReturnType<typeof assignmentFor>; snapshot: unknown }>;
+    observeList?: (scope: object) => Promise<any>;
+    inspectOutcome?: (meta: RunMeta, params: Record<string, unknown>, ctx?: unknown) => unknown;
     /** Current session origin; `ctx` is the tool call's host context when available. */
     getActiveOrigin?: (ctx?: unknown) => RunCallbackOrigin | undefined;
 };
@@ -114,7 +128,10 @@ function isAll(value: unknown): boolean {
  * run directory is missing.
  */
 export function loadRunRecord(id: string): LoadedRun {
-    return inspectRunMeta(id);
+    const live = inspectRunMeta(id);
+    if (live.kind === "unreadable" || (live.kind === "ok" && existsSync(runDir(id)))) return live;
+    const retained = readRetainedResult(id);
+    return retained ? { kind: "ok", meta: retained, retained: true } : live;
 }
 
 export function isRawMode(mode: unknown): boolean {
@@ -186,13 +203,25 @@ export function ownership(meta: RunMeta, origin: RunCallbackOrigin, parentPid = 
 /** Lifecycle metadata and log identity. A metadata-only transition is a change. */
 function contentRevisionFor(id: string, meta: RunMeta): string {
     return lifecycleContentRevision([
+        assignmentFor(meta, effectiveStatus(meta)).revision,
         meta.status,
         String(effectiveStatus(meta)),
         meta.exitCode ?? null,
         meta.endedAt ?? null,
         meta.lifecycleClassification ?? null,
         meta.failureReason ?? null,
-    ], logPathFor(id));
+    ], evidenceLogPath(id));
+}
+
+function assignmentLabel(meta: RunMeta): string {
+    const a = assignmentFor(meta, effectiveStatus(meta));
+    return a.state;
+}
+
+function projectionDiagnostic(meta: RunMeta): string {
+    const assignment = assignmentFor(meta, effectiveStatus(meta));
+    return meta.operations || meta.park || assignment.state !== effectiveStatus(meta)
+        ? assignmentDiagnostic(assignment) : "";
 }
 
 function elapsedFor(meta: RunMeta, now = Date.now()): string {
@@ -214,7 +243,7 @@ function outputIdentity(id: string, status: string, elapsed: string): string {
 
 function logGaps(id: string): EvidenceGap[] {
     try {
-        statSync(logPathFor(id));
+        statSync(evidenceLogPath(id));
         return [];
     } catch (error) {
         return [{ kind: "read", detail: error instanceof Error ? error.message : String(error) }];
@@ -227,7 +256,7 @@ function parserDiagnostics(run: ParsedRun): string | undefined {
 }
 
 function retrievalHint(id: string): string {
-    return `Retrieve retained evidence with subagent_output id="${id}" mode="raw" (16 KiB default, up to 64 KiB, caller cursor).`;
+    return `Retrieve retained evidence with subagent_output id="${id}" mode="raw" (16 KiB default, up to 64 KiB, caller cursor; tail:true starts at the newest bytes).`;
 }
 
 function bestParsed(run: ParsedRun): string {
@@ -386,12 +415,22 @@ function isContinuationPage(cursor: string | undefined): boolean {
     return cursorKind(cursor) === "t";
 }
 
+/** An explicit end-anchored raw read: `tail: true`. */
+function wantsTail(request: PayloadRequest): boolean {
+    return isAll(request.tail);
+}
+
 function rawPage(ctx: CallContext, cursor: string | undefined, remaining: number): VerbatimPage {
-    return pageRetainedFile(logPathFor(ctx.id), {
+    const page = pageRetainedFile(evidenceLogPath(ctx.id), {
         cursor,
         maxBytes: remaining,
         resource: `raw:${ctx.scopeKey}:${ctx.id}`,
+        ...(wantsTail(ctx.request) ? { direction: "backward" as const } : {}),
     });
+    // A forward raw page points at the end-anchored read: a multi-MB retained
+    // log must not cost one round-trip per page to reach its newest bytes (#618).
+    if (page.direction === "backward" || !page.hasMore) return page;
+    return { ...page, via: "tail:true reads the newest bytes first" };
 }
 
 function answerPage(ctx: CallContext, text: string, cursor: string | undefined, remaining: number, maxLines?: number): VerbatimPage {
@@ -475,17 +514,17 @@ export function resolveRunAccess(
     id: string,
     request: PayloadRequest,
     session: SubagentToolSession | undefined,
-): { kind: "missing" } | { kind: "unreadable"; detail: string } | { kind: "denied"; payload: string } | { kind: "ok"; meta: RunMeta } {
+): LoadedRun | { kind: "denied"; payload: string } {
     const loaded = loadRunRecord(id);
     if (loaded.kind === "missing") return loaded;
     if (loaded.kind === "unreadable") return loaded;
-    if (isAll(request.all)) return { kind: "ok", meta: loaded.meta };
+    if (isAll(request.all)) return loaded;
     const resolved = resolveActiveOrigin(session);
     // Unwired factories (no session provider) exist only for unit tests that
     // build a tool without the extension. index.ts always passes a provider,
     // so registered tools never take this branch; see the
     // "registered tools fail closed" test in subagent_output_budget.test.mjs.
-    if (!resolved.wired) return { kind: "ok", meta: loaded.meta };
+    if (!resolved.wired) return loaded;
     if (!resolved.available || !resolved.origin) {
         return { kind: "denied", payload: assembleOwnershipGap(id, "unavailable", request) };
     }
@@ -493,7 +532,7 @@ export function resolveRunAccess(
     if (owner !== "own") {
         return { kind: "denied", payload: assembleOwnershipGap(id, owner, request) };
     }
-    return { kind: "ok", meta: loaded.meta };
+    return loaded;
 }
 
 function defaultScope(): string {
@@ -507,10 +546,11 @@ export function assembleRunningResult(
     scopeKey = defaultScope(),
     timingLine?: string,
 ): string {
+    timingLine = [timingLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = String(effectiveStatus(meta));
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", terminal);
-    const identity = `[${id} · ${st} · ${elapsedFor(meta)}]`;
+    const identity = `[${id} · ${assignmentLabel(meta)} · ${elapsedFor(meta)}]`;
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -538,7 +578,7 @@ function assembleRaw(
 ): string {
     const terminal = status !== "running" && status !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, surface === "result" ? "subagent_result" : "subagent_output", terminal);
-    const identity = outputIdentity(id, status, elapsedFor(meta));
+    const identity = outputIdentity(id, assignmentLabel(meta), elapsedFor(meta));
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     const run = parseRun(id);
@@ -546,10 +586,10 @@ function assembleRaw(
     const continuing = cursorKind(request.cursor) === "f";
     return envelopeText({
         maxBytes,
-        identity: `${identity} raw retained log`,
+        identity: `${identity} raw retained log${wantsTail(request) ? " · newest first" : ""}`,
         // Raw evidence keeps whole excerpts and evidence paths.
         failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024, "full"),
-        diagnostics: joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
+        diagnostics: joinSections([projectionDiagnostic(meta), changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
         gaps: logGaps(id),
         verbatim: (remaining) => rawPage(ctx, pageCursorFor(request.cursor), remaining),
         verbatimReserve: Math.floor(maxBytes / 2),
@@ -564,11 +604,12 @@ export function assembleSubagentOutput(
     healthLine = "",
     scopeKey = defaultScope(),
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = String(effectiveStatus(meta));
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, st, request, "output", scopeKey);
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_output", terminal);
-    const identity = outputIdentity(id, st, elapsedFor(meta));
+    const identity = outputIdentity(id, assignmentLabel(meta), elapsedFor(meta));
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -617,9 +658,10 @@ export function assembleOrphanedResult(
     request: PayloadRequest = {},
     scopeKey = defaultScope(),
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, "orphaned", request, "result", scopeKey);
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", false);
-    const identity = `[${id} · orphaned · ${elapsedFor(meta)}]`;
+    const identity = `[${id} · ${assignmentLabel(meta)} · ${elapsedFor(meta)}]`;
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -660,14 +702,23 @@ export function assembleSubagentResult(
     request: PayloadRequest = {},
     healthLine = "",
     scopeKey = defaultScope(),
+    observed?: { hasFinalAnswer?: boolean },
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = effectiveStatus(meta);
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, String(st), request, "result", scopeKey);
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", true);
     const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
     const run = parseRunForLifecycle(id);
+    const stop = meta.timing?.stopReason;
+    const delivery = meta.recipe?.workspace ? workspaceDelivery(meta.recipe.workspace, meta.cwd, Boolean(meta.sandbox), id) : undefined;
+    const partial = stop ? `Partial result · stopped: ${stop}. Unfinished checks remain unverified.${run.unmatchedToolCalls.length ? "\nOpen at stop: " + run.unmatchedToolCalls.map(call => call.toolName).join(", ") : ""}${delivery ? "" : "\nWorkspace: " + meta.cwd}` : undefined;
+    const denial = meta.sandbox && meta.recipe?.workspace?.mode === "worktree" && run.deniedWorktreeGitOperation
+        ? worktreeDenialText(run.deniedWorktreeGitOperation, meta.cwd) : undefined;
+    const scratch = meta.taskScratch ? "Task scratch: " + meta.taskScratch : undefined;
+    healthLine = joinSections([partial, delivery, denial, scratch, healthLine]) ?? "";
     const lifecycle = resolveLifecycle(meta, run);
-    const identity = resultIdentity(id, String(st), exit, elapsedFor(meta), lifecycle.classification);
+    const identity = resultIdentity(id, assignmentLabel(meta), exit, elapsedFor(meta), lifecycle.classification);
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -732,6 +783,7 @@ export function assembleSubagentResult(
 
     const exceptional = isRoutineComplete(lifecycle) ? undefined : formatLifecycleDiagnostics(lifecycle);
     const answer = run.finalText || "";
+    if (observed) observed.hasFinalAnswer = Boolean(answer.trim());
     const fallback = !answer
         ? (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`
@@ -778,7 +830,7 @@ const LIST_INCIDENT_CACHE_MAX = 4096;
 let listIncidentComputations = 0;
 
 function listIncidentKey(id: string, terminal: boolean): string {
-    return JSON.stringify([terminal, fileChangeIdentity(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
+    return JSON.stringify([terminal, fileChangeIdentity(evidenceLogPath(id)), failureJournalFingerprint(failurePath(id))]);
 }
 
 export function listIncidentCount(id: string, cwd: string, terminal: boolean): ListIncidentCount {
@@ -828,11 +880,13 @@ export function listIncidentLabel(id: string, cwd: string, terminal: boolean): s
 export function listRevisions(
     items: Array<{ id: string; status: string; meta?: RunMeta }>,
     failureSignatures: string[],
+    assignmentOf = (meta: RunMeta) => assignmentFor(meta, effectiveStatus(meta)),
 ): { contentRevision: string; failureRevision: string } {
     return {
         contentRevision: revisionOf(items.map((item) => [
             item.id,
             item.status,
+            item.meta ? assignmentOf(item.meta).revision : null,
             item.meta?.status ?? null,
             item.meta?.exitCode ?? null,
             item.meta?.endedAt ?? null,
@@ -854,6 +908,12 @@ export function assembleSubagentListPayload(input: {
     statusesKey?: string;
     sessionWarning?: string;
     unreadable?: Array<{ id: string; detail: string }>;
+    /**
+     * Launch attempts that never produced a supervised run (no metadata, no
+     * log). They are not run evidence, so they are reported separately from
+     * `unreadable` and never counted as runs (#623).
+     */
+    abandonedLaunches?: string[];
     indexError?: string;
     incidentRuns?: number;
 }): string {
@@ -877,6 +937,8 @@ export function assembleSubagentListPayload(input: {
         });
     }
     const unreadable = input.unreadable ?? [];
+    const abandonedLaunches = input.abandonedLaunches ?? [];
+    const abandonedGrace = describeAbandonedLaunchGrace();
     const pageCursor = input.cursor && !statusCursorInput ? input.cursor : undefined;
     const identity = input.indexError
         ? "subagent_list · run index unreadable"
@@ -889,6 +951,9 @@ export function assembleSubagentListPayload(input: {
         input.indexError ? `Run index could not be read: ${input.indexError}. Cannot treat the registry as empty.` : undefined,
         unreadable.length
             ? `${unreadable.length} run record(s) with missing or unreadable metadata (ownership unknown; not counted as absent or healthy): ${unreadable.slice(0, 3).map((item) => item.id).join(", ")}${unreadable.length > 3 ? ", …" : ""}`
+            : undefined,
+        abandonedLaunches.length
+            ? `${abandonedLaunches.length} abandoned launch record(s), not run evidence and not counted: the launch stopped before any child started (prompt written, no metadata, no log): ${abandonedLaunches.slice(0, 3).join(", ")}${abandonedLaunches.length > 3 ? ", …" : ""}. Cleanup reclaims them after ${abandonedGrace}; remove one now with subagent_stop <id>.`
             : undefined,
         statusCursorInput && status.change === "failure" ? "change=failure" : undefined,
         statusCursorInput && status.change === "reset" ? "reset=stale-cursor (status cursor from another scope or filter)" : undefined,
@@ -923,6 +988,16 @@ export function assembleSubagentListPayload(input: {
 
 export function unknownRunError(id: string): Error {
     return new Error(`Unknown run id: ${id}`);
+}
+
+/** Human-readable grace period for abandoned launch records. */
+function describeAbandonedLaunchGrace(): string {
+    const minutes = Math.round(ABANDONED_LAUNCH_GRACE_MS / 60_000);
+    if (minutes % 60 === 0) {
+        const hours = minutes / 60;
+        return `${hours} hour${hours === 1 ? "" : "s"}`;
+    }
+    return `${minutes} minutes`;
 }
 
 export { originOf };

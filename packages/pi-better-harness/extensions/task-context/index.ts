@@ -1,0 +1,1184 @@
+import { supportsPromptSections, type PromptSectionTarget } from "../execution-policy.js";
+import { registerDynamicWorkflow } from "./dynamic-workflow-runtime.js";
+import { openWork, readDynamic } from "./dynamic-workflow.js";
+import type { WorkflowFrame } from "./workflow-view.js";
+import { describeRun, renderDynamicFrame } from "./dynamic-workflow-view.js";
+import { StringEnum } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
+import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
+import { commandAvailable } from "pi-better-goal/src/command-binding.ts";
+import { workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
+import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
+import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
+import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
+import { changeLedgerPreference, parseOutcomeTodoPreferences } from "./preferences.js";
+import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
+import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
+import { GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, type TaskContextRequest } from "pi-better-goal/src/task-context.ts";
+
+import {
+  completedPlanClearDelay,
+  planClearEntry,
+  planDisplayEntry,
+  planProgress,
+  planSetEntry,
+  reconstructPlanState,
+  replacePlan,
+} from "./plan-state.js";
+import { renderCompactPlan } from "./plan-render.js";
+import { createPlanWidget } from "./plan-widget.js";
+import { installLegacyPlanMask, type LegacyPlanMask } from "./legacy-plan-mask.js";
+import { COMPACT_PLAN_ROWS, plainPlanTheme } from "./plan-presentation.js";
+import {
+  readRushPlan, renderRushFrame, renderRushPlan, workflowBinding,
+  WORKFLOW_PLAN_ENTRY, visibleRushUnits, type RushPlan, type WorkflowPlanBinding,
+} from "./workflow-plan.js";
+import { cancelledRowsClearDelay, observeCancelledRows } from "./cancelled-rows.js";
+import { applyRushPlanUpdate, type RushPlanUpdate } from "./workflow-plan-update.js";
+import {
+  EXTENSION_NAME,
+  type PlanDisplayMode,
+  type PlanSnapshot,
+  type PlanStepInput,
+} from "./types.js";
+import {
+  WORK_LEDGER_PROMPT_GUIDELINES,
+  executeLedgerMutation,
+  executeLedgerQuery,
+  formatLedgerList,
+  getTodoLedgerParameters,
+  updateTodoLedgerParameters,
+  type GetTodoLedgerInput,
+  type UpdateTodoLedgerInput,
+  type WorkLedgerSessionBinding,
+} from "./work-ledger-actions.js";
+import { openWorkLedgerStore, type WorkLedger } from "./work-ledger.js";
+import {
+  WORK_LEDGER_ASSOCIATION_ENTRY,
+  WORK_LEDGER_REMINDER_MESSAGE,
+  formatWorkLedgerReminder,
+  formatWorkLedgerTodo,
+  readAssociatedWorkLedger,
+  restoreWorkLedgerAssociation,
+  workLedgerAssociationEntry,
+  workLedgerHeader,
+  workLedgerTodoSummary,
+} from "./work-ledger-session.js";
+
+const PlanStepSchema = Type.Object({
+  id: Type.Optional(Type.String({ description: "Stable step id used by dependsOn (letters, digits, underscore, hyphen; max 64 characters)." })),
+  step: Type.String({ description: "Short, plain-language action label, usually 3-7 words, such as 'Add Todo toggle'. Keep methods and acceptance criteria outside the label." }),
+  status: StringEnum(["pending", "in_progress", "completed", "blocked"] as const),
+  dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Ids of prerequisite steps in this plan. All must be completed before this step starts." })),
+});
+
+const WorkflowRowChangeSchema = Type.Object({
+  id: Type.Optional(Type.String({ description: "Unit id, component id (e.g. C1), or fleet stage (explore, implement, review, ci, canary). Omit for run-level fields." })),
+  target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Required with add. Otherwise only needed when the same id names two kinds of row." })),
+  set: Type.Optional(Type.Object({}, {
+    additionalProperties: true,
+    description: "Fields to set on that row, e.g. status, stage, attempt, retries, diagnoses, worker, clock, note, headSha, pr. Each value replaces the old one; null clears it. Keep title a short, plain-language action label, usually 3-7 words.",
+  })),
+  add: Type.Optional(Type.Object({}, {
+    additionalProperties: true,
+    description: "A new unit or component row for a scope change, with target unit or component. A unit needs id, title, stage, status; a component needs id and status. Use a short, plain-language action for title, usually 3-7 words. Send set or add, not both.",
+  })),
+});
+
+const WorkflowUpdateSchema = Type.Object({
+  path: Type.Optional(Type.String({ description: "Absolute path to .resolve-issues/rush/<run-id>/task-plan.json. Send with revision to bind or reload a workflow plan; omit event for a read-only bind." })),
+  event: Type.Optional(Type.String({ description: "Short name for a saved transition, e.g. unit-validated. Required when sending changes, decision, or profiling; omit for a read-only bind." })),
+  revision: Type.Optional(Type.Integer({ minimum: 0, description: "The planRevision you last saw. Required with path. The update is refused if the saved plan has a different revision." })),
+  changes: Type.Optional(Type.Array(WorkflowRowChangeSchema, { maxItems: 50, description: "Every row this transition changes. All of them are saved together as one revision." })),
+  decision: Type.Optional(Type.Object({
+    id: Type.String({ description: "New, unique decision id." }),
+    humanWords: Type.String({ description: "The human's words, quoted or closely paraphrased." }),
+    changes: Type.String({ description: "What the decision changes: units, validation, forbidden actions." }),
+    supersedes: Type.Optional(Type.String({ description: "Id of the earlier decision this one replaces." })),
+    answers: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Answer-file keys resolved by this decision, e.g. results/127-impl-1.json." })),
+    removedUnits: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "For source user, list the exact unit IDs or excluded issue references the user explicitly removed from this Goal." })),
+    source: Type.Optional(Type.String({ minLength: 1, description: "Decision provenance, e.g. agent-recommendation." })),
+  }, { description: "A human decision to record with this transition." })),
+  profiling: Type.Optional(Type.Object({}, {
+    additionalProperties: true,
+    description: "Extra fields for this transition's profiling event, e.g. outcome, wallMs, waitMs, headSha.",
+  })),
+}, { description: "Bind, reload, or update a workflow-owned task plan. Send this instead of plan while a workflow owns planning." });
+
+const OutcomeSchema = Type.Object({
+  objective: Type.String({ minLength: 1 }),
+  doneWhen: Type.Optional(Type.Array(Type.String())),
+  boundaries: Type.Optional(Type.Array(Type.String())),
+  source: Type.Optional(Type.String()),
+  status: Type.Optional(StringEnum(["active", "paused", "complete", "cancelled"] as const)),
+});
+const UpdatePlanSchema = Type.Object({
+  explanation: Type.Optional(Type.String()),
+  newTask: Type.Optional(Type.Boolean({ description: "Start an unrelated task: replace the previous Goal and detach its Todo. Omit for a correction or refinement of the current task." })),
+  todo: Type.Optional(Type.Array(PlanStepSchema, { maxItems: 50 })),
+  goal: Type.Optional(OutcomeSchema),
+  outcome: Type.Optional(Type.Object(OutcomeSchema.properties, { description: "Legacy alias for goal. Send one field." })),
+  workflow: Type.Optional(WorkflowUpdateSchema),
+  ledger: Type.Optional(updateTodoLedgerParameters),
+});
+
+type WorkflowPlanInput = Omit<RushPlanUpdate, "event"> & { path?: string; event?: string };
+
+const goalHeaderRuntime = (goal: GoalSnapshot) => ({ status: goal.status, clock: formatClockDuration(goalTiming(goal).activeSeconds) });
+const PLAN_ACTIONS: readonly AutocompleteItem[] = [
+  { value: "clear", label: "clear", description: "Remove the current Todo and keep its Goal" },
+  { value: "hide", label: "hide", description: "Hide the Todo widget" },
+  { value: "show", label: "show", description: "Restore automatic Todo display" },
+  { value: "expand", label: "expand", description: "Show all steps in the Todo widget" },
+  { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
+  { value: "split ", label: "split", description: "Set workflow task and diagram widths, e.g. split 3:2 or split 1:1" },
+  { value: "pin auto", label: "pin auto", description: "Use automatic Todo pinning" },
+  { value: "pin on", label: "pin on", description: "Keep Todo pinned" },
+  { value: "pin off", label: "pin off", description: "Keep Todo unpinned" },
+];
+const LEDGER_ACTIONS: readonly AutocompleteItem[] = [
+  { value: "list", label: "list", description: "List this project's work ledgers" },
+  { value: "attach ", label: "attach", description: "Associate an existing ledger with this session" },
+  { value: "switch ", label: "switch", description: "Associate a different existing ledger" },
+  { value: "detach", label: "detach", description: "Remove this session's ledger reference" },
+  { value: "show", label: "show", description: "Show the associated ledger" },
+];
+
+export function planArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart().toLowerCase();
+  const matches = PLAN_ACTIONS.filter((action) => action.value.startsWith(prefix));
+  return matches.length > 0 ? [...matches] : null;
+}
+
+export function ledgerArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart().toLowerCase();
+  const matches = LEDGER_ACTIONS.filter((action) => action.value.startsWith(prefix));
+  return matches.length > 0 ? [...matches] : null;
+}
+
+function workflowPlanOwner(ctx: ExtensionContext, entries = ctx.sessionManager.getBranch()): string | null {
+  let owner: string | null = null;
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== "pi-better-workflow") continue;
+    const data = entry.data as { version?: unknown; kind?: unknown; owner?: { name?: unknown; planOwner?: unknown } } | null;
+    if (data?.version !== 1) continue;
+    if (data.kind === "clear") owner = null;
+    else if (data.kind === "set" && data.owner?.planOwner === "workflow" && typeof data.owner.name === "string") {
+      owner = data.owner.name;
+    }
+  }
+  return owner;
+}
+
+// Completion releases the coordinator but leaves its plan available for a reopen.
+function reopeningPlanOwner(pi: ExtensionAPI, ctx: ExtensionContext, goal: GoalSnapshot): string | null {
+  const command = goal.command;
+  if (command?.source !== "skill") return null;
+  const binding = workflowBinding(ctx.sessionManager.getBranch());
+  if (binding) return binding.owner;
+  if (!commandAvailable(pi, command)) throw new Error(`Restore /${command.name} before changing its task plan.`);
+  const owner = workflowOwnerFromSkill(command.name.slice("skill:".length), command.path,
+    name => pi.getCommands().find(item => item.source === "skill" && item.name === `skill:${name}`)?.sourceInfo.path);
+  return owner?.name ?? null;
+}
+
+export default function taskContextExtension(pi: ExtensionAPI): void {
+  initializeNavigatorPanels(pi);
+  let ledgerEnabled = false;
+  let sessionContext: ExtensionContext | undefined;
+  let outcome: Outcome | null = null;
+  const taskTools = ["update_todo", "get_todo", "dynamic_workflow"] as const;
+  const syncTools = (): void => {
+    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+    const active = pi.getActiveTools().filter(name => !taskTools.includes(name as typeof taskTools[number]));
+    active.push("update_todo", "get_todo");
+    if (dynamic.available()) active.push("dynamic_workflow");
+    pi.setActiveTools(active);
+  };
+  const saveOutcome = (next: Outcome): void => {
+    if (next.goalId) delete next.reopenedGoalId;
+    outcome = next;
+    pi.appendEntry(OUTCOME_ENTRY, { version: 1, outcome: next });
+    refresh(true);
+  };
+  let currentPlan: PlanSnapshot | null = null;
+  let displayMode: PlanDisplayMode = "auto";
+  let expanded = false;
+  let leftShare = 0.5;
+  let displayedWorkflowOwner: string | null = null;
+  let rushBinding: WorkflowPlanBinding | null = null;
+  let rushPlan: RushPlan | null = null;
+  let rushError: string | null = null;
+  let invalidateWidget: (() => void) | undefined;
+  let refreshWidget: ((force?: boolean) => void) | undefined;
+  let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
+  let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
+  let ledgerId: string | null = null;
+  let ledger: WorkLedger | null = null;
+  let ledgerError: string | null = null;
+  let agentLoopActive = false;
+  const cancelCancelledRowsTimer = (): void => {
+    if (cancelledRowsTimer !== undefined) clearTimeout(cancelledRowsTimer);
+    cancelledRowsTimer = undefined;
+  };
+  const scheduleCancelledRowsClear = (): void => {
+    cancelCancelledRowsTimer();
+    if (!rushPlan) return;
+    const delay = cancelledRowsClearDelay(rushPlan);
+    if (delay === null) return;
+    const timer = setTimeout(() => {
+      if (cancelledRowsTimer !== timer) return;
+      cancelledRowsTimer = undefined;
+      refresh(true);
+      scheduleCancelledRowsClear();
+    }, delay);
+    cancelledRowsTimer = timer;
+    timer.unref?.();
+  };
+  const observeCancellations = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext): void => {
+    observeCancelledRows(plan, binding, ctx.sessionManager.getBranch(), (type, data) => pi.appendEntry(type, data));
+  };
+  const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
+    displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
+      ? owner.name : null;
+    if (displayedWorkflowOwner) {
+      cancelCancelledRowsTimer();
+      rushBinding = null;
+      rushPlan = null;
+      rushError = null;
+    }
+    refresh(true);
+  });
+
+  const refresh = (force = false): void => {
+    refreshWidget?.(force);
+  };
+
+  const activeSessionEntries = (ctx: ExtensionContext): Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }> => {
+    const manager = ctx.sessionManager as unknown as {
+      getBranch(): Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }>;
+      buildContextEntries?: () => Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }>;
+    };
+    try {
+      return manager.buildContextEntries?.() ?? manager.getBranch();
+    } catch {
+      return manager.getBranch();
+    }
+  };
+
+  const restoreLedgerState = (ctx: ExtensionContext): void => {
+    ledgerId = restoreWorkLedgerAssociation(ctx.sessionManager.getBranch());
+    ledger = null;
+    ledgerError = null;
+    if (!ledgerId || !ledgerEnabled) return;
+    try {
+      ledger = readAssociatedWorkLedger(ctx.cwd, ledgerId);
+    } catch (error) {
+      ledgerError = error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  const ledgerHeaderText = (): string | undefined => {
+    if (!ledgerEnabled) return undefined;
+    if (ledger) return workLedgerHeader(ledger);
+    return ledgerId ? `ledger ${ledgerId} unavailable` : undefined;
+  };
+
+  const ledgerTodoText = (full = false): string | null => {
+    if (!ledgerEnabled) return null;
+    if (ledger) return formatWorkLedgerTodo(ledger, full);
+    return ledgerId ? `Associated work ledger ${ledgerId} is unavailable: ${ledgerError ?? "not found"}.` : null;
+  };
+
+  const rememberLedger = (ctx: ExtensionContext): void => {
+    restoreLedgerState(ctx);
+    refresh(true);
+  };
+
+  const sendLedgerReminder = (
+    ctx: ExtensionContext,
+    event?: { willRetry?: boolean },
+  ): void => {
+    if (!ledgerEnabled || !ledgerId) return;
+    try {
+      rememberLedger(ctx);
+      if (!ledger) return;
+      const content = formatWorkLedgerReminder(ledger);
+      const previous = [...activeSessionEntries(ctx)].reverse().find((entry) =>
+        entry.type === "custom_message" && entry.customType === WORK_LEDGER_REMINDER_MESSAGE);
+      if (previous?.content === content) return;
+      if (typeof pi.sendMessage !== "function") return;
+      const options = agentLoopActive || event?.willRetry
+        ? { deliverAs: "steer" as const }
+        : { triggerTurn: false };
+      pi.sendMessage({
+        customType: WORK_LEDGER_REMINDER_MESSAGE,
+        content,
+        display: false,
+        details: { ledgerId: ledger.id, revision: ledger.revision },
+      }, options);
+    } catch {
+      // Recovery context is best effort; it must never block or start a turn.
+    }
+  };
+
+  const attachLedger = (ctx: ExtensionContext, id: string): WorkLedger => {
+    if (!ledgerEnabled) throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
+    const candidate = readAssociatedWorkLedger(ctx.cwd, id);
+    if (ledgerId !== id) pi.appendEntry(WORK_LEDGER_ASSOCIATION_ENTRY, workLedgerAssociationEntry(id));
+    ledgerId = id;
+    ledger = candidate;
+    ledgerError = null;
+    refresh(true);
+    sendLedgerReminder(ctx);
+    return candidate;
+  };
+
+  const detachLedger = (ctx: ExtensionContext): void => {
+    if (!ledgerId) return;
+    pi.appendEntry(WORK_LEDGER_ASSOCIATION_ENTRY, workLedgerAssociationEntry(null));
+    ledgerId = null;
+    ledger = null;
+    ledgerError = null;
+    refresh(true);
+  };
+
+  const refreshAssociatedLedger = (ctx: ExtensionContext): void => {
+    if (!ledgerId || !ledgerEnabled) return;
+    try {
+      ledger = readAssociatedWorkLedger(ctx.cwd, ledgerId);
+      ledgerError = null;
+    } catch (error) {
+      ledger = null;
+      ledgerError = error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  const assertOutcomeCompletionAllowed = (ctx: ExtensionContext, nextOutcome: Outcome | null): void => {
+    if (!nextOutcome || nextOutcome.status !== "complete" || !ledgerId || !ledgerEnabled) return;
+    refreshAssociatedLedger(ctx);
+    if (!ledger) {
+      throw new Error(`Goal completion is blocked: associated work ledger ${ledgerId} is unavailable `
+        + `(${ledgerError ?? "not found"}). Read it again or detach it before completing the Goal.`);
+    }
+    if (ledger.status !== "active") return;
+    const open = ledger.items.filter((item) =>
+      item.status === "pending" || item.status === "in_progress" || item.status === "blocked");
+    if (open.length === 0) return;
+    const examples = open.slice(0, 5).map((item) => `${item.id} (${item.status})`).join(", ");
+    throw new Error(`Goal completion is blocked: work ledger ${ledger.id} still has ${open.length} open `
+      + `high-level item(s): ${examples}${open.length > 5 ? ", ..." : ""}. Complete or cancel them first; `
+      + "Todo or execution-plan completion does not complete the overall work.");
+  };
+
+  const ledgerSessionBinding = (ctx: ExtensionContext): WorkLedgerSessionBinding => ({
+    associatedLedgerId: () => ledgerId,
+    associate: (id) => { attachLedger(ctx, id); },
+    detach: () => { detachLedger(ctx); },
+  });
+
+  const loadRushPlan = (ctx: ExtensionContext): RushPlan | null => {
+    const owner = workflowPlanOwner(ctx);
+    const binding = workflowBinding(ctx.sessionManager.getBranch());
+    displayedWorkflowOwner = owner;
+    rushBinding = binding && (!owner || binding.owner === owner) ? binding : null;
+    if (!rushBinding) {
+      rushPlan = null;
+      rushError = null;
+      cancelCancelledRowsTimer();
+      return null;
+    }
+    try {
+      const plan = readRushPlan(rushBinding.path, ctx.cwd);
+      if (plan.runId !== rushBinding.runId) throw new Error("Rush run identity changed.");
+      observeCancellations(plan, rushBinding, ctx);
+      rushPlan = plan;
+      rushError = null;
+    } catch (error) {
+      rushPlan = null;
+      rushError = error instanceof Error ? error.message : String(error);
+    }
+    scheduleCancelledRowsClear();
+    refresh(true);
+    return rushPlan;
+  };
+
+  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext, readOnly = false): void => {
+    if (!rushBinding || rushBinding.owner !== binding.owner || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
+      pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
+    }
+    displayedWorkflowOwner = readOnly ? null : binding.owner;
+    rushBinding = binding;
+    observeCancellations(plan, binding, ctx);
+    rushPlan = plan;
+    rushError = null;
+    scheduleCancelledRowsClear();
+    refresh(true);
+  };
+
+  const clearWorkflowPlan = (): void => {
+    cancelCancelledRowsTimer();
+    if (rushBinding) pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "clear" });
+    rushBinding = null;
+    rushPlan = null;
+    rushError = null;
+  };
+
+  const cancelCompletedPlanClear = (): void => {
+    if (completedPlanClearTimer) clearTimeout(completedPlanClearTimer);
+    completedPlanClearTimer = undefined;
+  };
+
+  const clearPlan = (): void => {
+    cancelCompletedPlanClear();
+    currentPlan = null;
+    pi.appendEntry(EXTENSION_NAME, planClearEntry());
+    refresh(true);
+  };
+
+  const scheduleCompletedPlanClear = (): void => {
+    cancelCompletedPlanClear();
+    if (!currentPlan) return;
+    const delay = completedPlanClearDelay(currentPlan);
+    if (delay === null) return;
+    const completedPlan = currentPlan;
+    const timer = setTimeout(() => {
+      if (completedPlanClearTimer !== timer) return;
+      completedPlanClearTimer = undefined;
+      if (currentPlan?.planId !== completedPlan.planId || currentPlan.revision !== completedPlan.revision) return;
+      clearPlan();
+    }, delay);
+    completedPlanClearTimer = timer;
+    timer.unref?.();
+  };
+
+  const dynamic = registerDynamicWorkflow(pi, ctx => workflowPlanOwner(ctx) ?? workflowBinding(ctx.sessionManager.getBranch())?.owner ?? null,
+    () => { syncTools(); refresh(true); });
+
+  const restore = (ctx: ExtensionContext): void => {
+    invalidateWidget?.();
+    const entries = ctx.sessionManager.getBranch();
+    sessionContext = ctx;
+    dynamic.restore(ctx);
+    syncTools();
+    const trigger = reconstructGoalSnapshot(entries);
+    outcome = restoreOutcome(entries, trigger);
+    restoreLedgerState(ctx);
+    if (!outcome && trigger && trigger.status !== "complete") {
+      outcome = { objective: trigger.objective, source: "goal", goalId: trigger.goalId, status: trigger.status === "active" ? "active" : "paused" };
+    } else if (outcome?.goalId && outcome.status !== "complete" && outcome.status !== "cancelled") {
+      const status = trigger?.goalId !== outcome.goalId ? "paused"
+        : trigger.status === "complete" ? "complete" : trigger.status === "active" ? "active" : "paused";
+      outcome = { ...outcome, status };
+    }
+    cancelCompletedPlanClear();
+    cancelCancelledRowsTimer();
+    const state = reconstructPlanState(ctx.sessionManager.getBranch());
+    currentPlan = state.plan;
+    displayedWorkflowOwner = workflowPlanOwner(ctx);
+    const binding = workflowBinding(ctx.sessionManager.getBranch());
+    rushBinding = binding && (!displayedWorkflowOwner || binding.owner === displayedWorkflowOwner) ? binding : null;
+    rushPlan = null;
+    rushError = null;
+    if (rushBinding) loadRushPlan(ctx);
+    displayMode = state.displayMode;
+    expanded = state.expanded;
+    leftShare = state.leftShare;
+    refresh(true);
+    scheduleCompletedPlanClear();
+  };
+
+  const persistPlan = (plan: PlanSnapshot): void => {
+    clearWorkflowPlan();
+    currentPlan = plan;
+    pi.appendEntry(EXTENSION_NAME, planSetEntry(plan));
+    refresh(true);
+    scheduleCompletedPlanClear();
+  };
+
+  const setDisplayMode = (mode: PlanDisplayMode): void => {
+    displayMode = mode;
+    pi.appendEntry(EXTENSION_NAME, planDisplayEntry(mode));
+    refresh(true);
+  };
+
+  const setExpanded = (value: boolean): void => {
+    expanded = value;
+    pi.appendEntry(EXTENSION_NAME, { version: 1, kind: "expansion", expanded, at: Math.floor(Date.now() / 1_000) });
+    refresh(true);
+  };
+
+  const saveWorkflowSplit = (share: number): void => {
+    if (share === leftShare) return;
+    pi.appendEntry(EXTENSION_NAME, { version: 1, kind: "workflow-split", leftShare: share, at: Math.floor(Date.now() / 1_000) });
+    leftShare = share;
+    refresh(true);
+  };
+
+  const installWidget = (ctx: ExtensionContext): void => {
+    if (!ctx.hasUI) return;
+    const startControl: GoalPanelStartRequest = { action: "probe" };
+    pi.events.emit(GOAL_PANEL_START_EVENT, startControl);
+    setNavigatorPanel(ctx,
+      EXTENSION_NAME,
+      (tui, theme) => {
+        const readWidgetState = () => {
+          const entries = ctx.sessionManager.getBranch();
+          return {
+            goal: reconstructGoalSnapshot(entries), owner: workflowPlanOwner(ctx, entries),
+            binding: rushBinding ? workflowBinding(entries) : null,
+          };
+        };
+        let branchState: ReturnType<typeof readWidgetState> | undefined;
+        let branchLeaf: string | null | undefined;
+        const localRefresh = (force = false): void => {
+          if (force) branchState = undefined;
+          tui.requestRender(force);
+        };
+        refreshWidget = localRefresh;
+        let workflowFrame: WorkflowFrame | undefined;
+        let renderedRun: string | undefined;
+        let selectedStep: string | undefined;
+        let startButton: { y: number; left: number; right: number; task: Outcome } | undefined;
+        const widget = createPlanWidget(
+          (width: number, disclosure?: string, previewShare = leftShare): string[] => {
+            workflowFrame = undefined;
+            startButton = undefined;
+            if (displayMode === "hidden") return [];
+            const leaf = ctx.sessionManager.getLeafId?.();
+            if (!branchState || leaf === undefined || leaf !== branchLeaf) {
+              branchState = readWidgetState();
+              branchLeaf = leaf;
+            }
+            if (displayedWorkflowOwner !== branchState.owner) return [];
+            const { goal } = branchState;
+            const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
+            const header: CompactTaskHeader = {
+              subtitle: outcome?.objective, disclosure,
+              runtime: boundGoal ? goalHeaderRuntime(boundGoal)
+                : outcome ? { status: outcome.status === "active" ? "saved" : outcome.status } : undefined,
+              ledger: ledgerHeaderText(),
+            };
+            const saved = outcome;
+            if (startControl.available && saved?.status === "active" && !saved.goalId && (!goal || goal.status === "complete")) {
+              header.onStartButton = (y, left, right) => { startButton = { y, left, right, task: saved }; };
+            }
+            const heading = () => outcome || (ledgerEnabled && (ledger || ledgerId))
+              ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
+            if (displayedWorkflowOwner || rushBinding) {
+              if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
+                  !branchState.binding) return heading();
+              const fg = typeof theme?.fg === "function"
+                ? (color: string, value: string) => theme.fg(color as never, value)
+                : plainPlanTheme.fg;
+              if (!rushPlan) return heading();
+              workflowFrame = renderRushFrame(rushPlan, width, { fg }, rushBinding.owner, !displayedWorkflowOwner, expanded, header, previewShare);
+              return workflowFrame.lines;
+            }
+            const run = dynamic.run();
+            if (run) {
+              if (renderedRun !== run.id) selectedStep = undefined;
+              renderedRun = run.id;
+              workflowFrame = renderDynamicFrame(run, width, theme, expanded, {
+                disclosure, ledger: header.ledger, runtime: goal && goal.goalId === run.goalId ? goalHeaderRuntime(goal) : undefined,
+              }, selectedStep, previewShare);
+              return workflowFrame.lines;
+            }
+            return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading();
+          },
+          () => {
+            const run = dynamic.run();
+            if (!rushBinding && !displayedWorkflowOwner && run) return run.steps.length > COMPACT_PLAN_ROWS;
+            return (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS;
+          },
+          () => expanded,
+          () => setExpanded(!expanded),
+          (x, y) => {
+            const button = startButton;
+            if (button && button.y === y && x >= button.left && x < button.right) {
+              return () => {
+                if (button.task !== outcome || displayMode === "hidden") return;
+                const sessionId = ctx.sessionManager.getSessionId();
+                pi.events.emit(GOAL_PANEL_START_EVENT, { action: "start", sessionId, objective: button.task.objective } satisfies GoalPanelStartRequest);
+              };
+            }
+            const step = workflowFrame?.stepAt(x, y);
+            if (!step || dynamic.run()?.id !== renderedRun) return undefined;
+            return () => { selectedStep = selectedStep === step ? undefined : step; };
+          },
+          { resizeAt: (x, y) => workflowFrame?.resizeAt(x, y), save: saveWorkflowSplit },
+        );
+        invalidateWidget = widget.invalidate;
+        return {
+          ...widget,
+          dispose() {
+            startButton = undefined;
+            widget.invalidate();
+            if (refreshWidget === localRefresh) { refreshWidget = undefined; invalidateWidget = undefined; }
+          },
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+  };
+
+  pi.registerTool({
+    name: "update_todo",
+    label: "Update Todo",
+    description: "Manage the accepted Goal, Todo, workflow canonical task plan, and optional durable long-term work ledger through one interface. Existing workflow and ledger revision checks apply.",
+    promptSnippet: "Remember the accepted Goal and update Todo, workflow, or durable ledger progress",
+    promptGuidelines: [
+      "Capture the accepted Goal before substantive implementation, delegation, or investigation. A goal-only update is valid. Record the user’s acceptance criteria when available.",
+      "Use newTask:true with its goal when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. For a running Goal, call update_goal after verifying delivery. For a saved Goal, set goal.status to complete after verification.",
+      "Use a Todo checklist when several meaningful milestones help track delivery; update it when work completes, is blocked, or changes scope.",
+      "Write each Todo label as a short action in plain language, usually 3-7 English words or a similarly short phrase in the task's language. For example: 'Add Todo toggle' or 'Test keyboard controls'. Put methods, file paths, rationale, and acceptance criteria in the goal, explanation, or workflow records, not the label. Apply this to workflow titles too; do not copy long issue headings.",
+      "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
+      "For generic plans with prerequisites, give steps stable ids and dependsOn edges for actual dependencies, not list order. Start ready independent steps concurrently under the Harness execution policy; subagent delegation mode controls subagents, not background-command concurrency.",
+      "For generic plans, follow the active delegation mode for subagents. Manual forbids proactive subagent delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
+      "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
+      "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
+      "While a workflow owns planning, bind its persisted task plan with update_todo({workflow:{path,revision}}). Record transitions with workflow event and changes rather than editing task-plan.json or its profiling log.",
+      "When a durable work ledger is associated with this session, completing the overall Goal is refused while high-level items remain open. Completing the Todo or an execution plan does not complete the associated ledger; reconcile the ledger explicitly.",
+      ...WORK_LEDGER_PROMPT_GUIDELINES,
+    ],
+    parameters: UpdatePlanSchema,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const owner = workflowPlanOwner(ctx);
+      const raw = params as {
+        explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; goal?: OutcomeInput; outcome?: OutcomeInput;
+        workflow?: WorkflowPlanInput; ledger?: UpdateTodoLedgerInput;
+      };
+      if (raw.goal !== undefined && raw.outcome !== undefined) throw new Error("Send goal once. The outcome field is its legacy alias.");
+      const input = { ...raw, goal: raw.goal ?? raw.outcome };
+      if (input.ledger !== undefined) {
+        if (input.goal !== undefined || input.todo !== undefined || input.workflow !== undefined ||
+            input.newTask !== undefined || input.explanation !== undefined) {
+          throw new Error("Send update_todo ledger alone; ledger changes are not combined with goal, Todo, or workflow changes.");
+        }
+        if (!ledgerEnabled) throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
+        const result = executeLedgerMutation(input.ledger, ctx.cwd, ledgerSessionBinding(ctx));
+        if (result.details.ledger && result.details.ledger.id === ledgerId) {
+          ledger = result.details.ledger;
+          ledgerError = null;
+          refresh(true);
+        }
+        return result;
+      }
+      const activeRun = dynamic.run();
+      if (!owner && activeRun && !activeRun.evidence && (input.newTask || input.todo || input.workflow || input.goal?.status === "complete")) {
+        throw new Error("Dynamic workflow owns this Todo. Record its output using dynamic_workflow.");
+      }
+      if (!input.goal && input.todo === undefined && !input.workflow) {
+        throw new Error("Send goal, todo, or workflow; add ledger only as its own payload.");
+      }
+      if (input.newTask && !input.goal) throw new Error("A new task requires its goal.");
+      if (input.todo !== undefined && input.workflow !== undefined) throw new Error("Send either todo or workflow, not both.");
+      let todoOwner = owner;
+      const nextOutcome = input.goal ? prepareOutcome(outcome, input.goal, input.newTask) : null;
+      if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
+      if (nextOutcome?.goalId) {
+        const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+        if (goal?.goalId === nextOutcome.goalId) {
+          if (nextOutcome.status === "complete" && goal.status !== "complete") {
+            throw new Error("Verify the running Goal’s acceptance criteria and use update_goal to complete it.");
+          }
+          if (goal.status !== "complete" && input.goal?.status !== undefined &&
+              nextOutcome.status !== (goal.status === "budgetLimited" ? "paused" : goal.status)) {
+            throw new Error("Use /goal pause or /goal resume to change execution. Use /goal clear to release this Goal.");
+          }
+          if (nextOutcome.status === "active" && goal.status === "complete") {
+            nextOutcome.reopenedGoalId = nextOutcome.goalId;
+            delete nextOutcome.goalId;
+            if (nextOutcome.source === "goal") delete nextOutcome.source;
+          }
+        }
+      }
+      // A reopened workflow keeps its plan while waiting for manual resume.
+      const reopenedGoalId = input.newTask ? undefined : nextOutcome?.reopenedGoalId ?? outcome?.reopenedGoalId;
+      if (input.todo !== undefined && reopenedGoalId && !todoOwner) {
+        const prior = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+        if (prior?.goalId === reopenedGoalId) todoOwner = reopeningPlanOwner(pi, ctx, prior);
+      }
+      if (input.todo !== undefined && todoOwner) throw new Error(`${todoOwner} owns the task plan. Send workflow instead of todo.`);
+      const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
+      const detachOnCommit = input.newTask && ledgerId !== null;
+      // Commit task memory only after the requested checklist or workflow operation succeeds.
+      const commitOutcome = (): void => {
+        if (activeRun?.evidence && (input.newTask || input.todo || input.workflow)) dynamic.clear();
+        if (!nextOutcome) return;
+        if (detachOnCommit) detachLedger(ctx);
+        if (input.newTask && input.todo === undefined) {
+          if (!input.workflow) clearWorkflowPlan();
+          if (currentPlan) clearPlan();
+        }
+        saveOutcome(nextOutcome);
+        const sessionId = ctx.sessionManager.getSessionId?.();
+        if (typeof sessionId === "string") {
+          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, reopenedGoalId: nextOutcome.reopenedGoalId, outcome: { ...nextOutcome } });
+        }
+      };
+      if (!input.workflow && input.todo === undefined) {
+        commitOutcome();
+        return { content: [{ type: "text", text: "Goal updated." }], details: { ok: true, goal: outcome, outcome } };
+      }
+      if (input.workflow !== undefined) {
+        const savedBinding = workflowBinding(ctx.sessionManager.getBranch());
+        if (!owner && (input.workflow.event !== undefined || input.workflow.changes !== undefined ||
+            input.workflow.decision !== undefined || input.workflow.profiling !== undefined || !savedBinding)) {
+          throw new Error(savedBinding
+            ? `${savedBinding.owner} plan is a read-only handoff. Reinvoke /skill:${savedBinding.owner} before updating its workflow plan.`
+            : "No workflow owns the task plan; send plan instead of workflow.");
+        }
+        if (input.todo !== undefined) throw new Error("Send either todo or workflow, not both.");
+        const { path, ...transition } = input.workflow;
+        if (transition.event === undefined && (transition.changes !== undefined || transition.decision !== undefined || transition.profiling !== undefined)) {
+          throw new Error("workflow.event is required when sending changes, decision, or profiling.");
+        }
+        let binding = savedBinding && (!owner || savedBinding.owner === owner) ? savedBinding : null;
+        if (path !== undefined) {
+          if (!owner && path !== binding?.path) {
+            throw new Error(`${binding!.owner} plan is a read-only handoff; only its bound path can be reloaded. Reinvoke /skill:${binding!.owner} to bind a workflow plan.`);
+          }
+          if (transition.revision === undefined) throw new Error("workflow.revision is required with workflow.path.");
+          const plan = readRushPlan(path, ctx.cwd);
+          if (!owner && plan.runId !== binding!.runId) throw new Error("Rush run identity changed.");
+          if (plan.planRevision !== transition.revision) {
+            if (transition.event === undefined) {
+              rushPlan = null;
+              rushError = `revision mismatch: expected ${transition.revision}, found ${plan.planRevision}`;
+              refresh(true);
+            }
+            throw new Error(`Rush plan revision mismatch: expected ${transition.revision}, found ${plan.planRevision}.`);
+          }
+          binding = { owner: owner ?? binding!.owner, path, runId: plan.runId };
+          if (transition.event === undefined) {
+            displayWorkflowPlan(plan, binding, ctx, !owner);
+            commitOutcome();
+            return { content: [{ type: "text", text: `Showing ${binding.owner} rev ${plan.planRevision}: ${plan.issues.length} units.${owner ? "" : " Read-only handoff."}` }], details: { ok: true, runId: plan.runId, revision: plan.planRevision, ...(!owner ? { readOnly: true } : {}) } };
+          }
+        }
+        if (!binding) throw new Error(`No ${owner} plan is bound; send workflow.path and workflow.revision to update_todo first.`);
+        if (transition.event === undefined) throw new Error("workflow.path is required to bind or reload a plan; otherwise send workflow.event and changes.");
+        const result = applyRushPlanUpdate(binding.path, ctx.cwd, binding.runId, { ...transition, event: transition.event });
+        displayWorkflowPlan(result.plan, binding, ctx);
+        commitOutcome();
+        const rows = result.changed.map(({ target, id, added }) =>
+          `${added ? "+" : ""}${id === null ? "run" : target === "unit" ? `#${id}` : id}`);
+        const logNote = result.logAheadRevision === undefined ? ""
+          : ` The profiling log already held rev ${result.logAheadRevision} (an earlier write stopped after logging); this event supersedes it.`;
+        return {
+          content: [{ type: "text", text: `Saved ${owner} rev ${result.revision} (${transition.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}.${logNote}` }],
+          details: {
+            ok: true, runId: result.plan.runId, revision: result.revision, changed: result.changed, profilingPath: result.profilingPath,
+            ...(result.logAheadRevision === undefined ? {} : { logAheadRevision: result.logAheadRevision }),
+          },
+        };
+      }
+      if (owner) {
+        throw new Error(`${owner} owns the task plan. Send workflow instead of plan; include path and revision to bind its persisted task plan.`);
+      }
+      if (input.todo === undefined) throw new Error("todo is required: send the full list of steps.");
+      if (!replacement) {
+        clearWorkflowPlan(); clearPlan(); commitOutcome();
+        return { content: [{ type: "text", text: "Todo cleared." }], details: { ok: true, goal: outcome, outcome } };
+      }
+      const plan = replacement;
+      persistPlan(plan);
+      commitOutcome();
+      const progress = planProgress(plan);
+      return {
+        content: [{ type: "text", text: formatProgress(plan) }],
+        details: { ok: true, plan, progress, goal: outcome },
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("update_todo ")) + theme.fg("muted", args.ledger
+          ? `ledger ${args.ledger.action}`
+          : args.workflow
+            ? `workflow ${args.workflow.event ?? "bind"}`
+            : args.todo === undefined && (args.goal || args.outcome) ? "goal" : `${args.todo?.length ?? 0} steps`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const text = result.content[0];
+      return new Text(theme.fg("success", "✓ ") + theme.fg("muted", text?.type === "text" ? text.text : "Todo updated"), 0, 0);
+    },
+  });
+
+  const getTodoParameters = Type.Object({
+    ledger: Type.Optional(getTodoLedgerParameters),
+  });
+  pi.registerTool({
+    name: "get_todo",
+    label: "Get Todo",
+    description: "Inspect the accepted Goal, Todo progress, any bound workflow task plan, and the associated work ledger.",
+    promptSnippet: "Inspect the common work plan: Goal, Todo or workflow rows, and the associated durable ledger",
+    parameters: getTodoParameters,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const input = params as { ledger?: GetTodoLedgerInput };
+      if (input.ledger !== undefined && !ledgerEnabled) {
+        throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
+      }
+      refreshAssociatedLedger(ctx);
+      const ledgerText = ledgerTodoText();
+      const ledgerFields = ledgerEnabled
+        ? { ledger: ledger ? workLedgerTodoSummary(ledger) : null, ledgerId, ...(ledgerError ? { ledgerError } : {}) }
+        : {};
+      const owner = workflowPlanOwner(ctx);
+      const binding = workflowBinding(ctx.sessionManager.getBranch());
+      let view: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
+      if (owner || binding) {
+        const workflowPlan = loadRushPlan(ctx);
+        const planOwner = owner ?? binding!.owner;
+        view = {
+          content: [{ type: "text", text: `${formatOutcome(outcome)}\n${workflowPlan
+            ? renderRushPlan(workflowPlan, 160, true, undefined, planOwner, !owner).join("\n")
+            : owner ? `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.`
+              : `${planOwner} read-only handoff unavailable: ${rushError ?? "not bound"}.`}${ledgerText ? `\n${ledgerText}` : ""}` }],
+          details: { goal: outcome, outcome, hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...ledgerFields, ...(!owner ? { readOnly: true } : {}) },
+        };
+      } else if (dynamic.run()) {
+        const run = dynamic.run()!;
+        view = { content: [{ type: "text", text: [describeRun(run), ledgerText].filter(Boolean).join("\n") }],
+          details: { goal: outcome, outcome, hasPlan: true, workflowOwner: "dynamic-workflow", plan: run, ...ledgerFields } };
+      } else if (!currentPlan) {
+        view = {
+          content: [{ type: "text", text: `${formatOutcome(outcome)}\nNo todo is set.${ledgerText ? `\n${ledgerText}` : ""}` }],
+          details: { goal: outcome, outcome, hasPlan: false, plan: null, progress: null, ...ledgerFields },
+        };
+      } else {
+        const progress = planProgress(currentPlan);
+        view = {
+          content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}${ledgerText ? `\n${ledgerText}` : ""}` }],
+          details: { goal: outcome, outcome, hasPlan: true, plan: currentPlan, progress, ...ledgerFields },
+        };
+      }
+      if (input.ledger === undefined) return view;
+      const query = executeLedgerQuery(input.ledger, ctx.cwd, ledgerId);
+      return {
+        content: [{ type: "text", text: `${view.content[0]!.text}\n${query.content[0]!.text}` }],
+        details: { ...view.details, ledgerQuery: query.details },
+      };
+    },
+  });
+
+  pi.registerCommand("todo", {
+    description: "Inspect, show, hide, or clear the current Todo and inspect its Goal",
+    getArgumentCompletions: planArgumentCompletions,
+    handler: async (args, ctx) => {
+      const input = args.trim().toLowerCase();
+      if (!input) {
+        setDisplayMode("auto");
+        return;
+      }
+      if (input === "clear") {
+        if (workflowPlanOwner(ctx)) {
+          ctx.ui.notify("The workflow owns its plan; /todo clear cannot change it.", "warning");
+          return;
+        }
+        const run = dynamic.run();
+        const goal = run?.goalId ? reconstructGoalSnapshot(ctx.sessionManager.getBranch()) : null;
+        if (run && !run.evidence && goal && goal.goalId === run.goalId && goal.status !== "complete") {
+          ctx.ui.notify("This Goal still has an active workflow.", "warning");
+          return;
+        }
+        if (run || dynamic.pending()) dynamic.clear();
+        clearWorkflowPlan();
+        clearPlan();
+        ctx.ui.notify("Todo cleared.", "info");
+        return;
+      }
+      if (input === "hide") {
+        setDisplayMode("hidden");
+        return;
+      }
+      if (input === "show") {
+        setDisplayMode("auto");
+        return;
+      }
+      if (input === "expand" || input === "collapse") {
+        setExpanded(input === "expand");
+        return;
+      }
+      if (/^split(?:\s|$)/.test(input)) {
+        const ratio = /^split\s+(\d+)\s*:\s*(\d+)$/.exec(input);
+        const left = Number(ratio?.[1]), right = Number(ratio?.[2]);
+        if (!Number.isSafeInteger(left + right) || left <= 0 || right <= 0) {
+          ctx.ui.notify("Use /todo split LEFT:RIGHT with positive integers, e.g. /todo split 3:2.", "warning");
+          return;
+        }
+        saveWorkflowSplit(left / (left + right));
+        return;
+      }
+      const pinMode = input.match(/^pin\s+(auto|on|off)$/)?.[1] as PlanDisplayMode | undefined;
+      if (pinMode) {
+        setDisplayMode(pinMode);
+        ctx.ui.notify(`Todo display: ${pinMode}.`, "info");
+        return;
+      }
+      ctx.ui.notify("Usage: /todo [clear|hide|show|expand|collapse|split LEFT:RIGHT|pin auto|pin on|pin off]", "warning");
+    },
+  });
+
+  pi.registerCommand("ledger", {
+    description: "List, associate, switch, detach, or inspect a durable work ledger",
+    getArgumentCompletions: ledgerArgumentCompletions,
+    handler: async (args, ctx) => {
+      const [action = "", value = ""] = args.trim().split(/\s+/, 2);
+      if (!ledgerEnabled && (action === "" || action === "list" || action === "show")) {
+        ctx.ui.notify("Project work ledger is off. Enable it in /harness-settings to view ledgers.", "warning");
+        return;
+      }
+      const store = openWorkLedgerStore({ cwd: ctx.cwd });
+      if (!action || action === "list") {
+        ctx.ui.notify(formatLedgerList(store.list(), ledgerId), "info");
+        return;
+      }
+      if (action === "show") {
+        if (!ledgerId) { ctx.ui.notify("This session has no associated work ledger.", "warning"); return; }
+        try {
+          ctx.ui.notify(formatWorkLedgerTodo(readAssociatedWorkLedger(ctx.cwd, ledgerId), true), "info");
+        } catch (error) {
+          ctx.ui.notify(`Associated work ledger ${ledgerId} is unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+      if (action === "detach") {
+        if (!ledgerId) { ctx.ui.notify("This session has no associated work ledger.", "info"); return; }
+        detachLedger(ctx);
+        ctx.ui.notify("Work ledger detached. The ledger, completed items, and history remain stored.", "info");
+        return;
+      }
+      if (action !== "attach" && action !== "switch") {
+        ctx.ui.notify("Usage: /ledger [list|attach <ledger-id>|switch <ledger-id>|detach|show]", "warning");
+        return;
+      }
+      if (!ledgerEnabled) {
+        ctx.ui.notify("Project work ledger is off. Enable it in /harness-settings before associating a ledger.", "warning");
+        return;
+      }
+      if (!value) {
+        ctx.ui.notify(`Usage: /ledger ${action} <ledger-id>${store.list().length ? ` (ledger ids: ${store.list().map((item) => item.id).join(", ")})` : ""}`, "warning");
+        return;
+      }
+      if (action === "attach" && ledgerId && ledgerId !== value) {
+        ctx.ui.notify(`This session is already associated with ${ledgerId}. Use /ledger switch ${value} to replace it.`, "warning");
+        return;
+      }
+      if (action === "switch" && !ledgerId) {
+        ctx.ui.notify("No work ledger is associated. Use /ledger attach <ledger-id> first.", "warning");
+        return;
+      }
+      if (ledgerId === value) {
+        ctx.ui.notify(`This session is already associated with ${value}. No copy was made.`, "info");
+        return;
+      }
+      try {
+        const associated = attachLedger(ctx, value);
+        ctx.ui.notify(`Associated with work ledger ${associated.id} rev ${associated.revision} (${associated.status}). `
+          + "This only restores the reference; it does not start a Goal or authorize work.", "info");
+      } catch (error) {
+        ctx.ui.notify(`Cannot associate ${value}: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    },
+  });
+
+  const ledgerSetting = {
+    id: "outcome-todo-ledger",
+    label: "Long-term work ledger",
+    values: ["Off", "On"],
+    get: () => ledgerEnabled ? "On" : "Off",
+    async change(value: string, ctx: ExtensionContext) {
+      if (value !== "On" && value !== "Off") throw new Error("Invalid work ledger mode.");
+      const preferences = updateHarnessSetting("outcomeTodo", current => changeLedgerPreference(current, value === "On"));
+      ledgerEnabled = preferences.ledger;
+      rememberLedger(ctx);
+      if (ledgerEnabled) sendLedgerReminder(ctx);
+    },
+  };
+  const controls = [dynamic.setting, ledgerSetting];
+  const registerSettings = () => controls.forEach(control => pi.events.emit("harness-settings:register", control));
+  const unsubscribeSettings = pi.events.on("harness-settings:request", registerSettings);
+  registerSettings();
+  const unsubscribeTask = pi.events.on("pi-better-harness:task-context", (event: unknown) => {
+    if (!event || typeof event !== "object") return;
+    const request = event as TaskContextRequest;
+    request.enabled = true;
+    if (request.action === "saved" || request.action === "adopt") {
+      const saved = outcome ?? (currentPlan?.steps.some(step => step.status !== "completed")
+        ? { objective: "Complete the current Todo.", status: "active" as const } : null);
+      if (saved) request.savedGoal = saved;
+      if (rushBinding && !displayedWorkflowOwner) request.handoffOwner = rushBinding.owner;
+      if (request.action === "adopt" && saved && !saved.goalId && request.goalId && request.objective === saved.objective &&
+          (saved.status === "active" || saved.status === "paused") && (request.status === "active" || request.status === "paused")) {
+        saveOutcome({ ...saved, goalId: request.goalId, status: request.status });
+      }
+      return;
+    }
+    if (request.action === "audit") {
+      if (outcome?.goalId && outcome.goalId === request.goalId) {
+        request.objective = outcome.objective;
+        request.doneWhen = outcome.doneWhen?.filter(criterion => criterion.trim());
+        if (sessionContext) {
+          try {
+            assertOutcomeCompletionAllowed(sessionContext, { ...outcome, status: "complete" });
+          } catch (error) {
+            request.ledgerBlocker = error instanceof Error ? error.message : String(error);
+          }
+        }
+        if (!request.workflowOwnsPlan) {
+          request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
+        }
+      }
+      const state = request.goalId && sessionContext && readDynamic(sessionContext.sessionManager.getBranch(), request.goalId);
+      if (state && "run" in state) {
+        const run = state.run;
+        request.openSteps = [...openWork(run),
+          ...(run.evidence ? [] : ["Finish the workflow with evidence for its objective"])];
+        const originalCriteria = request.doneWhen?.length ? request.doneWhen
+          : request.objective && request.objective !== run.objective ? [request.objective] : [];
+        request.doneWhen = [...new Set([...originalCriteria, ...run.criteria])];
+        request.evidence = run.evidence;
+      }
+      return;
+    }
+    if (request.action === "inspect") {
+      request.display = false;
+      if (!sessionContext?.hasUI || displayMode === "hidden" || !request.goalId ||
+          typeof request.width !== "number" || !Number.isFinite(request.width) || request.width <= 0) return;
+      const run = !displayedWorkflowOwner && !rushBinding ? dynamic.run() : undefined;
+      if (request.goalId !== (run ? run.goalId : outcome?.goalId)) return;
+      const entries = sessionContext.sessionManager.getBranch();
+      const goal = reconstructGoalSnapshot(entries);
+      request.display = goal?.goalId === request.goalId && canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) &&
+        displayedWorkflowOwner === workflowPlanOwner(sessionContext, entries);
+      return;
+    }
+    if (request.action === "bind") {
+      if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
+        saveOutcome({ ...outcome, goalId: request.goalId });
+      }
+    } else if (request.action === "start" && request.goalId && request.objective?.trim()) {
+      if (outcome?.goalId === request.goalId) return;
+      if (outcome?.status === "active" && !outcome.goalId && outcome.objective === request.objective.trim()) {
+        saveOutcome({ ...outcome, goalId: request.goalId });
+        return;
+      }
+      clearWorkflowPlan();
+      if (currentPlan) clearPlan();
+      saveOutcome({ objective: request.objective.trim(), status: "active", goalId: request.goalId, source: "goal" });
+    } else if (outcome && request.goalId && outcome.goalId === request.goalId) {
+      const status = request.action === "pause" ? "paused" : request.action === "resume" ? "active" : request.action === "complete" ? "complete" : null;
+      if (status) saveOutcome({ ...outcome, status });
+    }
+  });
+  let legacyPlanMask: LegacyPlanMask | undefined;
+  const onSessionStart = async (_event: unknown, ctx: ExtensionContext): Promise<void> => {
+    // Retire a separately installed pi-better-plan before installing our Todo widget.
+    await legacyPlanMask?.cleanup(ctx);
+    try {
+      dynamic.loadMode();
+      const preferences = parseOutcomeTodoPreferences(readHarnessSetting("outcomeTodo"));
+      ledgerEnabled = preferences.ledger;
+    } catch (error) {
+      ledgerEnabled = false;
+      if (ctx.hasUI) ctx.ui.notify(String(error), "warning");
+    }
+    installWidget(ctx);
+    restore(ctx);
+    registerSettings();
+    sendLedgerReminder(ctx);
+  };
+  legacyPlanMask = installLegacyPlanMask(getTodoParameters);
+  pi.on("session_start", onSessionStart);
+  pi.on("session_tree", async (_event, ctx) => {
+    restore(ctx);
+    sendLedgerReminder(ctx);
+  });
+  pi.on("agent_start", () => { agentLoopActive = true; });
+  pi.on("agent_end", () => { agentLoopActive = false; });
+  pi.on("session_compact", async (event, ctx) => {
+    sendLedgerReminder(ctx, event as { willRetry?: boolean });
+  });
+  pi.on("context", (event) => {
+    const messages = event.messages;
+    let lastReminder = -1;
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index] as { role?: string; customType?: string; details?: unknown };
+      if (message.role === "custom" && message.customType === WORK_LEDGER_REMINDER_MESSAGE) lastReminder = index;
+    }
+    const kept = ledgerEnabled && ledgerId && lastReminder >= 0 &&
+      ((messages[lastReminder] as { details?: { ledgerId?: unknown } }).details)?.ledgerId === ledgerId
+      ? lastReminder : -1;
+    const filtered = messages.filter((message, index) => {
+      const custom = message as { role?: string; customType?: string };
+      return custom.role !== "custom" || custom.customType !== WORK_LEDGER_REMINDER_MESSAGE || index === kept;
+    });
+    if (filtered.length === messages.length) return undefined;
+    return { messages: filtered };
+  });
+  pi.on("before_agent_start", (event, ctx) => {
+    const guidance = dynamic.guidance();
+    const guide = guidance && !workflowPlanOwner(ctx) && !rushBinding ? guidance : undefined;
+    const sections = supportsPromptSections(event.systemPromptOptions) ? (event.systemPromptOptions as PromptSectionTarget).sections : undefined;
+    if (guide && sections) sections.dynamic_workflow = guide;
+    const prompt = guide && !sections ? { systemPrompt: event.systemPrompt + "\n\n" + guide } : undefined;
+    if (!outcome) return prompt;
+    const content = formatOutcome(outcome);
+    // These messages are persisted by Pi. Never rebuild or remove them in context.
+    const previous = [...activeSessionEntries(ctx)].reverse().find(entry =>
+      entry.type === "custom_message" && entry.customType === "pi-better-harness:outcome-update");
+    if (previous?.type === "custom_message" && previous.content === content) return prompt;
+    return { ...prompt, message: { customType: "pi-better-harness:outcome-update", content, display: false } };
+  });
+  pi.on("session_shutdown", async (_event, ctx) => {
+    cancelCompletedPlanClear();
+    cancelCancelledRowsTimer();
+    dynamic.dispose();
+    if (typeof unsubscribeWorkflow === "function") unsubscribeWorkflow();
+    if (typeof unsubscribeSettings === "function") unsubscribeSettings();
+    if (typeof unsubscribeTask === "function") unsubscribeTask();
+    invalidateWidget?.();
+    invalidateWidget = undefined;
+    refreshWidget = undefined;
+    sessionContext = undefined;
+    try {
+      setNavigatorPanel(ctx, EXTENSION_NAME, undefined);
+    } catch { /* best-effort cleanup */ }
+    legacyPlanMask?.dispose();
+    legacyPlanMask = undefined;
+  });
+}
+
+
+function formatProgress(plan: PlanSnapshot): string {
+  const progress = planProgress(plan);
+  const current = progress.activeIndex === null ? null : plan.steps[progress.activeIndex];
+  const status = [`Todo updated: ${progress.completed}/${progress.total} steps completed`];
+  if (progress.blocked > 0) status.push(`${progress.blocked} blocked`);
+  if (progress.inProgress > 1) status.push(`${progress.inProgress} steps in progress`);
+  else if (current) status.push(`Current step: ${current.step}`);
+  if (plan.steps.some((item) => item.dependsOn?.length)) status.push(`${progress.readyIndices.length} ready`);
+  return status.join(". ") + ".";
+}
+
+function stepLine(item: PlanSnapshot["steps"][number], index: number): string {
+  return `${index + 1}. [${item.status}] ${item.step}${item.dependsOn?.length ? ` (after: ${item.dependsOn.join(", ")})` : ""}`;
+}
+
+function formatPlan(plan: PlanSnapshot): string {
+  const progress = planProgress(plan);
+  return [
+    `Todo: ${progress.completed}/${progress.total} steps completed${progress.blocked ? `, ${progress.blocked} blocked` : ""}`,
+    ...plan.steps.map(stepLine),
+    ...(plan.steps.some((item) => item.dependsOn?.length)
+      ? [`Ready: ${progress.readyIndices.map((index) => plan.steps[index]!.step).join(", ") || "none"}`]
+      : []),
+  ].join("\n");
+}

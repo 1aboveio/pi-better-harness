@@ -11,18 +11,31 @@ import {
     appendFileSync,
     closeSync,
     mkdirSync,
+    mkdtempSync,
     openSync,
+    readFileSync,
     rmSync,
     writeFileSync,
     writeSync,
 } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { classifyChildExit } from "../lifecycle.ts";
 import { buildSubagentResultText, finalizeRun } from "../finalization.ts";
 import {
     LIFECYCLE_RECORD_PREFIX_BYTES,
     LIFECYCLE_SCAN_CHUNK_BYTES,
 } from "../parse.ts";
-import { logPathFor, readMeta, runDir, writeMeta } from "../registry.ts";
+import { dismissRun, logPathFor, onMetaChanged, readMeta, runDir, writeMeta } from "../registry.ts";
+import { inspectOutcome, readOutcome, receiptOutcome, registerAssignmentAttempt } from "../assignment-outcomes.ts";
+import { recordAssignmentReport } from "../assignment-report.ts";
+import { failurePath } from "../failures.ts";
+import { completeOwnedExit } from "../owned-exit.ts";
+import { createCallbackBatcher } from "../shared-callback-batcher.ts";
+import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
+import { durableSessionsDir } from "../session-store.ts";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function writeLargeNewlineFreeRecord(id, { type, toolCallId, toolName, payloadBytes, appendNewline = true }) {
     mkdirSync(runDir(id), { recursive: true });
@@ -55,6 +68,9 @@ const coherentRun = {
     usage: { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 },
 };
 
+/** Verbatim provider error from pi-better-model-router 0.1.2 after a timed-out candidate. */
+const MODEL_ERROR = "Model router: no eligible Flash model is available. Check Pi's model catalog and provider login.";
+
 function writeRunLog(id, events) {
     mkdirSync(runDir(id), { recursive: true });
     writeFileSync(
@@ -79,6 +95,123 @@ function seedRunningMeta(id, extras = {}) {
         ...extras,
     });
 }
+
+it("merges dismissal and finalization when either operation sees stale running metadata", (t) => {
+    const originalRead = fs.readFileSync;
+    for (const dismissFirst of [true, false]) {
+        const id = dismissFirst ? "sa_dismiss_exit_race" : "sa_exit_dismiss_race";
+        const metaPath = join(runDir(id), "meta.json");
+        t.after(() => rmSync(runDir(id), { recursive: true, force: true }));
+        seedRunningMeta(id);
+        writeRunLog(id, [{ type: "agent_end", messages: [] }]);
+        let overlapped = false;
+        const read = t.mock.method(fs, "readFileSync", (file, ...args) => {
+            const contents = originalRead(file, ...args);
+            if (file === metaPath && !overlapped) {
+                overlapped = true;
+                if (dismissFirst) {
+                    assert.equal(finalizeRun(id, 0).applied, true);
+                    writeMeta(readMeta(id), { patch: () => ({ completionCallbackSentAt: 42 }) });
+                } else {
+                    assert.equal(dismissRun(id, 41).dismissedAt, 41);
+                }
+            }
+            return contents;
+        });
+        syncBuiltinESMExports();
+        try {
+            if (dismissFirst) dismissRun(id, 41);
+            else assert.equal(finalizeRun(id, 0).applied, true);
+        } finally {
+            read.mock.restore();
+            syncBuiltinESMExports();
+        }
+        assert.equal(overlapped, true);
+        const result = readMeta(id);
+        assert.equal(result.dismissedAt, 41);
+        assert.equal(result.status, "completed");
+        assert.equal(result.exitCode, 0);
+        assert.ok(result.endedAt > result.startedAt);
+        assert.ok(result.completionCallbackPendingAt);
+        if (dismissFirst) assert.equal(result.completionCallbackSentAt, 42);
+    }
+});
+
+it("recovered old-parent child retires its cleanup receipt only after real finalization and callback settlement", async () => {
+    const durable = mkdtempSync(join(tmpdir(), "recovered-exit-")), previous = process.env.PI_SUBAGENT_DURABLE_DIR;
+    process.env.PI_SUBAGENT_DURABLE_DIR = durable;
+    const id = "sa_recovered_cleanup", pid = 4194304, liveRuns = [], owned = new Map();
+    let exit, accept;
+    const childExit = new Promise(resolve => { exit = resolve; });
+    const handoff = new Promise(resolve => { accept = resolve; });
+    const batcher = createCallbackBatcher({ sendMessage: () => handoff });
+    seedRunningMeta(id, { pid, spawnPid: 4194303, spawnPidStartTime: "dead-owner", sessionId: id,
+        supervisionInterruptedAt: 1, recipe: { version: 1, sessionId: id, sessionDir: durableSessionsDir(), cwd: process.cwd() } });
+    writeRunLog(id, [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }] } },
+        { type: "agent_end", messages: [] }]);
+    const completion = completeOwnedExit(childExit, code => {
+        assert.equal(code, null, "unobserved recovery cannot invent an exit code");
+        const result = finalizeRun(id, code);
+        assert.equal(result.meta.status, "completed");
+        batcher.deliverUrgent({ source: "subagent", id, label: id, status: "completed", customType: "completion", content: "recovered" });
+    }, () => {}, () => batcher.settled());
+    const receipt = { pid, start: "original-child-start", completion };
+    owned.set(id, receipt);
+    registerFixtureRun({ id, pid }, owned, liveRuns);
+    try {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(readMeta(id).status, "running", "live writer is not finalized from its partial history");
+        exit(null);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(liveRuns.length, 1, "terminal metadata is not cleanup acknowledgement while handoff is pending");
+        accept(); await completion;
+        batcher.cancel();
+        rmSync(runDir(id), { recursive: true, force: true });
+        retireFixtureRun({ id, pid }, receipt, owned, liveRuns);
+        assert.equal(readMeta(id).status, "completed", "durable archive remains visible after raw directory removal");
+        assert.equal(liveRuns.length, 0, "afterEach must not reap an archived recovered child a second time");
+        assert.equal(owned.size, 0);
+    } finally {
+        accept(); batcher.cancel(); rmSync(runDir(id), { recursive: true, force: true });
+        rmSync(durable, { recursive: true, force: true });
+        if (previous === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = previous;
+    }
+});
+
+it("a stale health acknowledgement preserves real exit evidence and aggregate completion", async () => {
+    const id = "sa_health_marker_exit_race";
+    const stale = { id, cwd: tmpdir(), sessionId: id, status: "lost", startedAt: 1, endedAt: 2,
+        pid: 4194304, spawnPid: process.pid, callback: true, logPath: logPathFor(id) };
+    const sent = [];
+    const batcher = createCallbackBatcher({ sendMessage: message => sent.push(message) }, { windowMs: 5000 });
+    try {
+        writeMeta(stale);
+        writeFileSync(logPathFor(id), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+        finalizeRun(id, 1);
+        assert.equal(readMeta(id).status, "failed");
+        writeMeta(stale, { patch: () => ({ lostCallbackSentAt: 3 }) });
+        const current = readMeta(id);
+        assert.equal(current.status, "failed", "callback metadata cannot restore provisional lost");
+        assert.equal(current.exitCode, 1);
+        assert.ok(current.completionCallbackPendingAt);
+        assert.equal(current.lostCallbackSentAt, 3);
+        const before = readFileSync(join(runDir(id), "meta.json"), "utf8");
+        let notifications = 0;
+        const stop = onMetaChanged(() => { notifications++; });
+        try {
+            writeMeta(stale, { patch: latest => {
+                assert.equal(latest.status, "failed");
+                return undefined;
+            } });
+        } finally { stop(); }
+        assert.equal(readFileSync(join(runDir(id), "meta.json"), "utf8"), before);
+        assert.equal(notifications, 0, "a declined marker patch does not publish a metadata change");
+        batcher.enqueue({ source: "subagent", id, label: id, status: current.status, detailTool: "subagent_result", callback: true });
+        assert.equal(await batcher.flush(), true);
+        assert.ok(sent.some(message => message.customType === "background-completion-batch" && message.content.includes(id)),
+            "the superseding completion remains present in the aggregate callback");
+    } finally { batcher.cancel(); await batcher.settled(); rmSync(runDir(id), { recursive: true, force: true }); }
+});
 
 describe("classifyChildExit", () => {
     // @covers subagent.run-finalization
@@ -140,6 +273,49 @@ describe("classifyChildExit", () => {
 
     // @covers subagent.run-finalization
     // @level unit
+    // @fails-without-fix subagent.run-finalization
+    it("does not complete an exit-0 child whose last model request failed", () => {
+        const outcome = classifyChildExit(0, {
+            ...coherentRun,
+            modelError: MODEL_ERROR,
+        });
+
+        assert.equal(outcome.status, "failed");
+        assert.equal(outcome.incomplete, false);
+        assert.equal(outcome.classification, "failed_model_error");
+        // The provider error travels with the outcome, not only the log.
+        assert.equal(outcome.diagnostics.modelError, MODEL_ERROR);
+        assert.doesNotMatch(outcome.verdict, /completed/i);
+        assert.match(outcome.verdict, /model error/i);
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
+    // @characterizes subagent.run-finalization
+    it("lets a worse failure outrank a model error", () => {
+        assert.equal(classifyChildExit(1, { ...coherentRun, modelError: MODEL_ERROR }).classification, "failed_exit");
+        assert.equal(classifyChildExit(0, { ...coherentRun, modelError: MODEL_ERROR, sawEnd: false }).classification,
+            "incomplete_no_terminal_event");
+        assert.equal(classifyChildExit(0, {
+            ...coherentRun,
+            modelError: MODEL_ERROR,
+            unmatchedToolCalls: [{ id: "call_bash", toolName: "bash" }],
+        }).classification, "incomplete_open_tools");
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
+    // @characterizes subagent.run-finalization
+    it("keeps exit-0 completion when the stream ends on a served request", () => {
+        const outcome = classifyChildExit(0, { ...coherentRun, modelError: undefined });
+
+        assert.equal(outcome.status, "completed");
+        assert.equal(outcome.classification, "complete");
+        assert.equal(outcome.diagnostics.modelError, undefined);
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
     // @characterizes subagent.run-finalization
     it("preserves failed classification for a nonzero child exit", () => {
         const outcome = classifyChildExit(1, coherentRun);
@@ -171,6 +347,76 @@ describe("classifyChildExit", () => {
 });
 
 describe("finalizeRun integration", () => {
+    it("terminal metadata precedes the retained outcome for distinct assignments in one conversation", () => {
+        const conversation = `publication-${process.pid}-${Date.now()}`;
+        const owner = { kind: "worker-conversation", sessionId: conversation, workspace: process.cwd(), branchId: null, goalId: null };
+        const recipient = { ...owner, kind: "parent-session", sessionId: "publication-parent" };
+        const ids = [`sa_publication_first_${process.pid}`, `sa_publication_next_${process.pid}`];
+        const publicationGaps = [];
+        const stop = onMetaChanged(() => {
+            for (const id of ids) {
+                const meta = readMeta(id);
+                if (meta?.status === "completed") publicationGaps.push({ id, outcome: readOutcome(meta) });
+            }
+        });
+        try {
+            for (const [index, id] of ids.entries()) {
+                const assignment = { version: 1, assignmentId: `${conversation}-${index}`, owner, recipient };
+                registerAssignmentAttempt(assignment, id);
+                writeRunLog(id, [{ type: "message_end", message: { role: "assistant", content: "Retained answer" } }, { type: "agent_end", messages: [] }]);
+                seedRunningMeta(id, { assignment, sessionId: conversation, ...(index ? { resumedFrom: ids[0] } : {}) });
+                recordAssignmentReport(id, { status: index ? "complete" : "incomplete", reason: index ? "Follow-up complete" : "More work needed",
+                    evidence: [{ path: "package.json", explanation: "Retained fixture evidence" }] }, () => readMeta(id));
+                assert.equal(readOutcome(readMeta(id)), null);
+                finalizeRun(id, 0);
+                const meta = readMeta(id), outcome = readOutcome(meta);
+                assert.equal(meta.sessionId, conversation);
+                assert.equal(outcome.assignmentId, assignment.assignmentId);
+                assert.equal(outcome.outcome, index ? "succeeded" : "failed");
+                assert.ok(publicationGaps.some(gap => gap.id === id && gap.outcome === null), "completed metadata must not manufacture a retained outcome");
+                receiptOutcome(meta, `publication-entry-${index}`);
+                inspectOutcome(meta, { recipient });
+                inspectOutcome(meta, { recipient, revision: outcome.revision, disposition: index ? "consumed" : "dismissed", note: "Inspected this exact retained outcome" });
+            }
+            assert.equal(readMeta(ids[1]).resumedFrom, ids[0]);
+            assert.equal(readOutcome(readMeta(ids[0])).outcome, "failed");
+            assert.equal(readOutcome(readMeta(ids[0])).disposition.kind, "dismissed");
+            assert.equal(readOutcome(readMeta(ids[1])).disposition.kind, "consumed");
+        } finally {
+            stop();
+            for (const id of ids) rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("records a child-exit failure for an exit-0 model error without clearing supervision", () => {
+        const id = `sa_finalize_model_error_${process.pid}_${Date.now()}`;
+        writeRunLog(id, [
+            { type: "message_end", message: { role: "assistant", content: "I'll start by examining the repository.", stopReason: "toolUse" } },
+            { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: MODEL_ERROR } },
+            { type: "agent_end", messages: [], willRetry: false },
+        ]);
+        seedRunningMeta(id);
+        try {
+            const result = finalizeRun(id, 0, { renderWidget: () => {}, notify: () => {}, sendMessage: () => {} });
+
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.classification, "failed_model_error");
+
+            const rows = readFileSync(failurePath(id), "utf8").trim().split("\n").filter(Boolean)
+                .map((line) => JSON.parse(line))
+                .map((row) => row.event ?? row);
+            const exit = rows.find((row) => row.operation === "child-exit");
+            assert.ok(exit, `a failed exit-0 run must still record a failure entry; saw ${JSON.stringify(rows)}`);
+            assert.equal(exit.kind, "failure");
+            assert.match(exit.summary, /model error|no eligible Flash model/i);
+            assert.ok(!rows.some((row) => row.kind === "recovered"),
+                "a failed run must not report supervision incidents as recovered");
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
     // @covers subagent.run-finalization
     // @level integration
     // @fails-without-fix subagent.run-finalization
@@ -267,6 +513,81 @@ describe("finalizeRun integration", () => {
             assert.match(rendered, /lifecycle complete/);
             assert.match(rendered, /Final answer/);
             assert.doesNotMatch(rendered, /ended unexpectedly/i);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("persists failed status with the provider error when a zero-exit run ends on a model error", () => {
+        const id = `sa_finalize_model_err_${process.pid}_${Date.now()}`;
+        const messages = [];
+        const notifications = [];
+
+        // Verbatim shape of a real router child: a normal turn, a timeout that
+        // auto-retry recovers, then a terminal timeout whose retry the router turns
+        // into "no eligible model". Pi ends the loop cleanly: agent_end,
+        // auto_retry_end success:false, agent_settled, exit 0.
+        const failedAssistant = (errorMessage) => ({
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage },
+        });
+        writeRunLog(id, [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I'll start by examining the repository state." }], stopReason: "toolUse" } },
+            { type: "tool_execution_start", toolCallId: "call_read", toolName: "read" },
+            { type: "tool_execution_end", toolCallId: "call_read", toolName: "read", isError: false },
+            failedAssistant("Request timed out."),
+            { type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." }] },
+            { type: "auto_retry_start", attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." },
+            { type: "agent_start" },
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "reviewing the diff" }], stopReason: "toolUse" } },
+            { type: "tool_execution_start", toolCallId: "call_bash", toolName: "bash" },
+            { type: "tool_execution_end", toolCallId: "call_bash", toolName: "bash", isError: false },
+            { type: "auto_retry_end", success: true, attempt: 1 },
+            failedAssistant("Request timed out."),
+            { type: "auto_retry_start", attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." },
+            { type: "agent_start" },
+            failedAssistant(MODEL_ERROR),
+            { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: MODEL_ERROR }], willRetry: false },
+            { type: "auto_retry_end", success: false, attempt: 1, finalError: MODEL_ERROR },
+            { type: "agent_settled", aborted: false },
+        ]);
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: (message, level) => notifications.push({ message, level }),
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.applied, true);
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, false);
+            assert.equal(result.outcome?.classification, "failed_model_error");
+            assert.equal(result.outcome?.diagnostics.modelError, MODEL_ERROR);
+
+            const persisted = readMeta(id);
+            assert.equal(persisted?.status, "failed");
+            assert.equal(persisted?.exitCode, 0);
+            assert.equal(persisted?.lifecycleClassification, "failed_model_error");
+
+            assert.equal(messages.length, 1);
+            assert.match(messages[0].message.content, /failed \(model error\)/);
+            assert.match(messages[0].message.content, /lifecycle failed_model_error/);
+            assert.doesNotMatch(messages[0].message.content, /completed/i);
+            assert.equal(messages[0].options.triggerTurn, true);
+            assert.equal(notifications[0]?.level, "warning");
+
+            const rendered = buildSubagentResultText(id);
+            assert.ok(rendered);
+            assert.match(rendered, /lifecycle failed_model_error/);
+            // The provider error is attached verbatim, so the caller can act on it.
+            assert.ok(rendered.includes(MODEL_ERROR), `result must name the provider error:\n${rendered}`);
+            assert.match(rendered, /failed/);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
         } finally {
             rmSync(runDir(id), { recursive: true, force: true });
         }

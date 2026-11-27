@@ -28,16 +28,184 @@ export function parseDetachArgs(args: string): { host: string; remoteDir?: strin
   return { host, ...(remoteDir ? { remoteDir } : {}), ...(toCwd ? { toCwd } : {}) };
 }
 
-export default function (pi: ExtensionAPI): void {
-  /** Sessions this process has seen leave. A later `return` rewrites the record to "owned", but this process must never write them again. */
-  const departed = new Set<string>();
+const shellWord = (word: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`);
+
+/** The follow-up commands carry `--remote-dir` when the daemon is not in its default dir, so they work as printed. */
+export function detachedMessage(sessionId: string, host: string, result: { cwd: string; worktreeFiles: number }, remoteDir?: string): string {
+  const where = `--host ${shellWord(host)}${remoteDir ? ` --remote-dir ${shellWord(remoteDir)}` : ""}`;
+  return (
+    `Moved to ${host}: ${result.cwd} (${result.worktreeFiles} files verified). The agent keeps running there.\n` +
+    `Follow it:  pi-remote tail ${sessionId} ${where}\n` +
+    `Steer it:   pi-remote steer ${sessionId} "<message>" ${where}\n` +
+    `Bring it back:  pi-remote return ${sessionId} ${where}  (rebuilds beside the original workspace, which stays as it is)\n` +
+    "This Pi process will not run the session again; exit with /quit."
+  );
+}
+
+/** The Pi session methods the transcript gate wraps. A transfer cannot be safe without both. */
+const GATED_METHODS = ["_persist", "_rewriteFile"] as const;
+type LocalSessionManager = { getSessionId(): string; getSessionFile?(): string | undefined };
+
+/** Call before starting a transfer, while the source is still unfenced. */
+export function assertLocalSessionTransferSafe(sessionManager: unknown): void {
+  const manager = sessionManager as Record<string, unknown> | null | undefined;
+  const missing = GATED_METHODS.filter((method) => typeof manager?.[method] !== "function");
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to detach: this Pi no longer has the session methods (${missing.join(", ")}) that keep a moved session from being written here, so the move could not be made safe. This session is unchanged.`,
+    );
+  }
+}
+
+interface ManagerOwnershipGuard {
+  departed: Set<string>;
+  wrapped: boolean;
+  flushDropped?: () => boolean;
+}
+
+// Native replacement and separately loaded extension modules must share both gates and latches.
+const OWNERSHIP_GUARDS = Symbol.for("pi-better-server.local-ownership-guards.v1");
+const shared = globalThis as typeof globalThis & {
+  [OWNERSHIP_GUARDS]?: {
+    registered: WeakSet<ExtensionAPI>;
+    apis: WeakMap<ExtensionAPI, ReturnType<typeof createLocalOwnershipGuard>>;
+    managers: WeakMap<LocalSessionManager, ManagerOwnershipGuard>;
+  };
+};
+const ownership = shared[OWNERSHIP_GUARDS] ??= {
+  registered: new WeakSet<ExtensionAPI>(),
+  apis: new WeakMap<ExtensionAPI, ReturnType<typeof createLocalOwnershipGuard>>(),
+  managers: new WeakMap<LocalSessionManager, ManagerOwnershipGuard>(),
+};
+
+function managerOwnershipGuard(manager: LocalSessionManager): ManagerOwnershipGuard {
+  let state = ownership.managers.get(manager);
+  if (!state) {
+    state = { departed: new Set<string>(), wrapped: false };
+    ownership.managers.set(manager, state);
+  }
+  return state;
+}
+
+function createLocalOwnershipGuard() {
+  const markDeparted = (manager: LocalSessionManager, sessionId: string): void => {
+    managerOwnershipGuard(manager).departed.add(sessionId);
+  };
+  const blockedFor = (manager: LocalSessionManager): string | undefined => {
+    const sessionId = manager.getSessionId();
+    const state = managerOwnershipGuard(manager);
+    // A return replaces the record with "owned", but cannot refresh this manager's stale history.
+    if (readLocalRecord(localStateDir(), sessionId)?.state === "moved") markDeparted(manager, sessionId);
+    const reason = localBlockedReason(localStateDir(), sessionId, manager.getSessionFile?.());
+    if (reason) return reason;
+    return state.departed.has(sessionId) ? `This session moved away from this Pi process; resume it in a new process with \`pi --session\` after \`pi-remote return ${sessionId}\`.` : undefined;
+  };
+  const guard = (sessionManager: LocalSessionManager): void => {
+    // Capture the manager, never the context: native runtime replacement invalidates contexts.
+    const manager = sessionManager as LocalSessionManager & { flushed?: boolean; _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
+    blockedFor(manager);
+    const state = managerOwnershipGuard(manager);
+    if (state.wrapped) return;
+    state.wrapped = true;
+    const rewrite = typeof manager._rewriteFile === "function" ? manager._rewriteFile : undefined;
+    // Entries withheld by the fence remain in memory. Rewriting restores parent links
+    // on rollback, or on the next append if the fence was lifted outside this handler.
+    let dropped = false;
+    state.flushDropped = () => {
+      if (!dropped || !rewrite || manager.flushed === false) return false;
+      rewrite.call(manager);
+      dropped = false;
+      return true;
+    };
+    for (const method of GATED_METHODS) {
+      const original = manager[method];
+      if (typeof original !== "function") continue;
+      (manager as unknown as Record<string, unknown>)[method] = function (this: unknown, ...args: unknown[]) {
+        if (blockedFor(manager)) {
+          dropped = true;
+          return undefined;
+        }
+        if (dropped) {
+          if (state.flushDropped?.()) return undefined;
+          dropped = false;
+        }
+        return (original as (...a: unknown[]) => unknown).apply(this, args);
+      };
+    }
+  };
+  return { markDeparted, blockedFor, guard };
+}
+
+function localOwnershipGuard(pi: ExtensionAPI) {
+  let guard = ownership.apis.get(pi);
+  if (!guard) {
+    guard = createLocalOwnershipGuard();
+    ownership.apis.set(pi, guard);
+  }
+  return guard;
+}
+
+/** Install ownership gates once per API, without registering any commands. */
+export function registerLocalOwnershipGuard(pi: ExtensionAPI): void {
+  if (ownership.registered.has(pi)) return;
+  ownership.registered.add(pi);
+  const { guard, blockedFor } = localOwnershipGuard(pi);
+
+  // Extension-triggered turns skip input, so gate agent/tool execution and transcript writes too.
+  pi.on("session_start", (_event, ctx) => {
+    guard(ctx.sessionManager);
+  });
+
+  pi.on("input", (_event, ctx) => {
+    const manager = ctx.sessionManager;
+    guard(manager);
+    const reason = blockedFor(manager);
+    if (!reason) return { action: "continue" };
+    ctx.ui.notify(reason, "warning");
+    return { action: "handled" };
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    const manager = ctx.sessionManager;
+    guard(manager);
+    if (blockedFor(manager)) ctx.abort();
+  });
+
+  pi.on("tool_call", (_event, ctx) => {
+    const manager = ctx.sessionManager;
+    guard(manager);
+    const reason = blockedFor(manager);
+    return reason ? { block: true, reason } : undefined;
+  });
+}
+
+/** Latch acknowledgement on the captured source manager, not a runtime's current manager. Never call for a copy. */
+export function markLocalSessionDeparted(pi: ExtensionAPI, sessionId: string, manager: object): void {
+  registerLocalOwnershipGuard(pi);
+  localOwnershipGuard(pi).markDeparted(manager as LocalSessionManager, sessionId);
+}
+
+export interface DetachDeps {
+  resolveTarget: typeof resolveTarget;
+  waitMs?: number;
+}
+
+export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTarget }): void {
+  registerLocalOwnershipGuard(pi);
   pi.registerCommand("detach", {
     description: "Move this session and its workspace to a pi-better-server daemon on <ssh-alias>",
     handler: async (args, ctx) => {
-      guard(ctx);
+      const manager = ctx.sessionManager;
+      localOwnershipGuard(pi).guard(manager);
       let parsed;
       try {
         parsed = parseDetachArgs(args);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        return;
+      }
+      try {
+        assertLocalSessionTransferSafe(ctx.sessionManager);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
@@ -59,78 +227,35 @@ export default function (pi: ExtensionAPI): void {
           },
           host: parsed.host,
           connect: async () => {
-            target = await resolveTarget({ host: parsed.host, ...(parsed.remoteDir ? { remoteDir: parsed.remoteDir } : {}) });
+            target = await deps.resolveTarget({ host: parsed.host, ...(parsed.remoteDir ? { remoteDir: parsed.remoteDir } : {}) });
             return DaemonClient.connect(target.socketPath);
           },
           isBusy: () => !ctx.isIdle(),
+          ...(deps.waitMs === undefined ? {} : { waitMs: deps.waitMs }),
           ...(parsed.toCwd ? { toCwd: parsed.toCwd } : {}),
           onProgress: (message) => ctx.ui.notify(message, "info"),
         });
-        departed.add(sessionId);
-        ctx.ui.notify(
-          `Moved to ${parsed.host}: ${result.cwd} (${result.worktreeFiles} files verified). The agent keeps running there.\n` +
-            `Follow it:  pi-remote tail ${sessionId} --host ${parsed.host}\n` +
-            `Steer it:   pi-remote steer ${sessionId} "<message>" --host ${parsed.host}\n` +
-            `Bring it back:  pi-remote return ${sessionId} --host ${parsed.host}  (rebuilds beside the original workspace, which stays as it is)\n` +
-            "This Pi process will not run the session again; exit with /quit.",
-          "info",
-        );
+        markLocalSessionDeparted(pi, sessionId, manager);
+        ctx.ui.notify(detachedMessage(sessionId, parsed.host, result, parsed.remoteDir), "info");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const untouched = error instanceof PreflightError || (error instanceof MoveError && error.sourceUnfenced);
+        if (error instanceof MoveError && error.sourceUnfenced && manager.getSessionId() === sessionId) {
+          try {
+            if (!localOwnershipGuard(pi).blockedFor(manager)) managerOwnershipGuard(manager).flushDropped?.();
+          } catch (flushError) {
+            ctx.ui.notify(`${message}\nCould not persist entries buffered during the move: ${String(flushError)}`, "error");
+            return;
+          }
+        }
         ctx.ui.notify(untouched ? `${message}\nThis session is unchanged.` : message, "error");
       } finally {
         await target?.close();
       }
     },
   });
+}
 
-  // Once the session is fenced or has left, a second writer here would fork its history. Every turn
-  // ends in the session file and the workspace, so the gate sits on those two, not on each caller:
-  // extension-triggered turns (sendCustomMessage triggerTurn from background tasks or goals) never
-  // emit `input`, and `moved` is latched in memory so a later `return` does not reopen this process.
-  const guarded = new WeakSet<object>();
-  const blockedFor = (ctx: { sessionManager: { getSessionId(): string } }): string | undefined => {
-    const sessionId = ctx.sessionManager.getSessionId();
-    if (readLocalRecord(localStateDir(), sessionId)?.state === "moved") departed.add(sessionId);
-    const reason = localBlockedReason(localStateDir(), sessionId);
-    if (reason) return reason;
-    return departed.has(sessionId) ? `This session moved away from this Pi process; resume it in a new process with \`pi --session\` after \`pi-remote return ${sessionId}\`.` : undefined;
-  };
-  const guard = (ctx: { sessionManager: { getSessionId(): string } }): void => {
-    const manager = ctx.sessionManager as unknown as { _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
-    if (guarded.has(manager)) return;
-    guarded.add(manager);
-    for (const method of ["_persist", "_rewriteFile"] as const) {
-      const original = manager[method];
-      if (typeof original !== "function") continue;
-      (manager as Record<string, unknown>)[method] = function (this: unknown, ...args: unknown[]) {
-        if (blockedFor(ctx)) return undefined;
-        return (original as (...a: unknown[]) => unknown).apply(this, args);
-      };
-    }
-  };
-
-  pi.on("session_start", (_event, ctx) => {
-    guard(ctx);
-  });
-
-  pi.on("input", (_event, ctx) => {
-    guard(ctx);
-    const reason = blockedFor(ctx);
-    if (!reason) return { action: "continue" };
-    ctx.ui.notify(reason, "warning");
-    return { action: "handled" };
-  });
-
-  pi.on("agent_start", (_event, ctx) => {
-    guard(ctx);
-    if (blockedFor(ctx)) ctx.abort();
-  });
-
-  pi.on("tool_call", (_event, ctx) => {
-    guard(ctx);
-    const reason = blockedFor(ctx);
-    return reason ? { block: true, reason } : undefined;
-  });
+export default function (pi: ExtensionAPI): void {
+  registerDetach(pi);
 }

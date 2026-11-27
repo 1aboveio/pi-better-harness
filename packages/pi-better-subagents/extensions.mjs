@@ -33,10 +33,24 @@
  *   pi -p --no-extensions "list your tools" -> read, bash, edit, write
  * A builtin needs no extension, so it never counts as unmapped.
  */
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write"];
+// codemode is supplied by the harness child adapter, not a discovered package.
+export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"];
 
 /** Marker spec meaning "this extension's own package" (for allow_nested). */
 export const SELF_SPEC = "self";
+
+/**
+ * Provider packages Pi does not ship itself. A provider's models exist in a
+ * child only when the package registering them is loaded; without this map, a
+ * role that resolves e.g. `ollama-cloud/...` in the foreground fails in its
+ * isolated child with "model not found". User `providerExtensions` entries
+ * replace these per provider (an empty list disables the built-in entry).
+ */
+export const BUILTIN_PROVIDER_EXTENSIONS = {
+    "router": "npm:pi-better-model-router",
+    "ollama-cloud": "npm:pi-ollama-cloud",
+    "litellm": "npm:pi-provider-litellm",
+};
 
 /** Split "xai/grok-4.5" -> "xai". Returns undefined when there is no provider. */
 export function providerOf(model) {
@@ -75,11 +89,11 @@ export function toolList(tools) {
  * @returns {{mode: "isolated"|"clean"|"inherit", specs: string[], unmapped: string[], reasons: Record<string,string[]>}}
  *   mode     — "isolated" passes --no-extensions + explicit -e (the default);
  *              "clean" passes --no-extensions with no -e;
- *              "inherit" passes neither (operator opt-out, NOT model-selectable).
+ *              "inherit" keeps discovery and adds explicitly selected mappings.
  *   specs    — extension specs to load, deduped, in a stable order.
  *   unmapped — requested tools that are neither builtin nor mapped to an
- *              extension. They simply will not exist in the child; surfaced so
- *              the human sees it instead of the child silently lacking a tool.
+ *              extension. Admission rejects a known missing required provider.
+ *              Preflight verifies registrations supplied by loaded extensions.
  *   reasons  — spec -> what pulled it in, for the spawn diagnostic.
  */
 export function resolveExtensions(a = {}) {
@@ -94,13 +108,10 @@ export function resolveExtensions(a = {}) {
 
     // allow_nested is honored in every mode: it is an explicit caller request,
     // and without our own package loaded the child has no subagent tools at all.
-    if (a.allowNested) add(SELF_SPEC, "allow_nested");
-
-    if (cfg.inheritExtensions === true) {
-        return { mode: "inherit", specs: [], unmapped: [], reasons: {} };
-    }
+    const inherit = cfg.inheritExtensions === true;
+    if (a.allowNested && !inherit) add(SELF_SPEC, "allow_nested");
     if (a.clean === true) {
-        return { mode: "clean", specs, unmapped: [], reasons };
+        return { mode: inherit ? "inherit" : "clean", specs, unmapped: [], reasons };
     }
 
     const toolMap = cfg.toolExtensions ?? {};
@@ -109,17 +120,22 @@ export function resolveExtensions(a = {}) {
         if (BUILTIN_TOOLS.includes(tool)) continue;
         const mapped = toSpecList(toolMap[tool]);
         if (mapped.length === 0) {
-            if (!unmapped.includes(tool)) unmapped.push(tool);
+            if (!inherit && !unmapped.includes(tool)) unmapped.push(tool);
             continue;
         }
         for (const spec of mapped) add(spec, `tool:${tool}`);
     }
 
+    if (inherit) return { mode: "inherit", specs, unmapped, reasons };
+
     // Model auth is not tool-shaped: xai/grok needs pi-xai-oauth loaded or the
-    // child cannot authenticate at all, whatever tools it was granted.
+    // child cannot authenticate at all, whatever tools it was granted. A user
+    // entry for a provider wins over the built-in one, including an empty list
+    // that opts out of loading the provider's package.
+    const providerMap = { ...BUILTIN_PROVIDER_EXTENSIONS, ...(cfg.providerExtensions ?? {}) };
     const provider = providerOf(a.model);
     if (provider) {
-        for (const spec of toSpecList((cfg.providerExtensions ?? {})[provider])) {
+        for (const spec of toSpecList(providerMap[provider])) {
             add(spec, `provider:${provider}`);
         }
     }
@@ -135,8 +151,7 @@ export function resolveExtensions(a = {}) {
  * @returns {{args: string[], missing: string[]}}
  */
 export function extensionArgs(resolution, resolvePath) {
-    if (resolution.mode === "inherit") return { args: [], missing: [] };
-    const args = ["--no-extensions"];
+    const args = resolution.mode === "inherit" ? [] : ["--no-extensions"];
     const missing = [];
     for (const spec of resolution.specs) {
         const path = resolvePath(spec);

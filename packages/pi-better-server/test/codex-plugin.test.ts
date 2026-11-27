@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import type { Server } from "node:http";
 import { after, describe, it } from "node:test";
 import { CODEX_BIN, MARKETPLACE, createThread, installPlugin, makeRepo, pkgRoot, run, runCleanups, shortDir, startHost, writePiRemoteWrapper, type Host } from "./codex-host.ts";
 import { waitFor } from "./helpers.ts";
@@ -9,6 +11,36 @@ import { waitFor } from "./helpers.ts";
 after(runCleanups);
 
 const NAMESPACE = "mcp__pi_remote";
+
+it("Codex host startup failure closes its already-listening mock model", async t => {
+  const require = createRequire(import.meta.url);
+  const http = require("node:http");
+  const processes = require("node:child_process");
+  const createServer = http.createServer;
+  const servers: Server[] = [];
+  t.mock.method(http, "createServer", (...args: any[]) => {
+    const server = createServer(...args);
+    servers.push(server);
+    return server;
+  });
+  t.mock.method(processes, "execFileSync", (_file: string, args: string[]) => {
+    assert.deepEqual(args, ["--version"], "fail only the external CLI preflight, without spawning a process");
+    throw new Error("fixture CLI startup unavailable");
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(startHost("startup-failure"), /fixture CLI startup unavailable/);
+    assert.equal(servers.length, 1, "startup created the real mock HTTP listener");
+    assert.equal(servers[0]!.listening, false, "a failed host cannot retain the test file through its model listener");
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    for (const server of servers) {
+      server.closeAllConnections();
+      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+    await runCleanups();
+  }
+});
 
 /** Run `codex exec` whose scripted model answers the first request with one call to a plugin tool. */
 async function execToolCall(host: Host, tool: string, args: Record<string, unknown>, extraEnv: Record<string, string> = {}) {

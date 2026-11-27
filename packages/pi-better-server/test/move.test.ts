@@ -448,6 +448,26 @@ describe("session bundle", { concurrency: false }, () => {
       expectRefused(makeEnv(), (m) => m.worktree.push({ path: ".git/config", sha256: "0".repeat(64), mode: "644" }), /writes into \.git/);
     });
 
+    it("refuses NTFS aliases of .git ('.git.', '.git ', 'git~1', a stream suffix) on every platform", () => {
+      for (const dir of [".git.", ".git ", ".GIT..", "git~1", "GIT~1", ".git::$INDEX_ALLOCATION", "sub/.git. /x"]) {
+        expectRefused(makeEnv(), (m, stage) => addUntracked(m, stage, `${dir}/config`, "x"), /writes into \.git/);
+      }
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: "gl", target: "git~1/hooks" }), /into \.git/);
+    });
+
+    it("refuses at bundle time an untracked symlink that restore would refuse", () => {
+      for (const [target, pattern] of [["/mnt/data", /absolute target/], ["../../outside", /outside the workspace/], [".git/hooks", /into \.git/]] as const) {
+        const env = makeEnv();
+        const repo = makeRepo(env.root);
+        symlinkSync(target, join(repo, "data"));
+        assert.throws(() => bundleOf(repo, join(env.root, "bundle.tar")), pattern);
+      }
+      const env = makeEnv();
+      const repo = makeRepo(env.root);
+      symlinkSync("a.txt", join(repo, "ok-link"));
+      assert.doesNotThrow(() => bundleOf(repo, join(env.root, "bundle.tar")));
+    });
+
     it("refuses a symlink whose path is under .git, so the fsmonitor config never lands", () => {
       const env = makeEnv();
       const marker = join(env.root, "pwned");

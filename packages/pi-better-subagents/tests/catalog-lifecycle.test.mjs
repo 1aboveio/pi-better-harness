@@ -4,9 +4,13 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "catalog-lifecycle-"));
 const runtimeTmp = join(root, "tmp");
@@ -26,12 +30,14 @@ const {
     roleSlug,
     tiersForLaunch,
 } = await import("../catalog-runtime.ts");
+const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 const { configureTierPolicy } = await import("../tier-policy.ts");
 const { setConfigForTests } = await import("../config.ts");
 const { buildDetailLines, buildNavigatorDetail } = await import("../navigator.mjs");
 const { mergeJobOptions } = await import("../batch.mjs");
 const { baseDir, readMeta, writeMeta } = await import("../registry.ts");
 const { CATALOG_LABEL_DIRECTORY } = await import("../catalog-identity.ts");
+let releaseRegisteredForeground;
 
 function model(provider, id, extra = {}) {
     return { provider, id, reasoning: true, ...extra };
@@ -232,6 +238,24 @@ Edited instructions.
         assert.deepEqual(distinct.jobs.map((job) => job.role), ["role.developer", "role.reviewer"]);
     });
 
+    it("keeps saved conversation selectors out of catalog clarification and expansion", async () => {
+        const continued = { prompt: "Follow up.", session_id: "saved-native-session",
+            agent: "agent.payments", role: ["role.developer", "role.reviewer"] };
+        const named = { prompt: "Named follow up.", session_name: "worker", role: ["role.reviewer", "role.explorer"] };
+        const result = await clarifyCatalogRequest([
+            continued,
+            { prompt: "Fresh work.", role: "role.developer" },
+            named,
+        ], { hasUI: false });
+        assert.equal(result.status, "resolved");
+        assert.equal(result.jobs.length, 3);
+        assert.deepEqual(result.jobs[0].role, continued.role);
+        assert.equal(result.jobs[0].agent, continued.agent);
+        assert.equal(result.jobs[0].session_id, continued.session_id);
+        assert.equal(result.jobs[2].session_name, named.session_name);
+        assert.deepEqual(result.jobs[2].role, named.role);
+    });
+
     it("splits one ambiguous run into single-role jobs and keeps the other job", async () => {
         const result = await clarifyCatalogRequest([
             { prompt: "Both.", role: ["role.developer", "role.reviewer"] },
@@ -349,6 +373,29 @@ Edited instructions.
         assert.notDeepEqual(first.capabilities.effective, retiled.capabilities.effective);
     });
 
+    it("keeps sandbox capability inspection scoped to its Pi event bus", () => {
+        const h = fixture().host();
+        noteCatalogHost(h);
+        setConfigForTests({ defaultModel: null, tierPolicy: null });
+        const snapshot = loadLaunchSnapshot(h);
+        const input = { inspection: { id: "role.developer", found: true }, snapshotDigest: snapshot.digest };
+        const events = new EventEmitter();
+        const permissions = { enabled: true, projectFiles: "write", outsideProject: "read",
+            storedCredentials: "off", commands: true, network: false };
+        events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => events.emit(SANDBOX_POLICY_CHANNEL, {
+            state: "disabled", subagentPermissions: permissions,
+        }));
+        const enabled = createLaunchEnricher({ events });
+        const fresh = createLaunchEnricher({ events: new EventEmitter() });
+        assert.equal(enabled(input).capabilities.effective.sandbox.enabled, true);
+        assert.deepEqual(fresh(input).capabilities.effective.sandbox, {
+            enabled: false, applied: false, writes: "unconfined",
+        });
+        assert.deepEqual(enabled(input).capabilities.effective.sandbox.permissions, permissions);
+        assert.equal(enabled(input).capabilities.effective.workspace.cwd, h.cwd);
+        assert.equal(enabled(input).capabilities.grantedByCatalog, false);
+    });
+
     it("applies each ambiguous job's choice only to that job", async () => {
         const calls = [];
         const result = await clarifyCatalogRequest([
@@ -443,6 +490,7 @@ Edited instructions.
 
 describe("registered catalog spawn", { concurrency: false }, () => {
     let tools;
+    let lastContext, catalogHost;
     const fx = fixture();
 
     before(async () => {
@@ -460,7 +508,9 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-base=$(dirname "$sess")
+// Native sessions now live in the durable Pi agent directory, so the fake child
+// is told the volatile registry root explicitly instead of deriving it.
+base="$PI_SUBAGENTS_TEST_REGISTRY"
 mkdir -p "$base/runs/$id"
 printf '%s\\n' "\${args[@]}" > "$base/runs/$id/argv.txt"
 printf '%s\\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$base/runs/$id/output.log"
@@ -470,20 +520,36 @@ fi
 `);
         chmodSync(piPath, 0o755);
         process.env.PATH = `${binDir}:${process.env.PATH}`;
+        process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
+        const stopRuntime = await startWorkRuntimeFixture();
+        catalogHost = await import("../catalog-host-admission.ts");
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);
         tools = {};
+        const shutdownHandlers = [];
+        releaseRegisteredForeground = async () => {
+            await waitForNoRunning();
+            const serverDir = join(fx.userRoot, "server");
+            const owner = inspectDaemonOwner(serverDir);
+            for (const handler of shutdownHandlers) {
+                await handler({ type: "session_shutdown", reason: "shutdown" }, lastContext);
+            }
+            await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+            catalogHost.closeCatalogHost();
+            await stopRuntime();
+        };
+        const { managedDomainPort } = await import("./managed-domain-port.mjs");
         extension.default({
             registerTool(def) { tools[def.name] = def; },
             registerCommand() {},
-            on() {},
+            on(event, handler) { if (event === "session_shutdown") shutdownHandlers.push(handler); },
             sendMessage() {},
-        });
+        }, managedDomainPort());
     });
 
     function ctx() {
-        return {
+        lastContext = {
             cwd: fx.cwd,
             hasUI: false,
             mode: "tui",
@@ -496,6 +562,8 @@ fi
             isProjectTrusted: () => true,
             ui: { setWidget() {}, notify() {}, select: async () => undefined },
         };
+        catalogHost.noteCatalogHostContext(lastContext, () => ({}));
+        return lastContext;
     }
 
     function textOf(result) {
@@ -524,16 +592,9 @@ fi
         assert.equal(meta.catalog.roleId, "role.developer");
         assert.equal(meta.catalog.modelSelection.source, "invocation");
         assert.equal(meta.catalog.capabilities.grantedByCatalog, false);
-        let argv = "";
-        for (let attempt = 0; attempt < 40; attempt++) {
-            try {
-                argv = readFileSync(join(run, "argv.txt"), "utf8");
-                if (argv.includes("--model\nopenai/gpt-6-astra") && argv.includes("--thinking\nhigh")) break;
-            } catch {
-                // The child may not have created its argument capture yet.
-            }
-            await new Promise((resolve) => setTimeout(resolve, 25));
-        }
+        // The fake child writes argv.txt before it exits; the exit is the signal it is there.
+        await settledMeta(id);
+        const argv = readFileSync(join(run, "argv.txt"), "utf8");
         assert.match(argv, /--model\nopenai\/gpt-6-astra/);
         assert.match(argv, /--thinking\nhigh/);
         assert.match(readFileSync(join(run, "prompt.md"), "utf8"), /Look at payments\./);
@@ -650,7 +711,7 @@ fi
             shared: { tools: "read,bash", sandbox: false },
         }, null, null, ctx());
         const text = textOf(result);
-        const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+        const ids = [...text.matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
         assert.equal(ids.length, 2);
         // Both jobs name their own defaults explicitly, so neither launch line carries a note.
         assert.match(text, /• Payments Developer → sa_[a-z0-9_]+$/m);
@@ -736,8 +797,9 @@ fi
         assert.equal(typeof tools.agents_catalog.execute, "function");
     });
 
+    // \b: a batch id such as batch_xxxsa_5 must not match as a run id.
     function runIdFrom(result) {
-        const match = textOf(result).match(/sa_[a-z0-9_]+/);
+        const match = textOf(result).match(/\bsa_[a-z0-9_]+/);
         assert.ok(match, textOf(result));
         return match[0];
     }
@@ -746,13 +808,17 @@ fi
         return JSON.parse(readFileSync(join(baseDir(), "runs", id, "meta.json"), "utf8"));
     }
 
+    // Wait for the child's exit to be recorded; a slow host is bounded by the test runner, not a poll count.
     async function settledMeta(id) {
-        for (let attempt = 0; attempt < 40; attempt++) {
-            const meta = metaOf(id);
-            if (meta.status !== "running") return meta;
+        for (;;) {
+            try {
+                const meta = metaOf(id);
+                if (meta.status !== "running") return meta;
+            } catch (error) {
+                if (error?.code !== "ENOENT") throw error;
+            }
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        return metaOf(id);
     }
 
     it("spawns direct-role numeric and alias labels through the registered tool", async () => {
@@ -850,7 +916,7 @@ fi
         }, null, null, ctx());
         const text = textOf(result);
         assert.doesNotMatch(text, /job-1|job-2|job-3/);
-        const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+        const ids = [...text.matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
         assert.equal(ids.length, 3);
         const metas = ids.map(metaOf);
         assert.equal(metas[0].catalog.snapshotDigest, metas[1].catalog.snapshotDigest);
@@ -941,7 +1007,7 @@ fi
     });
 
     describe("short role names (#370)", () => {
-        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer.";
+        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer, supervisor, writer.";
 
         function newRuns(before) {
             const runsDir = join(runtimeTmp, "pi-better-subagents", "runs");
@@ -1022,7 +1088,7 @@ fi
                 ],
                 shared: { role: "reviewer", tools: "read,bash", sandbox: false },
             }, null, null, ctx());
-            const ids = [...textOf(result).matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+            const ids = [...textOf(result).matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
             assert.equal(ids.length, 2, textOf(result));
             const metas = await Promise.all(ids.map(settledMeta));
             assert.deepEqual(metas.map((meta) => meta.catalog.roleId), ["role.reviewer", "role.developer"]);
@@ -1159,7 +1225,7 @@ fi
 
     async function waitForNoRunning() {
         const dir = join(baseDir(), "runs");
-        for (let attempt = 0; attempt < 40; attempt++) {
+        for (;;) {
             const ids = existsSync(dir) ? readdirSync(dir) : [];
             const running = ids.some((id) => {
                 try {
@@ -1224,4 +1290,8 @@ fi
     });
 });
 
-after(() => rmSync(root, { recursive: true, force: true }));
+after(async () => {
+    // The registered foreground owns a real observation even without session_start.
+    await releaseRegisteredForeground?.();
+    removeOwnedFixture(root);
+});

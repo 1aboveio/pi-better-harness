@@ -1,0 +1,4198 @@
+{
+  "root": "/private/tmp/p751-full-74LnPZ",
+  "platform": "darwin",
+  "node": "v24.21.0",
+  "machine": {
+    "release": "24.6.0",
+    "arch": "arm64",
+    "cpus": 16,
+    "cpuModel": "Apple M3 Max",
+    "totalMemory": 137438953472
+  },
+  "source": {
+    "head": "26ad994cbd17d6089791edaa3630fe8e5511b59a",
+    "dirty": "M docs/evidence/751/final-acceptance-gates.md\n M packages/pi-better-background-tasks/src/managed-frontend.ts\n M packages/pi-better-server/scripts/measure-full-runtime.mjs\n M packages/pi-better-server/scripts/measure-full-runtime/frontend.ts\n M packages/pi-better-server/src/runtime/domain/background-service/managed-frontend.domain.mjs\n M packages/pi-better-server/src/runtime/domain/background-service/managed-frontend.ts\n M packages/pi-better-server/src/runtime/domain/subagents/index.domain.mjs\n M packages/pi-better-server/src/runtime/domain/subagents/index.ts\n M packages/pi-better-subagents/index.ts\n M packages/pi-better-subagents/tests/navigator_provider_projection.test.mjs"
+  },
+  "scope": "Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two HostedSessions; sampler overhead included",
+  "scenarios": [
+    {
+      "warmup": [
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "management": {
+            "scopeRefreshes": 2,
+            "exactDetailReads": 0,
+            "reconciles": 2,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 0,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 15
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "0e17459f4f1a6b48e723d7a4090bd00b1a4358ee4e21bdc74ee71d787aa34b92",
+          "after": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "management": {
+            "scopeRefreshes": 3,
+            "exactDetailReads": 0,
+            "reconciles": 3,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 2,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 16
+            },
+            "cachedScopes": 1
+          }
+        },
+        {
+          "before": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "after": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "management": {
+            "scopeRefreshes": 3,
+            "exactDetailReads": 0,
+            "reconciles": 3,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 2,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 16
+            },
+            "cachedScopes": 1
+          }
+        }
+      ],
+      "backgroundBefore": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "backgroundAfter": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "managementBefore": {
+        "scopeRefreshes": 3,
+        "exactDetailReads": 0,
+        "reconciles": 3,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 2,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 16
+        },
+        "cachedScopes": 1
+      },
+      "managementAfter": {
+        "scopeRefreshes": 3,
+        "exactDetailReads": 0,
+        "reconciles": 3,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 14,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 16
+        },
+        "cachedScopes": 1
+      },
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 12,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 1,
+      "elapsedMs": 3123.7465839999995,
+      "resources": [
+        {
+          "identity": {
+            "pid": 18557,
+            "token": "8cc57f92-b9f8-44b5-a1c9-0b135636d6e6",
+            "start": "1794772225000"
+          },
+          "generation": "1",
+          "at": 1794772233495,
+          "cpu": {
+            "user": 194183,
+            "system": 34491
+          },
+          "usage": {
+            "userCPUTime": 194185,
+            "systemCPUTime": 34497,
+            "maxRSS": 135328,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8660,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 21,
+            "ipcReceived": 26,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2028
+          },
+          "rss": 69620032,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.411455,
+            "p95": 12.050431,
+            "p99": 12.247039
+          },
+          "role": "guardian",
+          "cpuMs": 10.813,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 18619,
+            "token": "3d5a1099-14a6-4a14-a20d-42e70d1512c3",
+            "start": "1794772225000"
+          },
+          "generation": "1",
+          "at": 1794772233546,
+          "cpu": {
+            "user": 2071524,
+            "system": 372472
+          },
+          "usage": {
+            "userCPUTime": 2071531,
+            "systemCPUTime": 372491,
+            "maxRSS": 527920,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 34040,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 385,
+            "ipcReceived": 470,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 337,
+            "involuntaryContextSwitches": 6983
+          },
+          "rss": 464023232,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.321343,
+            "p95": 12.050431,
+            "p99": 14.688255
+          },
+          "role": "server",
+          "cpuMs": 71.106,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19230,
+            "token": "0035e22a-6a3a-4bdf-9bb8-dfccd89ec9bd",
+            "start": "1794772226000"
+          },
+          "generation": "1",
+          "at": 1794772233438,
+          "cpu": {
+            "user": 1341320,
+            "system": 237241
+          },
+          "usage": {
+            "userCPUTime": 1341323,
+            "systemCPUTime": 237252,
+            "maxRSS": 383200,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 25125,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 422,
+            "ipcReceived": 459,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 4988
+          },
+          "rss": 329945600,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.362303,
+            "p95": 12.058623,
+            "p99": 12.517375
+          },
+          "role": "pi",
+          "cpuMs": 14.032,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19980,
+            "token": "27c8932a-737e-4b49-8c71-c57b0df932e6",
+            "start": "1794772228000"
+          },
+          "generation": "1",
+          "at": 1794772233505,
+          "cpu": {
+            "user": 819000,
+            "system": 93567
+          },
+          "usage": {
+            "userCPUTime": 819003,
+            "systemCPUTime": 93581,
+            "maxRSS": 250592,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 15913,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 2608
+          },
+          "rss": 208998912,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.436031,
+            "p95": 12.050431,
+            "p99": 12.173311
+          },
+          "role": "worker",
+          "cpuMs": 11.991,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20389,
+            "token": "649b7373-0960-4c8f-901a-d8cacbb746f5",
+            "start": "1794772228000"
+          },
+          "generation": "1",
+          "at": 1794772233548,
+          "cpu": {
+            "user": 88690,
+            "system": 24748
+          },
+          "usage": {
+            "userCPUTime": 88695,
+            "systemCPUTime": 24758,
+            "maxRSS": 89680,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5808,
+            "majorPageFault": 87,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 1127
+          },
+          "rss": 33726464,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.083775,
+            "p95": 12.066815,
+            "p99": 12.656639
+          },
+          "role": "runner",
+          "cpuMs": 19.006,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20526,
+            "token": "eac6a8ea-9073-4af0-b591-e5f2b31b21c6",
+            "start": "1794772229000"
+          },
+          "generation": "1",
+          "at": 1794772233623,
+          "cpu": {
+            "user": 67161,
+            "system": 18801
+          },
+          "usage": {
+            "userCPUTime": 67164,
+            "systemCPUTime": 18806,
+            "maxRSS": 72848,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4754,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1057
+          },
+          "rss": 26976128,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.263999,
+            "p95": 12.083199,
+            "p99": 12.574719
+          },
+          "role": "command",
+          "cpuMs": 16.854,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20618,
+            "token": "dd2de322-2585-427b-8d53-30da0dddcca2",
+            "start": "1794772229000"
+          },
+          "generation": "1",
+          "at": 1794772233670,
+          "cpu": {
+            "user": 74275,
+            "system": 20628
+          },
+          "usage": {
+            "userCPUTime": 74278,
+            "systemCPUTime": 20632,
+            "maxRSS": 72656,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4742,
+            "majorPageFault": 76,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1046
+          },
+          "rss": 26697344,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.280383,
+            "p95": 12.066815,
+            "p99": 12.394495
+          },
+          "role": "legacy-command",
+          "cpuMs": 18.36,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20625,
+            "token": "8d71cb04-483b-4fb8-931f-61e088e96a2b",
+            "start": "1794772229000"
+          },
+          "generation": "1",
+          "at": 1794772233676,
+          "cpu": {
+            "user": 71732,
+            "system": 18135
+          },
+          "usage": {
+            "userCPUTime": 71735,
+            "systemCPUTime": 18139,
+            "maxRSS": 72016,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4702,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 1023
+          },
+          "rss": 26009024,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.198463,
+            "p95": 12.066815,
+            "p99": 12.156927
+          },
+          "role": "legacy-command",
+          "cpuMs": 16.954,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 5,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 2,
+          "activeQueries": 6,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 120,
+        "queryCount": 35,
+        "cacheBytes": 20964,
+        "cacheEntries": 6,
+        "queryDurationMs": [
+          0.4132920000001832,
+          0.06579099999999016,
+          0.07954099999960818,
+          0.06854199999997945,
+          0.14045800000030795,
+          0.4691250000000764,
+          0.018082999999933236,
+          0.03304200000002311,
+          0.06191599999965547,
+          0.013708000000406173,
+          0.20541600000024118,
+          0.023999999999887223,
+          0.01999999999998181,
+          0.10912499999994907,
+          0.05991599999970276,
+          0.01779199999964476,
+          0.08595800000011877,
+          0.14941700000008495,
+          0.06837499999983265,
+          0.02349999999978536,
+          0.069166000000223,
+          0.1446249999999054,
+          0.026542000000063126,
+          0.053707999999915046,
+          0.0970420000003287,
+          0.07670800000005329,
+          0.048708999999689695,
+          0.021666000000095664,
+          0.2082500000001346,
+          0.23499999999967258,
+          0.10683400000016263,
+          0.03991700000005949,
+          0.061208000000078755,
+          0.10708400000021356,
+          0.06554200000027777
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 3,
+          "completed": 145,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.040124999999989086,
+            0.003040999999939231,
+            0.002250000000003638,
+            0.004500000000007276,
+            0.015542000000095868,
+            0.017458000000260654,
+            0.11716599999999744,
+            0.015750000000025466,
+            0.010541999999986729,
+            0.00658400000020265,
+            0.003582999999707681,
+            0.006499999999959982,
+            0.004124999999930878,
+            0.012124999999741704,
+            0.004457999999885942,
+            0.007124999999632564,
+            0.007082999999965978,
+            0.00650000000041473,
+            0.04466699999966295,
+            0.008124999999836291,
+            0.012459000000035303,
+            0.010917000000063126,
+            0.003541999999924883,
+            0.002791999999772088,
+            0.006375000000389264,
+            0.007250000000112777,
+            0.009457999999995081,
+            0.0061670000000049185,
+            0.005499999999756255,
+            0.005542000000332337,
+            0.008542000000034022,
+            0.005791999999928521,
+            0.006041999999979453,
+            0.0034579999996822153,
+            0.005083000000013271,
+            0.0076249999997344275,
+            0.010041000000001077,
+            0.007000000000061846,
+            0.017458000000260654,
+            0.006667000000106782,
+            0.007959000000028027,
+            0.00454200000012861,
+            0.017749999999978172,
+            0.00945899999987887,
+            0.006709000000228116,
+            0.00454200000012861,
+            0.00687500000003638,
+            0.00670799999988958,
+            0.005917000000408734,
+            0.006750000000010914,
+            0.007792000000335975,
+            0.0030839999999443535,
+            0.005625000000691216,
+            0.0058330000001660665,
+            0.0072079999999914435,
+            0.006832999999460299,
+            0.005541999999877589,
+            0.009915999999975611,
+            0.0072079999999914435,
+            0.005541999999877589,
+            0.005666000000019267,
+            0.00520799999958399,
+            0.007542000000285043,
+            0.006667000000561529,
+            0.006749999999556167,
+            0.007790999999997439,
+            0.010957999999845924,
+            0.01025000000026921,
+            0.006916000000273925,
+            0.007000000000516593,
+            0.021083999999973457,
+            0.010457999999744061,
+            0.015249999999468855,
+            0.008249999999861757,
+            0.011457999999947788,
+            0.00483299999996234,
+            0.009041000000252097,
+            0.008125000000291038,
+            0.012166000000433996,
+            0.008249999999861757,
+            0.008042000000386906,
+            0.004917000000205007,
+            0.015625,
+            0.006666999999652035,
+            0.007832999999664025,
+            0.006292000000030384,
+            0.009792000000743428,
+            0.005416999999397376,
+            0.006333999999696971,
+            0.004415999999764608,
+            0.0117500000005748,
+            0.008667000000059488,
+            0.00687500000003638,
+            0.007083000000420725,
+            0.008708000000297034,
+            0.007832999999664025,
+            0.005624999999781721,
+            0.0039999999999054126,
+            0.01187500000014552,
+            0.0059169999994992395,
+            0.007625000000189175,
+            0.006249999999454303,
+            0.012334000000009837,
+            0.0072909999998955755,
+            0.006374999999934516,
+            0.004208999999718799,
+            0.014250000000174623,
+            0.0072079999999914435,
+            0.008624999999483407,
+            0.006457999999838648,
+            0.014417000000321423,
+            0.003665999999611813,
+            0.006249999999454303,
+            0.004332999999860476,
+            0.01658399999996618,
+            0.011416000000281201,
+            0.008959000000686501,
+            0.04054100000030303,
+            0.008958999999777006,
+            0.05454199999985576,
+            0.005958999999165826,
+            0.01025000000026921,
+            0.007209000000329979,
+            0.01041700000041601,
+            0.006124999999883585,
+            0.005458000000544416,
+            0.004500000000007276,
+            0.003125000000181899
+          ],
+          "readMs": [
+            0.18249999999989086,
+            0.025791000000026543,
+            0.023709000000053493,
+            0.058417000000190455,
+            0.11400000000003274,
+            0.1748330000000351,
+            0.18520799999987503,
+            0.7168750000000728,
+            0.34304199999996854,
+            0.07245899999998073,
+            0.1331659999996191,
+            0.03845899999987523,
+            0.07779200000004494,
+            0.135834000000159,
+            0.03945800000019517,
+            0.15966699999989942,
+            0.08616600000004837,
+            0.08512500000006185,
+            0.09612499999957436,
+            0.11604199999965203,
+            0.10662500000034925,
+            0.3335419999998521,
+            0.03733299999976225,
+            0.030291999999917607,
+            0.06233300000030795,
+            0.052958000000217,
+            0.08770800000002055,
+            0.05554200000005949,
+            0.06833299999971132,
+            0.05300000000033833,
+            0.06775000000016007,
+            0.055667000000084954,
+            0.07429200000024139,
+            0.03270799999972951,
+            0.06387500000028012,
+            0.061040999999931955,
+            0.24941600000011022,
+            0.05545799999981682,
+            0.1455829999999878,
+            0.05837500000006912,
+            0.08445899999969697,
+            0.049416999999721156,
+            0.1532910000000811,
+            0.06958399999984977,
+            0.0757499999999709,
+            0.039874999999938154,
+            0.09316600000011022,
+            0.09562499999992724,
+            0.10758300000043164,
+            0.047167000000172266,
+            0.06254200000057608,
+            0.05199999999967986,
+            0.08254200000010314,
+            0.05116699999962293,
+            0.07145800000034797,
+            0.0678330000000642,
+            0.078708000000006,
+            0.059874999999919964,
+            0.0766250000006039,
+            0.053167000000030384,
+            0.06662500000038563,
+            0.04870799999935116,
+            0.0753340000001117,
+            0.06275000000005093,
+            0.08412499999940337,
+            0.05375000000003638,
+            0.12520799999947485,
+            0.07216599999992468,
+            0.10375000000021828,
+            0.0532920000005106,
+            0.23370900000008987,
+            0.12791599999945902,
+            0.1647079999993366,
+            0.058708999999907974,
+            0.11149999999997817,
+            0.06795800000054442,
+            0.08162499999980355,
+            0.056207999999969616,
+            0.11779100000057952,
+            0.09675000000061118,
+            0.08095800000046438,
+            0.04195799999979499,
+            0.1446670000004815,
+            0.0648750000000291,
+            0.6142079999999623,
+            0.06095900000036636,
+            0.07541700000001583,
+            0.07070899999962421,
+            0.08083399999941321,
+            0.047415999999429914,
+            0.10366700000031415,
+            0.08154199999989942,
+            0.08695799999986775,
+            0.0500000000001819,
+            0.0860000000002401,
+            0.08666699999957928,
+            0.07437500000014552,
+            0.03899999999975989,
+            0.11270800000056624,
+            0.07654199999979028,
+            0.09562499999992724,
+            0.05599999999958527,
+            0.11749999999938154,
+            0.07195799999954033,
+            0.08704099999977188,
+            0.04920899999979156,
+            0.08779200000026322,
+            0.08283300000039162,
+            0.12041700000008859,
+            0.06020799999987503,
+            0.14658400000007532,
+            0.05958299999929295,
+            0.7966249999999491,
+            0.04324999999971624,
+            0.16795900000033726,
+            0.10083300000042072,
+            6.954500000000735,
+            1.9908329999998386,
+            0.17708399999992253,
+            0.2378340000004755,
+            0.11141699999916455,
+            0.10037499999998545,
+            0.06337499999972351,
+            0.11120800000026065,
+            0.05816599999980099,
+            0.06662500000038563,
+            0.03862500000013824,
+            0.03125
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.321343,
+            "p95": 12.287999,
+            "p99": 21.577727
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 179.11599999999999,
+      "totalRss": 1185996736,
+      "rpcMs": {
+        "p50": 0.5367919999998776,
+        "p95": 1.4691659999998592,
+        "p99": 1.4977080000007845
+      }
+    },
+    {
+      "warmup": [
+        {
+          "before": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "after": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "management": {
+            "scopeRefreshes": 12,
+            "exactDetailReads": 0,
+            "reconciles": 12,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 48,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 25
+            },
+            "cachedScopes": 1
+          }
+        }
+      ],
+      "backgroundBefore": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "backgroundAfter": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "managementBefore": {
+        "scopeRefreshes": 12,
+        "exactDetailReads": 0,
+        "reconciles": 12,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 48,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 25
+        },
+        "cachedScopes": 1
+      },
+      "managementAfter": {
+        "scopeRefreshes": 12,
+        "exactDetailReads": 0,
+        "reconciles": 12,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 60,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 25
+        },
+        "cachedScopes": 1
+      },
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 12,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 5,
+      "elapsedMs": 3103.411750000001,
+      "resources": [
+        {
+          "identity": {
+            "pid": 18557,
+            "token": "8cc57f92-b9f8-44b5-a1c9-0b135636d6e6",
+            "start": "1794772225000"
+          },
+          "generation": "5",
+          "at": 1794772240769,
+          "cpu": {
+            "user": 204108,
+            "system": 46303
+          },
+          "usage": {
+            "userCPUTime": 204115,
+            "systemCPUTime": 46310,
+            "maxRSS": 135408,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8665,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 28,
+            "ipcReceived": 33,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 3406
+          },
+          "rss": 69701952,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.182079,
+            "p95": 12.050431,
+            "p99": 12.140543
+          },
+          "role": "guardian",
+          "cpuMs": 11.562,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 18619,
+            "token": "3d5a1099-14a6-4a14-a20d-42e70d1512c3",
+            "start": "1794772225000"
+          },
+          "generation": "5",
+          "at": 1794772240822,
+          "cpu": {
+            "user": 2205211,
+            "system": 434700
+          },
+          "usage": {
+            "userCPUTime": 2205217,
+            "systemCPUTime": 434718,
+            "maxRSS": 539408,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 34836,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 516,
+            "ipcReceived": 638,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 338,
+            "involuntaryContextSwitches": 9449
+          },
+          "rss": 473316096,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.304959,
+            "p95": 12.099583,
+            "p99": 14.213119
+          },
+          "role": "server",
+          "cpuMs": 77.952,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19230,
+            "token": "0035e22a-6a3a-4bdf-9bb8-dfccd89ec9bd",
+            "start": "1794772226000"
+          },
+          "generation": "5",
+          "at": 1794772240720,
+          "cpu": {
+            "user": 1354578,
+            "system": 250322
+          },
+          "usage": {
+            "userCPUTime": 1354583,
+            "systemCPUTime": 250337,
+            "maxRSS": 383680,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 25157,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 434,
+            "ipcReceived": 472,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 6437
+          },
+          "rss": 330437120,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.108351,
+            "p95": 12.058623,
+            "p99": 12.132351
+          },
+          "role": "pi",
+          "cpuMs": 12.372,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19980,
+            "token": "27c8932a-737e-4b49-8c71-c57b0df932e6",
+            "start": "1794772228000"
+          },
+          "generation": "5",
+          "at": 1794772240776,
+          "cpu": {
+            "user": 898391,
+            "system": 112042
+          },
+          "usage": {
+            "userCPUTime": 898396,
+            "systemCPUTime": 112060,
+            "maxRSS": 251840,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 16364,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 4074
+          },
+          "rss": 105464064,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.247615,
+            "p95": 12.050431,
+            "p99": 12.124159
+          },
+          "role": "worker",
+          "cpuMs": 11.11,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20389,
+            "token": "649b7373-0960-4c8f-901a-d8cacbb746f5",
+            "start": "1794772228000"
+          },
+          "generation": "5",
+          "at": 1794772240820,
+          "cpu": {
+            "user": 111598,
+            "system": 38478
+          },
+          "usage": {
+            "userCPUTime": 111602,
+            "systemCPUTime": 38485,
+            "maxRSS": 90672,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5870,
+            "majorPageFault": 87,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 2763
+          },
+          "rss": 34775168,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.214847,
+            "p95": 12.050431,
+            "p99": 12.255231
+          },
+          "role": "runner",
+          "cpuMs": 19.089,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20526,
+            "token": "eac6a8ea-9073-4af0-b591-e5f2b31b21c6",
+            "start": "1794772229000"
+          },
+          "generation": "5",
+          "at": 1794772240895,
+          "cpu": {
+            "user": 93756,
+            "system": 33469
+          },
+          "usage": {
+            "userCPUTime": 93757,
+            "systemCPUTime": 33472,
+            "maxRSS": 74272,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4907,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2778
+          },
+          "rss": 25927360,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.018239,
+            "p95": 12.058623,
+            "p99": 12.320767
+          },
+          "role": "command",
+          "cpuMs": 22.361,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20618,
+            "token": "dd2de322-2585-427b-8d53-30da0dddcca2",
+            "start": "1794772229000"
+          },
+          "generation": "5",
+          "at": 1794772240695,
+          "cpu": {
+            "user": 99603,
+            "system": 35591
+          },
+          "usage": {
+            "userCPUTime": 99607,
+            "systemCPUTime": 35598,
+            "maxRSS": 74176,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4878,
+            "majorPageFault": 76,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2831
+          },
+          "rss": 26123392,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.165695,
+            "p95": 12.058623,
+            "p99": 12.337151
+          },
+          "role": "legacy-command",
+          "cpuMs": 20.283,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20625,
+            "token": "8d71cb04-483b-4fb8-931f-61e088e96a2b",
+            "start": "1794772229000"
+          },
+          "generation": "5",
+          "at": 1794772240704,
+          "cpu": {
+            "user": 95521,
+            "system": 31321
+          },
+          "usage": {
+            "userCPUTime": 95526,
+            "systemCPUTime": 31328,
+            "maxRSS": 73456,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 4835,
+            "majorPageFault": 75,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 0,
+            "involuntaryContextSwitches": 2726
+          },
+          "rss": 25402304,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.059199,
+            "p95": 12.058623,
+            "p99": 12.328959
+          },
+          "role": "legacy-command",
+          "cpuMs": 18.434,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 22713,
+            "token": "fa57cd70-9a4e-4e4b-a673-2483b680fa31",
+            "start": "1794772233000"
+          },
+          "generation": "5",
+          "at": 1794772240847,
+          "cpu": {
+            "user": 1069106,
+            "system": 156344
+          },
+          "usage": {
+            "userCPUTime": 1069110,
+            "systemCPUTime": 156360,
+            "maxRSS": 304336,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19911,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 10,
+            "involuntaryContextSwitches": 2689
+          },
+          "rss": 251504000,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.419647,
+            "p95": 12.050431,
+            "p99": 12.107775
+          },
+          "role": "pi",
+          "cpuMs": 11.015,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23110,
+            "token": "b09b5476-9bca-45e9-b19c-7ef67ed0787d",
+            "start": "1794772234000"
+          },
+          "generation": "5",
+          "at": 1794772240710,
+          "cpu": {
+            "user": 1070367,
+            "system": 150539
+          },
+          "usage": {
+            "userCPUTime": 1070370,
+            "systemCPUTime": 150551,
+            "maxRSS": 289184,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 18963,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 2439
+          },
+          "rss": 241557888,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.386879,
+            "p95": 12.066815,
+            "p99": 12.230655
+          },
+          "role": "pi",
+          "cpuMs": 10.365,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23460,
+            "token": "438e8fd0-705f-4dfa-914f-9bf87ab81c07",
+            "start": "1794772235000"
+          },
+          "generation": "5",
+          "at": 1794772240832,
+          "cpu": {
+            "user": 1071254,
+            "system": 150675
+          },
+          "usage": {
+            "userCPUTime": 1071259,
+            "systemCPUTime": 150691,
+            "maxRSS": 303744,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19854,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 6,
+            "involuntaryContextSwitches": 2293
+          },
+          "rss": 254025600,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.329535,
+            "p95": 12.042239,
+            "p99": 12.099583
+          },
+          "role": "pi",
+          "cpuMs": 10.8,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23956,
+            "token": "f80958de-a010-4e0f-a428-b8211a241da5",
+            "start": "1794772236000"
+          },
+          "generation": "5",
+          "at": 1794772240702,
+          "cpu": {
+            "user": 1066967,
+            "system": 153649
+          },
+          "usage": {
+            "userCPUTime": 1066972,
+            "systemCPUTime": 153663,
+            "maxRSS": 314944,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20552,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 7,
+            "involuntaryContextSwitches": 2341
+          },
+          "rss": 258958016,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.100159,
+            "p95": 12.042239,
+            "p99": 12.083199
+          },
+          "role": "pi",
+          "cpuMs": 11.162,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 12,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 9,
+          "activeQueries": 13,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 159,
+        "queryCount": 51,
+        "cacheBytes": 64728,
+        "cacheEntries": 22,
+        "queryDurationMs": [
+          0.4132920000001832,
+          0.06579099999999016,
+          0.07954099999960818,
+          0.06854199999997945,
+          0.14045800000030795,
+          0.4691250000000764,
+          0.018082999999933236,
+          0.03304200000002311,
+          0.06191599999965547,
+          0.013708000000406173,
+          0.20541600000024118,
+          0.023999999999887223,
+          0.01999999999998181,
+          0.10912499999994907,
+          0.05991599999970276,
+          0.01779199999964476,
+          0.08595800000011877,
+          0.14941700000008495,
+          0.06837499999983265,
+          0.02349999999978536,
+          0.069166000000223,
+          0.1446249999999054,
+          0.026542000000063126,
+          0.053707999999915046,
+          0.0970420000003287,
+          0.07670800000005329,
+          0.048708999999689695,
+          0.021666000000095664,
+          0.2082500000001346,
+          0.23499999999967258,
+          0.10683400000016263,
+          0.03991700000005949,
+          0.061208000000078755,
+          0.10708400000021356,
+          0.06554200000027777,
+          0.13833400000112306,
+          0.12629200000083074,
+          0.06549999999879219,
+          0.04995799999960582,
+          0.09675000000061118,
+          0.06512499999917054,
+          0.033457999999882304,
+          0.10062500000094587,
+          0.08616599999913888,
+          0.054500000000189175,
+          0.02825000000120781,
+          0.15291599999909522,
+          0.1218750000007276,
+          0.2016249999996944,
+          0.042250000000422006,
+          0.044499999999970896
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 11,
+          "completed": 200,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.006832999999460299,
+            0.005541999999877589,
+            0.009915999999975611,
+            0.0072079999999914435,
+            0.005541999999877589,
+            0.005666000000019267,
+            0.00520799999958399,
+            0.007542000000285043,
+            0.006667000000561529,
+            0.006749999999556167,
+            0.007790999999997439,
+            0.010957999999845924,
+            0.01025000000026921,
+            0.006916000000273925,
+            0.007000000000516593,
+            0.021083999999973457,
+            0.010457999999744061,
+            0.015249999999468855,
+            0.008249999999861757,
+            0.011457999999947788,
+            0.00483299999996234,
+            0.009041000000252097,
+            0.008125000000291038,
+            0.012166000000433996,
+            0.008249999999861757,
+            0.008042000000386906,
+            0.004917000000205007,
+            0.015625,
+            0.006666999999652035,
+            0.007832999999664025,
+            0.006292000000030384,
+            0.009792000000743428,
+            0.005416999999397376,
+            0.006333999999696971,
+            0.004415999999764608,
+            0.0117500000005748,
+            0.008667000000059488,
+            0.00687500000003638,
+            0.007083000000420725,
+            0.008708000000297034,
+            0.007832999999664025,
+            0.005624999999781721,
+            0.0039999999999054126,
+            0.01187500000014552,
+            0.0059169999994992395,
+            0.007625000000189175,
+            0.006249999999454303,
+            0.012334000000009837,
+            0.0072909999998955755,
+            0.006374999999934516,
+            0.004208999999718799,
+            0.014250000000174623,
+            0.0072079999999914435,
+            0.008624999999483407,
+            0.006457999999838648,
+            0.014417000000321423,
+            0.003665999999611813,
+            0.006249999999454303,
+            0.004332999999860476,
+            0.01658399999996618,
+            0.011416000000281201,
+            0.008959000000686501,
+            0.04054100000030303,
+            0.008958999999777006,
+            0.05454199999985576,
+            0.005958999999165826,
+            0.01025000000026921,
+            0.007209000000329979,
+            0.01041700000041601,
+            0.006124999999883585,
+            0.005458000000544416,
+            0.004500000000007276,
+            0.003125000000181899,
+            0.016959000000497326,
+            0.007625000000189175,
+            0.002291000000695931,
+            0.001540999999633641,
+            0.0013340000004973263,
+            0.0010419999998703133,
+            0.005124999999679858,
+            0.0024580000008427305,
+            0.005542000000787084,
+            0.004458000001250184,
+            0.003457999999227468,
+            0.007665999999517226,
+            0.005417000000306871,
+            0.00258399999984249,
+            0.006792000000132248,
+            0.0036670000008598436,
+            0.002332999998543528,
+            0.0021660000002157176,
+            0.009749999999257852,
+            0.004208000000289758,
+            0.011042000000088592,
+            0.010125000000698492,
+            0.006999999999607098,
+            0.0063330000011774246,
+            0.004708000000391621,
+            0.006124999999883585,
+            0.0032499999997526174,
+            0.002082999999402091,
+            0.007665999999517226,
+            0.003291999999419204,
+            0.006083000000216998,
+            0.01675000000068394,
+            0.008750000000873115,
+            0.013082999999824096,
+            0.007708000001002802,
+            0.011333999998896616,
+            0.003917000000001281,
+            0.004500000000916771,
+            0.029125000000931323,
+            0.005708999999114894,
+            0.07625000000007276,
+            0.004457999999431195,
+            0.06779199999982666,
+            0.009541999999783002,
+            0.07004199999937555,
+            0.145249999999578,
+            0.012667000000874395,
+            0.01358299999992596,
+            0.008333999998285435,
+            0.007458000000042375,
+            0.007583000000522588,
+            0.04637499999989814,
+            0.008666000001539942,
+            0.01841699999931734,
+            0.003416999999899417
+          ],
+          "readMs": [
+            0.0678330000000642,
+            0.078708000000006,
+            0.059874999999919964,
+            0.0766250000006039,
+            0.053167000000030384,
+            0.06662500000038563,
+            0.04870799999935116,
+            0.0753340000001117,
+            0.06275000000005093,
+            0.08412499999940337,
+            0.05375000000003638,
+            0.12520799999947485,
+            0.07216599999992468,
+            0.10375000000021828,
+            0.0532920000005106,
+            0.23370900000008987,
+            0.12791599999945902,
+            0.1647079999993366,
+            0.058708999999907974,
+            0.11149999999997817,
+            0.06795800000054442,
+            0.08162499999980355,
+            0.056207999999969616,
+            0.11779100000057952,
+            0.09675000000061118,
+            0.08095800000046438,
+            0.04195799999979499,
+            0.1446670000004815,
+            0.0648750000000291,
+            0.6142079999999623,
+            0.06095900000036636,
+            0.07541700000001583,
+            0.07070899999962421,
+            0.08083399999941321,
+            0.047415999999429914,
+            0.10366700000031415,
+            0.08154199999989942,
+            0.08695799999986775,
+            0.0500000000001819,
+            0.0860000000002401,
+            0.08666699999957928,
+            0.07437500000014552,
+            0.03899999999975989,
+            0.11270800000056624,
+            0.07654199999979028,
+            0.09562499999992724,
+            0.05599999999958527,
+            0.11749999999938154,
+            0.07195799999954033,
+            0.08704099999977188,
+            0.04920899999979156,
+            0.08779200000026322,
+            0.08283300000039162,
+            0.12041700000008859,
+            0.06020799999987503,
+            0.14658400000007532,
+            0.05958299999929295,
+            0.7966249999999491,
+            0.04324999999971624,
+            0.16795900000033726,
+            0.10083300000042072,
+            6.954500000000735,
+            1.9908329999998386,
+            0.17708399999992253,
+            0.2378340000004755,
+            0.11141699999916455,
+            0.10037499999998545,
+            0.06337499999972351,
+            0.11120800000026065,
+            0.05816599999980099,
+            0.06662500000038563,
+            0.03862500000013824,
+            0.03125,
+            0.21762499999931606,
+            0.19054100000175822,
+            0.07141600000068138,
+            0.1739159999997355,
+            0.0244170000005397,
+            0.037542000000030384,
+            0.2552080000004935,
+            0.03133300000081363,
+            0.1499999999996362,
+            0.10266700000101991,
+            0.07708300000012969,
+            0.18595800000002782,
+            0.05799999999908323,
+            0.12658399999963876,
+            0.051666999999724794,
+            0.0485000000007858,
+            0.04937499999869033,
+            0.02562500000021828,
+            0.18191699999988487,
+            0.07725000000027649,
+            2.803416999999172,
+            0.1440420000017184,
+            0.06925000000046566,
+            0.14662500000122236,
+            0.04466599999977916,
+            0.05174999999871943,
+            0.11525000000074215,
+            0.02375000000029104,
+            0.15374999999949068,
+            0.06508399999984249,
+            0.08120799999960582,
+            0.19983400000091933,
+            0.13629200000104902,
+            0.23716699999931734,
+            0.07308300000113377,
+            0.0792089999995369,
+            0.1726669999989099,
+            0.05933300000106101,
+            0.3507079999999405,
+            0.10687499999949068,
+            0.109375,
+            0.0961250000000291,
+            0.1007499999996071,
+            0.10383299999921292,
+            0.15633399999933317,
+            0.35291700000016135,
+            0.20095899999978428,
+            0.13741699999991397,
+            0.13816699999915727,
+            0.0810830000009446,
+            0.1114159999997355,
+            0.6003749999999854,
+            0.09787500000129512,
+            0.07808399999885296,
+            4.024749999998676
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.313151,
+            "p95": 12.091391,
+            "p99": 15.253503
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 236.50500000000002,
+      "totalRss": 2097192960,
+      "rpcMs": {
+        "p50": 0.5707080000011047,
+        "p95": 1.215874999999869,
+        "p99": 1.3370410000006814
+      }
+    },
+    {
+      "warmup": [
+        {
+          "before": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "after": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+          "management": {
+            "scopeRefreshes": 26,
+            "exactDetailReads": 0,
+            "reconciles": 26,
+            "registry": {
+              "fullDirectoryReads": 3,
+              "indexDirectoryReads": 3,
+              "metadataFileReads": 108,
+              "terminalMetadataFileReads": 0,
+              "indexRevisionChecks": 39
+            },
+            "cachedScopes": 1
+          }
+        }
+      ],
+      "backgroundBefore": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "backgroundAfter": {
+        "instanceId": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "runtimeEpoch": "1c503bd6-7462-4ef8-a1f6-b7d31271fb70",
+        "scopeRevision": "46226118205fbc8f255e5d6848f8c25f8d7cef21d1ed6548e6734d724578b9d1",
+        "seq": 6,
+        "observedRevisionVector": {
+          "inventory": 3,
+          "coordinator": "16777232:1038681756:5",
+          "healthConfig": "53c293c42c7179674678dc5b5b15e179eb02f565383380c1c35b7a563e385743"
+        },
+        "status": "ready",
+        "rows": [
+          {
+            "meta": {
+              "durable": true,
+              "id": "bgs_c2fd1d38c1916c476b9f",
+              "operationId": "op_c6e5f931-5822-4c06-a995-f28eab434efc",
+              "kind": "process",
+              "status": "running",
+              "active": true,
+              "terminal": false,
+              "attention": false,
+              "waits": [],
+              "owner": {
+                "kind": "parent-session",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6",
+                "workspace": "/private/tmp/p751-full-74LnPZ/workspace"
+              },
+              "startedAt": 1794772228951,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/command-pid\",String(process.pid));const t=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(t);console.log('done')}},50)"
+              ],
+              "exitCode": null,
+              "logPaths": {
+                "stdout": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stdout.log",
+                "stderr": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/stderr.log",
+                "events": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/supervisor/tasks/bgs_c2fd1d38c1916c476b9f/events.log"
+              }
+            },
+            "assignment": null,
+            "sourceRevision": "6dd9dd15a3dacfd7823c0464271a0ef0a7de60e7960568219bbbe810ecebea62"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1o_2",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229100,
+              "lastProgressAt": 1794772229100,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1o_2/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+1,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20625,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20625,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "a51221a4567ecb3c7156510a632aa90a3685aab3108c0466c05793ab1c66f90a"
+          },
+          {
+            "meta": {
+              "id": "bg_ed7_mwi91n1j_1",
+              "batchId": "bg_batch_01a5d384-39d7-4cdf-9f52-3a4b1045d795",
+              "kind": "process",
+              "status": "running",
+              "startedAt": 1794772229096,
+              "lastProgressAt": 1794772229096,
+              "logPath": "/private/tmp/p751-full-74LnPZ/pi-better-background-tasks/tasks/bg_ed7_mwi91n1j_1/output.log",
+              "callback": false,
+              "callbackOrigin": {
+                "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+                "sessionId": "f78358f4-2fa0-4cf1-8602-0ad2735f3be6"
+              },
+              "argv": [
+                "/opt/homebrew/Cellar/node@24/24.21.0_2/bin/node",
+                "-e",
+                "const fs=require('node:fs');fs.writeFileSync(\"/private/tmp/p751-full-74LnPZ/workspace/legacy-pid-\"+0,String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(\"/private/tmp/p751-full-74LnPZ/workspace/finish\")){clearInterval(timer)}},50)"
+              ],
+              "shell": false,
+              "cwd": "/private/tmp/p751-full-74LnPZ/workspace",
+              "sandbox": {
+                "confinement": "unconfined",
+                "policySource": "no-publisher",
+                "policySummary": "No sandbox policy publisher at launch.",
+                "changesAffectTask": false
+              },
+              "maxLogBytes": 4194304,
+              "pid": 20618,
+              "pidStartTime": "Mon Nov 16 03:50:29 2026",
+              "pgid": 20618,
+              "spawnPid": 18619,
+              "spawnPidStartTime": "Mon Nov 16 03:50:25 2026"
+            },
+            "assignment": null,
+            "sourceRevision": "f9d87c91ff35463145218a41045c51ff2d2d0398419ebf9b63ebfb99235d3ed9"
+          }
+        ],
+        "totalMatching": 3,
+        "activity": {
+          "active": 3
+        },
+        "nextDeadline": null
+      },
+      "managementBefore": {
+        "scopeRefreshes": 26,
+        "exactDetailReads": 0,
+        "reconciles": 26,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 108,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 39
+        },
+        "cachedScopes": 1
+      },
+      "managementAfter": {
+        "scopeRefreshes": 26,
+        "exactDetailReads": 0,
+        "reconciles": 26,
+        "registry": {
+          "fullDirectoryReads": 3,
+          "indexDirectoryReads": 3,
+          "metadataFileReads": 264,
+          "terminalMetadataFileReads": 0,
+          "indexRevisionChecks": 39
+        },
+        "cachedScopes": 1
+      },
+      "managementDelta": {
+        "scopeRefreshes": 0,
+        "reconciles": 0
+      },
+      "registryDelta": {
+        "fullDirectoryReads": 0,
+        "indexDirectoryReads": 0,
+        "metadataFileReads": 156,
+        "terminalMetadataFileReads": 0,
+        "indexRevisionChecks": 0
+      },
+      "legacyRows": 2,
+      "clients": 10,
+      "elapsedMs": 60132.883499999996,
+      "resources": [
+        {
+          "identity": {
+            "pid": 18557,
+            "token": "8cc57f92-b9f8-44b5-a1c9-0b135636d6e6",
+            "start": "1794772225000"
+          },
+          "generation": "10",
+          "at": 1794772305967,
+          "cpu": {
+            "user": 319483,
+            "system": 174667
+          },
+          "usage": {
+            "userCPUTime": 319487,
+            "systemCPUTime": 174675,
+            "maxRSS": 136784,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8751,
+            "majorPageFault": 85,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 93,
+            "ipcReceived": 98,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 5,
+            "involuntaryContextSwitches": 16186
+          },
+          "rss": 71110976,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.108351,
+            "p95": 12.058623,
+            "p99": 12.451839
+          },
+          "role": "guardian",
+          "cpuMs": 231.069,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 18619,
+            "token": "3d5a1099-14a6-4a14-a20d-42e70d1512c3",
+            "start": "1794772225000"
+          },
+          "generation": "10",
+          "at": 1794772306026,
+          "cpu": {
+            "user": 3232301,
+            "system": 1009064
+          },
+          "usage": {
+            "userCPUTime": 3232308,
+            "systemCPUTime": 1009086,
+            "maxRSS": 559632,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 36721,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1296,
+            "ipcReceived": 1698,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 354,
+            "involuntaryContextSwitches": 28515
+          },
+          "rss": 491208320,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.026431,
+            "p95": 12.075007,
+            "p99": 16.171007
+          },
+          "role": "server",
+          "cpuMs": 1505.09,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19230,
+            "token": "0035e22a-6a3a-4bdf-9bb8-dfccd89ec9bd",
+            "start": "1794772226000"
+          },
+          "generation": "10",
+          "at": 1794772305947,
+          "cpu": {
+            "user": 1521000,
+            "system": 402426
+          },
+          "usage": {
+            "userCPUTime": 1521003,
+            "systemCPUTime": 402436,
+            "maxRSS": 392944,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 25756,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 504,
+            "ipcReceived": 543,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 14,
+            "involuntaryContextSwitches": 19685
+          },
+          "rss": 337941632,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.116543,
+            "p95": 12.058623,
+            "p99": 12.419071
+          },
+          "role": "pi",
+          "cpuMs": 302.278,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 19980,
+            "token": "27c8932a-737e-4b49-8c71-c57b0df932e6",
+            "start": "1794772228000"
+          },
+          "generation": "10",
+          "at": 1794772305984,
+          "cpu": {
+            "user": 1007980,
+            "system": 244745
+          },
+          "usage": {
+            "userCPUTime": 1007985,
+            "systemCPUTime": 244766,
+            "maxRSS": 251840,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 16499,
+            "majorPageFault": 91,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 7,
+            "involuntaryContextSwitches": 16697
+          },
+          "rss": 107774592,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.124735,
+            "p95": 12.058623,
+            "p99": 12.435455
+          },
+          "role": "worker",
+          "cpuMs": 230.351,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20389,
+            "token": "649b7373-0960-4c8f-901a-d8cacbb746f5",
+            "start": "1794772228000"
+          },
+          "generation": "10",
+          "at": 1794772306024,
+          "cpu": {
+            "user": 389122,
+            "system": 207228
+          },
+          "usage": {
+            "userCPUTime": 389129,
+            "systemCPUTime": 207237,
+            "maxRSS": 94208,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 6089,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 4,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 30,
+            "involuntaryContextSwitches": 17706
+          },
+          "rss": 38297856,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.026431,
+            "p95": 12.058623,
+            "p99": 12.484607
+          },
+          "role": "runner",
+          "cpuMs": 424.875,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20526,
+            "token": "eac6a8ea-9073-4af0-b591-e5f2b31b21c6",
+            "start": "1794772229000"
+          },
+          "generation": "10",
+          "at": 1794772306117,
+          "cpu": {
+            "user": 258535,
+            "system": 210501
+          },
+          "usage": {
+            "userCPUTime": 258538,
+            "systemCPUTime": 210508,
+            "maxRSS": 79680,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5366,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2,
+            "involuntaryContextSwitches": 17550
+          },
+          "rss": 30793984,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.026431,
+            "p95": 12.058623,
+            "p99": 12.419071
+          },
+          "role": "command",
+          "cpuMs": 326.715,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20618,
+            "token": "dd2de322-2585-427b-8d53-30da0dddcca2",
+            "start": "1794772229000"
+          },
+          "generation": "10",
+          "at": 1794772306140,
+          "cpu": {
+            "user": 264759,
+            "system": 203988
+          },
+          "usage": {
+            "userCPUTime": 264761,
+            "systemCPUTime": 203994,
+            "maxRSS": 79456,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5301,
+            "majorPageFault": 82,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 17734
+          },
+          "rss": 30433024,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.010047,
+            "p95": 12.058623,
+            "p99": 12.574719
+          },
+          "role": "legacy-command",
+          "cpuMs": 317.191,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 20625,
+            "token": "8d71cb04-483b-4fb8-931f-61e088e96a2b",
+            "start": "1794772229000"
+          },
+          "generation": "10",
+          "at": 1794772306149,
+          "cpu": {
+            "user": 260159,
+            "system": 196850
+          },
+          "usage": {
+            "userCPUTime": 260163,
+            "systemCPUTime": 196853,
+            "maxRSS": 79024,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5275,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 17585
+          },
+          "rss": 30088768,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.010047,
+            "p95": 12.058623,
+            "p99": 12.386303
+          },
+          "role": "legacy-command",
+          "cpuMs": 314.357,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 22713,
+            "token": "fa57cd70-9a4e-4e4b-a673-2483b680fa31",
+            "start": "1794772233000"
+          },
+          "generation": "10",
+          "at": 1794772306070,
+          "cpu": {
+            "user": 1187912,
+            "system": 297379
+          },
+          "usage": {
+            "userCPUTime": 1187919,
+            "systemCPUTime": 297406,
+            "maxRSS": 304944,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19952,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 27,
+            "ipcReceived": 33,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 14,
+            "involuntaryContextSwitches": 15417
+          },
+          "rss": 252126592,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.124735,
+            "p95": 12.058623,
+            "p99": 12.500991
+          },
+          "role": "pi",
+          "cpuMs": 246.014,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23110,
+            "token": "b09b5476-9bca-45e9-b19c-7ef67ed0787d",
+            "start": "1794772234000"
+          },
+          "generation": "10",
+          "at": 1794772306206,
+          "cpu": {
+            "user": 1186573,
+            "system": 281875
+          },
+          "usage": {
+            "userCPUTime": 1186573,
+            "systemCPUTime": 281880,
+            "maxRSS": 290064,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19021,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 27,
+            "ipcReceived": 33,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 11,
+            "involuntaryContextSwitches": 15259
+          },
+          "rss": 242475456,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.083775,
+            "p95": 12.058623,
+            "p99": 12.353535
+          },
+          "role": "pi",
+          "cpuMs": 233.159,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23460,
+            "token": "438e8fd0-705f-4dfa-914f-9bf87ab81c07",
+            "start": "1794772235000"
+          },
+          "generation": "10",
+          "at": 1794772306071,
+          "cpu": {
+            "user": 1189602,
+            "system": 293344
+          },
+          "usage": {
+            "userCPUTime": 1189610,
+            "systemCPUTime": 293365,
+            "maxRSS": 306240,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20012,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 27,
+            "ipcReceived": 33,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 12,
+            "involuntaryContextSwitches": 15087
+          },
+          "rss": 256581504,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.124735,
+            "p95": 12.058623,
+            "p99": 12.492799
+          },
+          "role": "pi",
+          "cpuMs": 247.262,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 23956,
+            "token": "f80958de-a010-4e0f-a428-b8211a241da5",
+            "start": "1794772236000"
+          },
+          "generation": "10",
+          "at": 1794772306198,
+          "cpu": {
+            "user": 1183851,
+            "system": 293204
+          },
+          "usage": {
+            "userCPUTime": 1183852,
+            "systemCPUTime": 293213,
+            "maxRSS": 317264,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20699,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 27,
+            "ipcReceived": 33,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 11,
+            "involuntaryContextSwitches": 15161
+          },
+          "rss": 258400960,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.091967,
+            "p95": 12.058623,
+            "p99": 12.468223
+          },
+          "role": "pi",
+          "cpuMs": 241.858,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 26201,
+            "token": "d000c6f6-a83f-40f8-a9b2-3788ce86387d",
+            "start": "1794772240000"
+          },
+          "generation": "10",
+          "at": 1794772306049,
+          "cpu": {
+            "user": 1189756,
+            "system": 283423
+          },
+          "usage": {
+            "userCPUTime": 1189763,
+            "systemCPUTime": 283449,
+            "maxRSS": 316640,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20673,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 3,
+            "involuntaryContextSwitches": 14094
+          },
+          "rss": 259943104,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.091967,
+            "p95": 12.058623,
+            "p99": 12.533759
+          },
+          "role": "pi",
+          "cpuMs": 241.888,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 26672,
+            "token": "19c68715-1597-4d02-a6f5-376aefe74869",
+            "start": "1794772241000"
+          },
+          "generation": "10",
+          "at": 1794772306220,
+          "cpu": {
+            "user": 1239481,
+            "system": 290891
+          },
+          "usage": {
+            "userCPUTime": 1239482,
+            "systemCPUTime": 290897,
+            "maxRSS": 302160,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 19721,
+            "majorPageFault": 131,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2,
+            "involuntaryContextSwitches": 14371
+          },
+          "rss": 254353536,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.091967,
+            "p95": 12.058623,
+            "p99": 12.500991
+          },
+          "role": "pi",
+          "cpuMs": 228.267,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 27318,
+            "token": "421a1f93-0a04-4cde-a896-19daf44d0de3",
+            "start": "1794772242000"
+          },
+          "generation": "10",
+          "at": 1794772306132,
+          "cpu": {
+            "user": 1228497,
+            "system": 294669
+          },
+          "usage": {
+            "userCPUTime": 1228501,
+            "systemCPUTime": 294685,
+            "maxRSS": 319088,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20833,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2,
+            "involuntaryContextSwitches": 13771
+          },
+          "rss": 264021888,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.116543,
+            "p95": 12.050431,
+            "p99": 12.337151
+          },
+          "role": "pi",
+          "cpuMs": 253.109,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 28130,
+            "token": "8585ae92-2b95-42f1-82a3-0fd0d5a70a87",
+            "start": "1794772243000"
+          },
+          "generation": "10",
+          "at": 1794772306046,
+          "cpu": {
+            "user": 1197785,
+            "system": 280164
+          },
+          "usage": {
+            "userCPUTime": 1197792,
+            "systemCPUTime": 280190,
+            "maxRSS": 309552,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20221,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 9,
+            "involuntaryContextSwitches": 13524
+          },
+          "rss": 257662208,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.083775,
+            "p95": 12.058623,
+            "p99": 12.476415
+          },
+          "role": "pi",
+          "cpuMs": 239.151,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 28795,
+            "token": "1b2813aa-3cc6-4f87-9f3b-13faed6a888a",
+            "start": "1794772244000"
+          },
+          "generation": "10",
+          "at": 1794772306204,
+          "cpu": {
+            "user": 1195574,
+            "system": 279824
+          },
+          "usage": {
+            "userCPUTime": 1195575,
+            "systemCPUTime": 279830,
+            "maxRSS": 313168,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 20443,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 27,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 4,
+            "involuntaryContextSwitches": 13446
+          },
+          "rss": 260595520,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.100159,
+            "p95": 12.058623,
+            "p99": 12.378111
+          },
+          "role": "pi",
+          "cpuMs": 233.676,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 2,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 20,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 17,
+          "activeQueries": 21,
+          "historyQueries": 0,
+          "scopes": 1,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 214,
+        "queryCount": 71,
+        "cacheBytes": 91192,
+        "cacheEntries": 32,
+        "queryDurationMs": [
+          0.4132920000001832,
+          0.06579099999999016,
+          0.07954099999960818,
+          0.06854199999997945,
+          0.14045800000030795,
+          0.4691250000000764,
+          0.018082999999933236,
+          0.03304200000002311,
+          0.06191599999965547,
+          0.013708000000406173,
+          0.20541600000024118,
+          0.023999999999887223,
+          0.01999999999998181,
+          0.10912499999994907,
+          0.05991599999970276,
+          0.01779199999964476,
+          0.08595800000011877,
+          0.14941700000008495,
+          0.06837499999983265,
+          0.02349999999978536,
+          0.069166000000223,
+          0.1446249999999054,
+          0.026542000000063126,
+          0.053707999999915046,
+          0.0970420000003287,
+          0.07670800000005329,
+          0.048708999999689695,
+          0.021666000000095664,
+          0.2082500000001346,
+          0.23499999999967258,
+          0.10683400000016263,
+          0.03991700000005949,
+          0.061208000000078755,
+          0.10708400000021356,
+          0.06554200000027777,
+          0.13833400000112306,
+          0.12629200000083074,
+          0.06549999999879219,
+          0.04995799999960582,
+          0.09675000000061118,
+          0.06512499999917054,
+          0.033457999999882304,
+          0.10062500000094587,
+          0.08616599999913888,
+          0.054500000000189175,
+          0.02825000000120781,
+          0.15291599999909522,
+          0.1218750000007276,
+          0.2016249999996944,
+          0.042250000000422006,
+          0.044499999999970896,
+          0.12320799999724841,
+          0.09545799999978044,
+          0.05758399999831454,
+          0.03966699999728007,
+          0.14383400000224356,
+          0.06991599999673781,
+          0.04583300000012969,
+          0.027833000000100583,
+          0.14900000000125146,
+          0.08862500000032014,
+          0.048792000001412816,
+          0.0313750000022992,
+          0.1255830000009155,
+          0.10024999999950523,
+          0.051332999999431195,
+          0.04679200000100536,
+          0.1314170000005106,
+          0.12954200000240235,
+          0.05179100000168546,
+          0.05312500000218279
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 21,
+          "completed": 275,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.002291000000695931,
+            0.001540999999633641,
+            0.0013340000004973263,
+            0.0010419999998703133,
+            0.005124999999679858,
+            0.0024580000008427305,
+            0.005542000000787084,
+            0.004458000001250184,
+            0.003457999999227468,
+            0.007665999999517226,
+            0.005417000000306871,
+            0.00258399999984249,
+            0.006792000000132248,
+            0.0036670000008598436,
+            0.002332999998543528,
+            0.0021660000002157176,
+            0.009749999999257852,
+            0.004208000000289758,
+            0.011042000000088592,
+            0.010125000000698492,
+            0.006999999999607098,
+            0.0063330000011774246,
+            0.004708000000391621,
+            0.006124999999883585,
+            0.0032499999997526174,
+            0.002082999999402091,
+            0.007665999999517226,
+            0.003291999999419204,
+            0.006083000000216998,
+            0.01675000000068394,
+            0.008750000000873115,
+            0.013082999999824096,
+            0.007708000001002802,
+            0.011333999998896616,
+            0.003917000000001281,
+            0.004500000000916771,
+            0.029125000000931323,
+            0.005708999999114894,
+            0.07625000000007276,
+            0.004457999999431195,
+            0.06779199999982666,
+            0.009541999999783002,
+            0.07004199999937555,
+            0.145249999999578,
+            0.012667000000874395,
+            0.01358299999992596,
+            0.008333999998285435,
+            0.007458000000042375,
+            0.007583000000522588,
+            0.04637499999989814,
+            0.008666000001539942,
+            0.01841699999931734,
+            0.003416999999899417,
+            0.01316699999915727,
+            0.007292000002053101,
+            0.0044589999997697305,
+            0.0020000000004074536,
+            0.004333000000769971,
+            0.0040829999998095445,
+            0.0018329999984416645,
+            0.0013340000004973263,
+            0.005916000001889188,
+            0.0032089999986055773,
+            0.007334000001719687,
+            0.008125000000291038,
+            0.0039999999971769284,
+            0.0021249999990686774,
+            0.007000000001426088,
+            0.002958000000944594,
+            0.002457999999023741,
+            0.001959000001079403,
+            0.007792000000335975,
+            0.0030000000006111804,
+            0.004791999999724794,
+            0.011624999999185093,
+            0.006792000000132248,
+            0.003625000001193257,
+            0.002749999999650754,
+            0.0020830000030400697,
+            0.0016250000007858034,
+            0.0016660000001138542,
+            0.007541999999375548,
+            0.0031669999989389908,
+            0.00487500000235741,
+            0.01433299999916926,
+            0.0036249999975552782,
+            0.0020000000004074536,
+            0.006915999998454936,
+            0.0033750000002328306,
+            0.006041000000550412,
+            0.0031249999992724042,
+            0.0052500000019790605,
+            0.006416999996872619,
+            0.007417000000714324,
+            0.010999999998603016,
+            0.006915999998454936,
+            0.006457999999838648,
+            0.005999999997584382,
+            0.003416999999899417,
+            0.0024160000029951334,
+            0.005000000001018634,
+            0.013167000000976259,
+            0.00408400000014808,
+            0.009749999997438863,
+            0.11120800000207964,
+            0.16037499999947613,
+            0.24774999999863212,
+            0.33087499999965075,
+            0.3794999999990978,
+            0.25649999999950523,
+            0.2688750000015716,
+            0.3739580000001297,
+            0.5168329999978596,
+            0.6770419999993464,
+            0.007207999999081949,
+            0.005333000000973698,
+            0.007582999998703599,
+            0.005417000000306871,
+            0.005042000000685221,
+            0.005000000001018634,
+            0.0048749999987194315,
+            0.00408400000014808,
+            0.004415999999764608,
+            0.005708000000595348,
+            0.0053340000013122335,
+            0.005625000001600711,
+            0.004124999999476131,
+            0.004624999997759005
+          ],
+          "readMs": [
+            0.07141600000068138,
+            0.1739159999997355,
+            0.0244170000005397,
+            0.037542000000030384,
+            0.2552080000004935,
+            0.03133300000081363,
+            0.1499999999996362,
+            0.10266700000101991,
+            0.07708300000012969,
+            0.18595800000002782,
+            0.05799999999908323,
+            0.12658399999963876,
+            0.051666999999724794,
+            0.0485000000007858,
+            0.04937499999869033,
+            0.02562500000021828,
+            0.18191699999988487,
+            0.07725000000027649,
+            2.803416999999172,
+            0.1440420000017184,
+            0.06925000000046566,
+            0.14662500000122236,
+            0.04466599999977916,
+            0.05174999999871943,
+            0.11525000000074215,
+            0.02375000000029104,
+            0.15374999999949068,
+            0.06508399999984249,
+            0.08120799999960582,
+            0.19983400000091933,
+            0.13629200000104902,
+            0.23716699999931734,
+            0.07308300000113377,
+            0.0792089999995369,
+            0.1726669999989099,
+            0.05933300000106101,
+            0.3507079999999405,
+            0.10687499999949068,
+            0.109375,
+            0.0961250000000291,
+            0.1007499999996071,
+            0.10383299999921292,
+            0.15633399999933317,
+            0.35291700000016135,
+            0.20095899999978428,
+            0.13741699999991397,
+            0.13816699999915727,
+            0.0810830000009446,
+            0.1114159999997355,
+            0.6003749999999854,
+            0.09787500000129512,
+            0.07808399999885296,
+            4.024749999998676,
+            0.14199999999982538,
+            0.14587500000197906,
+            0.0689170000005106,
+            0.17720799999733572,
+            0.046167000000423286,
+            0.05841599999985192,
+            0.1328749999993306,
+            0.04158400000233087,
+            0.14158300000053714,
+            0.09216699999888078,
+            0.08079200000065612,
+            0.13829199999963748,
+            0.05079199999818229,
+            0.17362499999944703,
+            0.0464590000010503,
+            0.04425000000264845,
+            0.09883300000001327,
+            0.023208999999042135,
+            0.11750000000029104,
+            0.06362500000250293,
+            0.0740829999995185,
+            0.15795900000011898,
+            0.06345800000053714,
+            0.18404200000077253,
+            0.029958999999507796,
+            0.04116700000304263,
+            0.11562500000218279,
+            0.03941599999961909,
+            0.1321250000000873,
+            0.06912499999816646,
+            0.07641700000021956,
+            0.15079100000002654,
+            0.052625000000261934,
+            0.17154200000004494,
+            0.04624999999941792,
+            0.07487500000206637,
+            0.16649999999935972,
+            0.031374999998661224,
+            0.1298750000023574,
+            0.10858399999779067,
+            0.09412499999962165,
+            0.16320899999846006,
+            0.08674999999857391,
+            0.1885419999998703,
+            0.048124999997526174,
+            0.0545830000010028,
+            0.20041600000331528,
+            0.047125000000960426,
+            0.11445800000001327,
+            0.05254199999762932,
+            0.27287499999874854,
+            0.18333300000085728,
+            0.2684589999989839,
+            0.35254100000020117,
+            0.3905419999973674,
+            0.4271249999983411,
+            0.34954099999959,
+            0.39737500000046566,
+            0.528375000001688,
+            0.716415999999299,
+            0.7903339999975287,
+            0.13608300000123563,
+            0.0779160000020056,
+            0.06212500000037835,
+            0.06879200000184937,
+            0.06466699999873526,
+            0.06975000000238651,
+            0.058291000001190696,
+            0.06075000000055297,
+            0.062458000000333413,
+            0.06583300000056624,
+            0.05679200000304263,
+            0.0766250000015134,
+            0.0668340000011085,
+            0.0555419999982405
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.067391,
+            "p95": 12.075007,
+            "p99": 15.843327
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 4
+        }
+      },
+      "totalCpuMs": 5816.31,
+      "totalRss": 3443809920,
+      "rpcMs": {
+        "p50": 0.5641670000040904,
+        "p95": 2.063417000012123,
+        "p99": 9.44366699999955
+      }
+    }
+  ],
+  "errors": ""
+}

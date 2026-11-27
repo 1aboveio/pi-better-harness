@@ -54,13 +54,16 @@ function describeFailure(error: { message?: string; additionalDetails?: string |
 }
 
 /**
- * Watch the turn just started. Resolves with the error it failed with, or undefined when it completes, or when
+ * Watch the turn just started. Resolves with the error it failed with, or undefined when it completes, when its status cannot be read, or when
  * `TURN_WATCH_MS` passes while it is still going (a running turn is not a failure; `ls` shows a later failure).
  */
 async function failureOfTurn(client: CodexAppServerClient, threadId: string, turnId: string | undefined): Promise<string | undefined> {
   const deadline = Date.now() + TURN_WATCH_MS;
   for (;;) {
-    const page = await client.call<{ data: Array<{ id: string; status: string; error?: { message?: string; additionalDetails?: string | null } | null }> }>("thread/turns/list", { threadId, limit: 3 });
+    type TurnRow = { id: string; status: string; error?: { message?: string; additionalDetails?: string | null } | null };
+    // The turn already started; failing to read its status afterwards is "no failure seen", not a failed delivery.
+    const page = await client.call<{ data: TurnRow[] }>("thread/turns/list", { threadId, limit: 3 }).catch(() => undefined);
+    if (!page) return undefined;
     const turn = turnId ? page.data.find((candidate) => candidate.id === turnId) : page.data[0];
     if (turn?.status === "failed") return describeFailure(turn.error);
     // Right after turn/start the history can still read the new turn as "interrupted" (nothing is recorded for it yet); only a final status counts.

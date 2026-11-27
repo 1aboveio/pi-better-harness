@@ -27,13 +27,13 @@ import {
     statSync,
 } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
-import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
-import { logPathFor } from "./registry.ts";
+import { readAppendedLines, parseLogEvent, logReadMetrics, type LogCursor } from "./log-cursor.ts";
+import { evidenceLogPath } from "./registry.ts";
 
 interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
 interface Cost { total?: number }
 interface MsgUsage { input?: number; output?: number; cacheRead?: number; cost?: Cost }
-interface Msg { role?: string; content?: string | ContentBlock[]; usage?: MsgUsage }
+interface Msg { role?: string; content?: string | ContentBlock[]; usage?: MsgUsage; stopReason?: string; errorMessage?: string }
 
 /** Cumulative token + cost spend across a run's turns. */
 export interface Usage {
@@ -91,7 +91,7 @@ const readTail: (path: string, maxBytes: number) => TailRead = readBoundedTail;
 
 /** Last `n` terminal display rows of a run's log, or a placeholder if empty/unreadable. */
 export function tailLog(id: string, n: number, maxBytes = maxRawTailBytes()): string {
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(evidenceLogPath(id), maxBytes);
     if (tail.error || tail.text.trim() === "") return "(no output yet)";
     const out = tailTerminalDisplay(tail.text, n).trim();
     return out === "" ? "(no output yet)" : out;
@@ -125,6 +125,7 @@ export interface ParsedRun {
     finalText: string;
     /** Latest streamed text/thinking, for a live progress peek. */
     lastActivity: string;
+    deniedWorktreeGitOperation?: string;
     /** Names of tools the child invoked, in order (deduped-adjacent). */
     toolCalls: string[];
     /** Every tool execution start seen, including adjacent repeats (opt-in `include: ["tools"]`). */
@@ -133,6 +134,12 @@ export interface ParsedRun {
     unmatchedToolCalls: UnmatchedToolCall[];
     /** True if we saw the terminal `agent_end`/`agent_settled` event. */
     sawEnd: boolean;
+    /**
+     * Message of the last model request that failed and that no later assistant
+     * turn superseded. A stream ending on one did not do the work: Pi still ends
+     * the loop normally, so the terminal event alone cannot prove success.
+     */
+    modelError?: string;
     /** Cumulative token + cost spend so far. */
     usage: Usage;
     /** Diagnostics about truncation or parse failure, surfaced to the user. */
@@ -177,11 +184,11 @@ function transcriptContent(msg: Msg | undefined): ContentBlock[] {
 /** Bounded, display-oriented transcript fold for the subagent detail view. */
 export function readRunTranscript(
     id: string,
-    options: { maxBytes?: number; maxEntries?: number } = {},
+    options: { maxBytes?: number; maxEntries?: number; logPath?: string } = {},
 ): RunTranscript {
     const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
     const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(options.logPath ?? evidenceLogPath(id), maxBytes);
     if (tail.error) return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
 
     const lines = tail.text.split(/\r?\n/);
@@ -921,7 +928,7 @@ function feedStructuralRecordChar(scan: StructuralRecordScan, ch: string): void 
  * only after a record is grammar-valid; unfinished/malformed records fail closed.
  */
 export function scanLifecycleEvidence(id: string): LifecycleEvidence {
-    const path = logPathFor(id);
+    const path = evidenceLogPath(id);
     let totalBytes = 0;
     try {
         totalBytes = statSync(path).size;
@@ -1092,15 +1099,19 @@ function peekType(line: string): string | undefined {
 }
 
 interface ParseState {
+    catchingUp?: boolean;
     cursor: LogCursor;
     usage: Usage;
     finalText: string;
     lastActivity: string;
+    deniedWorktreeGitOperation?: string;
     toolCalls: string[];
     toolCallCount: number;
     openToolCalls: Map<string, UnmatchedToolCall>;
     anonymousToolCall: number;
     sawEnd: boolean;
+    /** Last unrecovered failed model request, cleared by a later successful turn. */
+    modelError?: string;
     /** Bytes were skipped by a bounded cold start on an already-large log. */
     windowTruncated: boolean;
     /** Log size at the last read, for the truncation diagnostic. */
@@ -1114,6 +1125,16 @@ interface ParseState {
 const MAX_TRACKED_PARSE_RUNS = 64;
 
 const parseStates = new Map<string, ParseState>();
+
+export function encodeParseLogState(state: ParseState): unknown {
+    return { ...state, openToolCalls: [...state.openToolCalls] };
+}
+
+export function decodeParseLogState(saved: any): ParseState {
+    if (!saved?.usage || !Array.isArray(saved.openToolCalls) || !Array.isArray(saved.toolCalls)
+        || !Number.isSafeInteger(saved.cursor?.offset) || saved.cursor.offset < 0) throw new Error("Invalid display checkpoint");
+    return { ...saved, openToolCalls: new Map(saved.openToolCalls) };
+}
 
 /** Forget a run's accumulated parse (or all of them). */
 export function resetParseRunCursor(id?: string): void {
@@ -1200,7 +1221,7 @@ function selectParsableLines(lines: readonly string[]): Array<{ index: number; e
 
 function tryParse(line: string): Record<string, unknown> | undefined {
     try {
-        return JSON.parse(line) as Record<string, unknown>;
+        return parseLogEvent(line) as Record<string, unknown>;
     } catch {
         return undefined;
     }
@@ -1220,6 +1241,7 @@ function activityTextOf(e: Record<string, unknown>): string | undefined {
 
 /** Fold one event into the run's accumulated state. */
 function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
+    logReadMetrics.displayFolded++;
     const type = e.type as string | undefined;
     state.sawAnyEvent = true;
 
@@ -1245,6 +1267,15 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
             // Latest finalized assistant text wins, so a run without a
             // terminal `agent_end` still yields its LAST answer, not its first.
             if (t) { state.lastActivity = t; state.finalText = t; }
+            // A failed request is evidence until a later assistant turn proves the
+            // model serves again. Only the LAST request matters: earlier failures
+            // show up as `auto_retry_*` retries that already recovered. The stop
+            // reason decides, because Pi pairs `stopReason: "aborted"` with a real
+            // error message and an aborted turn is a stop, not a provider failure.
+            const errorMessage = typeof m.errorMessage === "string" ? m.errorMessage.trim() : "";
+            state.modelError = m.stopReason === "error"
+                ? errorMessage || "assistant stopReason=error"
+                : undefined;
             const u = m?.usage;
             if (u) {
                 state.usage.input += u.input ?? 0;
@@ -1278,6 +1309,8 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
         state.openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, { id: toolCallId, toolName });
     }
     if (type === "tool_execution_end") {
+        const operation = (e.result as { details?: { deniedWorktreeGitOperation?: unknown } } | undefined)?.details?.deniedWorktreeGitOperation;
+        if (e.isError && typeof operation === "string" && /^[a-z-]{1,24}$/.test(operation)) state.deniedWorktreeGitOperation = operation;
         if (toolCallId) {
             state.openToolCalls.delete(toolCallId);
         } else if (typeof e.toolName === "string") {
@@ -1295,15 +1328,25 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
  * rotated, truncated, or rewritten log is detected and re-read from a bounded
  * tail (see log-cursor.ts).
  */
-export function parseRun(id: string): ParsedRun {
-    const previous = parseStates.get(id);
-    const read = readAppendedLines(logPathFor(id), previous?.cursor, maxParseBytes());
+export function parseRun(id: string, options: { logPath?: string; states?: Map<string, ParseState>; summaryOnly?: boolean } = {}): ParsedRun {
+    const key = options.logPath ?? id;
+    const states = options.states ?? parseStates;
+    const previous = states.get(key);
+    const path = options.logPath ?? evidenceLogPath(id);
+    let catchUp = false;
+    if (options.summaryOnly) {
+        try { catchUp = statSync(path).size > 1024 * 1024; } catch { /* read reports errors */ }
+    }
+    const read = readAppendedLines(path, previous?.cursor,
+        catchUp ? Math.min(maxParseBytes(), 1024 * 1024) : maxParseBytes(), catchUp);
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
+    state.catchingUp = read.more;
     if (read.totalBytes > 0) state.totalBytes = read.totalBytes;
     if (read.truncated) state.windowTruncated = true;
     state.error = read.error;
-    rememberParseState(id, state);
+    if (options.states) states.set(key, state);
+    else rememberParseState(key, state);
 
     if (read.error !== undefined) {
         return {
@@ -1314,6 +1357,11 @@ export function parseRun(id: string): ParsedRun {
     }
 
     for (const { event } of selectParsableLines(read.lines)) foldParseEvent(state, event);
+    if (options.summaryOnly) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-256);
+    }
 
     // A log whose final line was never terminated — a writer mid-event, or one
     // that simply did not end with a newline — still has to be readable. Fold it
@@ -1326,6 +1374,8 @@ export function parseRun(id: string): ParsedRun {
     }
 
     const diagnostics: string[] = [];
+    if (state.catchingUp) diagnostics.push(`Usage catch-up pending after byte ${state.cursor.offset} of ${state.totalBytes}.`);
+    if (options.summaryOnly && state.cursor.missing) diagnostics.push(`Incomplete usage: missing bytes [${state.cursor.missing[0]}, ${state.cursor.missing[1]}).`);
     if (view.windowTruncated) {
         diagnostics.push(
             `Log truncated: this session began reading at the last ${fmtBytes(maxParseBytes())} ` +
@@ -1346,13 +1396,29 @@ export function parseRun(id: string): ParsedRun {
     return {
         finalText: view.finalText,
         lastActivity: view.lastActivity,
+        ...(view.deniedWorktreeGitOperation ? { deniedWorktreeGitOperation: view.deniedWorktreeGitOperation } : {}),
         toolCalls: [...view.toolCalls],
         toolCallCount: view.toolCallCount,
         unmatchedToolCalls: [...view.openToolCalls.values()],
         sawEnd: view.sawEnd,
+        modelError: view.modelError,
         usage,
         diagnostics,
     };
+}
+
+/** Keep only the incremental facts needed by task-list displays. Detail reads use their own cursor. */
+export function parseRunDisplay(id: string, options: { logPath?: string; states: Map<string, ParseState>; summaryOnly?: boolean }): { usage: Usage; tool: string; diagnostics: string[] } {
+    const parsed = parseRun(id, options);
+    const state = options.states.get(options.logPath ?? id);
+    if (state) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
+    }
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "", diagnostics: parsed.diagnostics };
 }
 
 /** Build the human-readable body for subagent_output. Exported for unit testing. */

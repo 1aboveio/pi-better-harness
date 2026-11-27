@@ -1,13 +1,10 @@
 import { existsSync, lstatSync, realpathSync, readFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+// A static import lets the compiled Pi loader resolve dependencies of the settings lock.
+import lockfile from "proper-lockfile";
 
-// Match Pi's settings lock without depending on a private SDK import.
-const lockfile = createRequire(import.meta.url)("proper-lockfile") as {
-  lockSync(path: string, options: { realpath: boolean }): () => void;
-};
 const NAMESPACE = "piBetterHarness";
 export interface HarnessSettingsSeams { agentDir?: () => string }
 
@@ -33,10 +30,12 @@ function section(settings: Record<string, unknown>): Record<string, unknown> {
 }
 
 function acquire(path: string): () => void {
-  for (let attempt = 0; attempt < 10; attempt++) {
+  // A live writer can be briefly descheduled; allow contention without stealing its lock.
+  const maxAttempts = 100;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try { return lockfile.lockSync(path, { realpath: false }); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || attempt === 9) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || attempt === maxAttempts - 1) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }

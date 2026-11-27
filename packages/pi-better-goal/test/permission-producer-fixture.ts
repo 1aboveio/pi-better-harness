@@ -18,6 +18,10 @@ export function installedHarnessFixture() {
     mkdirSync(join(root, "scripts"));
     cpSync(join(repo, "scripts/stage-harness-dependencies.mjs"), join(root, "scripts/stage-harness-dependencies.mjs"));
     const env = { ...process.env, npm_config_ignore_scripts: "true" };
+    // Staging now includes the router's third-party Ollama dependency. Make
+    // installed external dependencies available before assembling the bundle;
+    // bundled first-party packages still become real extracted files below.
+    symlinkSync(join(repo, "node_modules"), join(root, "node_modules"), "dir");
     execFileSync(process.execPath, [join(root, "scripts/stage-harness-dependencies.mjs")], {
       cwd: root, env, stdio: "pipe",
     });
@@ -27,8 +31,7 @@ export function installedHarnessFixture() {
     const packed = selectPackedResult(output);
     if (!packed?.filename) throw new Error("npm pack did not return the harness tarball filename");
     execFileSync("tar", ["-xzf", join(root, packed.filename), "-C", root], { stdio: "pipe" });
-    // The SDK host and external libraries resolve normally; bundled first-party packages stay real extracted files.
-    symlinkSync(join(repo, "node_modules"), join(root, "node_modules"), "dir");
+    // The SDK host and external libraries resolve through the link above.
     return { root, installed: join(root, "package"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
   } catch (error) {
     rmSync(root, { recursive: true, force: true });

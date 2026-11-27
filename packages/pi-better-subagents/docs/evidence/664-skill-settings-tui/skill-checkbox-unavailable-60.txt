@@ -1,0 +1,17 @@
+# A saved path missing from discovery stays visible as unavailable
+# width: 60
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Search >                                                  
+> [ ] better-review                                         
+    Review the change before handoff.
+  [ ] test-quality
+    Write tests that catch real bugs.
+  [x] legacy, archived  (unavailable)
+    /Users/someone/.pi/agent/skills/legacy, archived/SKILL.m
+  ✓ Apply selection (1 checked)
+  + Add skill path…
+  1 checked
+  0 checked applies No skill catalog, not discovery.

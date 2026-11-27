@@ -1,0 +1,73 @@
+interface SettingCopy {
+  label?: string;
+  description: string;
+  values?: Readonly<Record<string, string>>;
+}
+
+// Use stable contribution IDs so existing versions of the extensions get the same help.
+export const controlCopy = new Map<string, SettingCopy>([
+  ["background-review-interval", {
+    label: "Background wait reviews",
+    description: "When the session is waiting for a local task with callbacks on, Pi asks the main agent to review it after this long without progress. Each review shows elapsed time and the last check or output.",
+  }],
+  ["goal-auto-start", {
+    label: "Auto-start Goals",
+    description: "Start a Goal when Pi saves acceptance criteria, reopens completed work, or runs an issue workflow. When off, use /goal resume to start saved work.",
+  }],
+  ["tool-call-guard", {
+    label: "Foreground wait guard",
+    description: "Blocks recognized shell waits, such as watching CI or following logs. Pi gets a prompt to run them in the background so the session stays responsive.",
+  }],
+  ["dynamic-workflow", {
+    description: "Choose when Pi can plan a workflow automatically. Adaptive uses workflows for dependencies, handoffs or review. /dynamic-workflow starts one run in every mode.",
+  }],
+  ["outcome-todo", {
+    label: "Goal and Todo tools",
+    description: "Lets Pi record what the session should deliver and track its progress as a checklist.",
+  }],
+  ["outcome-todo-ledger", {
+    label: "Project work ledger",
+    description: "Lets sessions attach a saved project checklist and carry its progress across sessions. Use /ledger to list or attach a ledger.",
+  }],
+  ["outcome-todo-display", {
+    label: "Goal and Todo panel",
+    description: "Shows the saved Goal, its execution status, and Todo steps. The panel also works with the tools off.",
+  }],
+  ["navigator-sticky", {
+    label: "Pin work panels",
+    description: "Keeps the work panels above the editor as the conversation scrolls. Off lets them scroll with the conversation on supported Pi versions.",
+  }],
+  ["navigator-view", {
+    label: "Navigator layout",
+    description: "Tree nests tasks under their agent. Flat list groups rows by work type.",
+    values: { tree: "Tree", flatten: "Flat list" },
+  }],
+  ["tool-output", {
+    description: "Normal shows the usual tool transcript. Compact groups completed calls and hides their details until you expand the group.",
+    values: { Minimal: "Compact" },
+  }],
+  ["tool-animation", {
+    label: "Tool progress animation",
+    description: "Shows an animated shimmer on active tool calls. Turn it off to remove that animation.",
+    values: { Shimmer: "On" },
+  }],
+]);
+
+export const linkCopy = new Map<string, SettingCopy>([
+  ["agents", {
+    label: "Agent catalog",
+    description: "Browse the agents Pi can delegate to and manage their profiles.",
+  }],
+  ["goal", {
+    label: "Goal execution settings",
+    description: "Choose when Goals continue automatically, resume from conversation, or pause on Escape.",
+  }],
+  ["sandbox", {
+    label: "Sandbox settings",
+    description: "Review sandbox permissions for what tools can access and where they can run.",
+  }],
+  ["subagents", {
+    label: "Subagent settings",
+    description: "Choose how Pi delegates work and set limits for concurrent subagents, timeouts, and progress alerts.",
+  }],
+]);

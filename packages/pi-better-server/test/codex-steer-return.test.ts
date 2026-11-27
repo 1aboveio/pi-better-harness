@@ -7,6 +7,8 @@ import { digestWorktree } from "../src/core/bundle.ts";
 import { moveSession } from "../src/move/orchestrate.ts";
 import { createThread, git, makeRepo, remote, runCleanups, shortDir, startHost, type Host } from "./codex-host.ts";
 import { waitFor } from "./helpers.ts";
+import { resumeHint } from "../src/codex/return.ts";
+import { defaultServerDir } from "../src/paths.ts";
 
 after(runCleanups);
 
@@ -72,8 +74,8 @@ describe("Codex steer and ls (real codex app-server, mock model)", { concurrency
     await moveSession(host.client, other.client, { sessionId: id });
     const result = await remote(["steer", "--socket", host.daemon.socketPath, id, "still there?"]);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /moved on this host/); // the retired thread is archived and still listed, as closed
-    assert.deepEqual((await ls(host)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.match(result.stderr, /moved on this host/); // the retired thread is archived and still listed, as moved
+    assert.deepEqual((await ls(host)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
     const requestsBefore = host.model.requests.length;
     await assert.rejects(host.client.call({ type: "steer", sessionId: id, message: "x" }), /moved on this host/);
     assert.equal(host.model.requests.length, requestsBefore);
@@ -103,7 +105,9 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     const returned = JSON.parse(result.stdout) as { cwd: string; resumeCommand: string; verified: boolean; worktreeFiles: number };
     assert.equal(returned.cwd, join(back, "ws"));
     assert.equal(returned.verified, true);
-    assert.match(returned.resumeCommand, new RegExp(`codex resume ${id}`));
+    // The laptop daemon holds the thread, so a standalone `codex resume` would be refused; the hint goes through it.
+    assert.match(returned.resumeCommand, new RegExp(`pi-remote attach ${id}`));
+    assert.doesNotMatch(returned.resumeCommand, /codex (exec )?resume/);
 
     // Workspace: the host's edits, byte for byte, same commit.
     assert.equal(returned.worktreeFiles, digestWorktree(detached.cwd).length);
@@ -115,7 +119,7 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     assert.deepEqual([local.sessionId, local.displayStatus, local.ownership, local.cwd], [id, "idle", undefined, returned.cwd]);
 
     // Single writer: the host's copy is retired (listed as moved) and refuses messages.
-    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
     await assert.rejects(server.client.call({ type: "prompt", sessionId: id, message: "x" }), /moved on this host/);
 
     // Resume locally: a new message runs on the laptop's own app-server with the full history.
@@ -141,7 +145,7 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(existsSync(join(back, "ws", "src", "untracked.ts")), true);
     assert.equal(laptop.daemon.runtime.rolloutPath(id) !== undefined, true);
-    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
   });
 
   it("leaves the host's thread live and untouched when return cannot go ahead", async () => {
@@ -172,5 +176,15 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     // Never half-moved: the laptop never took it, and the host still takes messages.
     assert.equal(laptop.daemon.runtime.rolloutPath(id), undefined);
     assert.equal(JSON.parse((await remote(["steer", ...sock, "--json", id, "still yours"])).stdout).delivered, "prompt");
+  });
+});
+
+describe("codex return hint", () => {
+  it("goes through the running daemon, naming a non-default server dir, and uses plain codex resume only when nothing holds the thread", () => {
+    assert.equal(resumeHint("/w", "t1", false, defaultServerDir()), "cd '/w' && codex resume t1");
+    assert.match(resumeHint("/w", "t1", true, defaultServerDir()), /^pi-remote attach t1 /);
+    assert.match(resumeHint("/w", "t1", true, "/x/srv"), /^PI_SERVER_DIR='\/x\/srv' pi-remote attach t1 .*PI_SERVER_DIR='\/x\/srv' pi-remote steer t1/);
+    assert.match(resumeHint("/w", "t1", true, "/x/server dir"), /^PI_SERVER_DIR='\/x\/server dir' pi-remote attach t1 .*PI_SERVER_DIR='\/x\/server dir' pi-remote steer t1/);
+    assert.equal(resumeHint("/work tree", "t1", false, defaultServerDir()), "cd '/work tree' && codex resume t1");
   });
 });

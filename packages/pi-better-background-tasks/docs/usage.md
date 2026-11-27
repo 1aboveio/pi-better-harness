@@ -217,11 +217,11 @@ wait for the next available boundary while
 that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
-In `/harness-settings`, set **Completions while busy** to **Steer active run** to
+In `/harness-settings`, set **Completion delivery** to **During run** to
 opt into ordinary completion delivery during foreground work. Changes autosave
 to the current session branch and apply immediately; **Ctrl+S** saves the
 choice as the user default for future sessions, including standalone callback
-packages. **Wait until idle** is the default. The former
+packages. **When idle** is the default. The former
 `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is no longer supported.
 Completions spanning multiple
 accumulation windows during one tool call stay queued until the final active
@@ -308,8 +308,8 @@ progress redraws such as `rsync --progress` are collapsed to their latest
 visible state, leaving subsequent error lines readable.
 
 Command watchers default to a 15 minute timeout when `timeout_seconds` is
-omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
-Spawned processes do not get a default timeout.
+omitted. All tasks have a 24-hour limit measured from creation. Pass `timeout_seconds: 0`
+to use that maximum. Shorter task and command timeouts still apply.
 
 `bg_task_watch` and `bg_task` `action: "watch"` wait up to 15 seconds for the
 first check and return its exit code with the newest stderr and stdout lines
@@ -345,6 +345,35 @@ validated before launch (a malformed value starts nothing):
 { "command": "npm test -- src/scoped.test.ts", "operation_id": "unit-tests", "timeout_seconds": 600 }
 ```
 
+## Chained commands and the step gate
+
+Ordinary shell semantics report the exit status of the last command in a chain,
+so `ctest; write-summary` passes when the summary exits 0 even though `ctest`
+failed. `bg_task_spawn` and `bg_task` accept `require_successful_steps: true` to
+opt into a step gate for a shell command:
+
+- the command runs under bash errexit (`set -e`), so its first unhandled failing
+  step ends the task with that step's exit code; later steps do not run. The
+  rule applies in the same list, inside shell functions and subshells;
+- a failure the command handles itself (`|| true`, `if`/`while`/`until`
+  conditions, `!`, `&&`/`||` lists) is not a gate failure, and neither is a
+  process substitution whose status bash discards;
+- status reports the real process exit with `(step gate)` and the failing step
+  (`the shell stopped at that step`, or the shell's own exit when the command
+  disabled errexit). Metadata keeps the failing step (bounded) and the command
+  the operator actually wrote, never the wrapper.
+
+`require_successful_steps` is refused, before any task state exists, for
+`shell:false` (argv already reports the real exit code), for structured `ssh`
+(remote semantics are not observable locally), and for watch checks (a check is
+one polled command whose own exit code is the outcome). Limits inherited from
+bash's own errexit rules: assignment builtins such as `local` and `export` mask
+a command substitution's status. Bash also clears errexit inside command
+substitutions by default, so `x=$(false; echo summary)` can still succeed.
+Disabling errexit and clearing the ERR trap bypasses the gate, and `exec`
+replaces the shell before the gate decides.
+`expected_exit_codes` applies to the reported exit.
+
 ## Observable Progress
 
 Running tasks are classified as `healthy`, `quiet`, or `stalled` from observable
@@ -360,6 +389,21 @@ Override either threshold in milliseconds for all installed harness extensions:
 PI_BETTER_STALL_QUIET_MS=120000
 PI_BETTER_STALL_MS=600000
 ```
+
+## Navigator redraw behavior
+
+The background-work navigator reuses an unchanged durable projection instead of
+re-reading the operation database for every host redraw. The query is scoped to
+the active parent session and workspace before rows are decoded, so historical
+operations from other sessions or branches are not materialized. A local
+launch, terminal outcome, dismissal or stop invalidates the projection
+immediately. Another Pi process is observed by the existing 250 ms reconcile
+pass, which invalidates the projection when it discovers a new task or terminal
+revision for the active parent session. Changes owned by another session or
+workspace do not evict the active projection or request a repaint. A
+five-second fallback refresh covers a missed notification; it is not a render
+cadence. Compact tool headers are reused until their arguments, partial/final
+result, expansion, width or theme changes.
 
 ## Examples
 
