@@ -2783,7 +2783,7 @@ export default function (pi, managed) {
     const registeredSpawnSchemas = new Map();
     const registerSpawnTool = (definition) => {
         registeredSpawnSchemas.set(definition.name, definition.parameters);
-        pi.registerTool(managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
+        const registered = managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
                 ctx = captureLaunchContext(ctx);
                 restoreDelegationMode(ctx);
                 await workerOperations.start();
@@ -2794,7 +2794,10 @@ export default function (pi, managed) {
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
                 void activateWorkObservation();
                 return launchWorkflowAssignment(pi, ctx, key, params, async (args) => await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, args, signal)));
-            } });
+            } };
+        pi.registerTool(registered);
+        if (definition.name === "subagent_spawn")
+            acceptanceSpawnToolRef = registered;
     };
     announceExecutionAdapter(pi, {
         parametersFor: (name) => registeredSpawnSchemas.get(name),
@@ -4093,7 +4096,6 @@ export default function (pi, managed) {
             }
         },
     };
-    acceptanceSpawnToolRef = acceptanceSpawnTool;
     registerSpawnTool(acceptanceSpawnTool);
     // ---- subagent_spawn_batch -------------------------------------------
     registerSpawnTool({
@@ -4383,7 +4385,6 @@ export default function (pi, managed) {
             // completion callback even when the caller is the one who asked (#624).
             enqueueCompletionCallback(pi, id);
         } });
-    acceptanceStopToolRef = acceptanceStopTool;
     // A parked attempt may have exited, but its automatic resume is still armed.
     // Explicit stop must confirm durable cancellation, not just stop a process.
     const acceptanceStopToolWithParked = {
@@ -4408,7 +4409,8 @@ export default function (pi, managed) {
             return acceptanceStopTool.execute(toolCallId, params, signal, onUpdate, ctx);
         },
     };
-    pi.registerTool(acceptanceStopToolWithParked);
+    acceptanceStopToolRef = acceptanceStopToolWithParked;
+    pi.registerTool(acceptanceStopToolRef);
     publishAcceptanceHooks();
     const agentOperations = createAgentOperations({
         projectConfigDirName,

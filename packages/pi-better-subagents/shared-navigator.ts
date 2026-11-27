@@ -776,7 +776,7 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
   return fg("warning", normalized);
 }
 
-function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
+function formatMainListRow(row: BackgroundWorkRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
   const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
   const name = rowDisplayName(row);
   const summary = singleLine(rowSummary(row));
@@ -797,7 +797,7 @@ function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: stri
   return `${left}${" ".repeat(gap)}${right}`;
 }
 
-function statusGlyph(row: InternalRow): string {
+function statusGlyph(row: BackgroundWorkRow): string {
   if (row.statusTone === "success") return "✓";
   if (row.statusTone === "failed") return "✕";
   if (row.statusTone === "warning") return "◇";
@@ -805,7 +805,7 @@ function statusGlyph(row: InternalRow): string {
   return "·";
 }
 
-function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
+function statusIndicator(row: BackgroundWorkRow, now = Date.now()): { glyph: string; color: string } {
   void now;
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
   const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
@@ -847,7 +847,7 @@ function stableFacts(facts: string[] | undefined): string[] {
   return (facts ?? []).filter((fact) => !/\bleft$/.test(singleLine(fact)));
 }
 
-function rowSummary(row: InternalRow): string {
+function rowSummary(row: BackgroundWorkRow): string {
   if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
     return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
   }
@@ -1919,8 +1919,7 @@ function truncateVisible(value: string, width: number): string {
 /**
  * Render one provider detail with the overlay line builder and the main-list
  * row formatter. Callers must already be inside the process that registered
- * the provider. `listedIds` is the live list; `rowLine` uses the same
- * formatter on the detail payload when the live list has filtered the run.
+ * the provider. `rowLine` is null when the provider no longer lists the item.
  */
 export function renderRegisteredWorkDetail(providerId: string, id: string, width = 100): {
   detail: BackgroundWorkDetail | null;
@@ -1956,28 +1955,11 @@ export function renderRegisteredWorkDetail(providerId: string, id: string, width
   } catch {
     lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
   }
-  const modelLine = detail.metadata.find((item) => item.label === "model")?.value ?? "";
-  const effortMatch = modelLine.match(/ · effort (.+)$/);
-  const elapsed = detail.metadata.find((item) => item.label === "elapsed")?.value ?? "-";
-  const row: InternalRow = {
-    providerId,
-    id: detail.id,
-    name: detail.title,
-    model: effortMatch ? modelLine.slice(0, effortMatch.index) : modelLine,
-    ...(effortMatch ? { effort: effortMatch[1] } : {}),
-    status: detail.status,
-    statusTone: detail.statusTone,
-    kind: "subagent",
-    elapsed,
-    primary: "",
-    sortStartedAt: 0,
-    navigatorId: rowKey(providerId, detail.id),
-    providerLabel: provider?.label ?? providerId,
-  };
+  const row = listed.find(item => item.id === id);
   return {
     detail,
     lines,
-    rowLine: formatMainListRow(row, true, fg, width),
+    rowLine: row ? formatMainListRow(row, true, fg, width) : null,
     listLines,
     listedIds,
   };

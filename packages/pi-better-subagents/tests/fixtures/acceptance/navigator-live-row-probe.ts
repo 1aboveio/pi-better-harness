@@ -20,10 +20,10 @@ type Row = {
 
 type Hooks = {
     subagentSpawn?: { execute: (id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> };
-    subagentStop?: { execute: (id: string, params: { id: string }) => Promise<unknown> };
-    subagentResult?: { execute: (id: string, params: { id: string }) => Promise<unknown> };
+    subagentStop?: { execute: (id: string, params: { id: string }, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> };
+    subagentResult?: { execute: (id: string, params: { id: string }, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> };
     listRows?: () => Row[];
-    renderDetail?: (id: string, width?: number) => unknown;
+    renderDetail?: (id: string, width?: number) => { detail?: { metadata?: Array<{ label: string; value: string }> } };
 };
 
 function textOf(value: unknown): string {
@@ -37,8 +37,8 @@ function runIdFrom(text: string): string | undefined {
 }
 
 export default function navigatorLiveRowProbe(pi: ExtensionAPI) {
-    void pi;
-    pi.on("session_start", async (_event, ctx) => {
+    pi.on("session_start", (_event, ctx) => { setImmediate(() => { void run(ctx); }); });
+    async function run(ctx: ExtensionContext) {
         const out = process.env.PI_ACCEPTANCE_NAV_OUT;
         const phase = process.env.PI_ACCEPTANCE_NAV_PHASE;
         const agentId = process.env.PI_ACCEPTANCE_AGENT_ID || "agent.live-row";
@@ -68,16 +68,18 @@ export default function navigatorLiveRowProbe(pi: ExtensionAPI) {
                 sandbox: false,
                 callback: false,
                 clean: true,
+                tools: "read",
                 approve: true,
             }, undefined, undefined, ctx);
             evidence.spawn = spawned;
             const spawnText = textOf(spawned);
             evidence.spawnText = spawnText;
             const spawnedId = runIdFrom(spawnText);
+            if (!spawnedId) throw new Error(`registered spawn returned no run ID: ${spawnText}`);
             let row: Row | undefined;
             for (let attempt = 0; attempt < 40; attempt += 1) {
                 const rows = hooks.listRows();
-                row = rows.find((item) => item.status === "running" && (item.id === spawnedId || item.name === "Live Row Agent"));
+                row = rows.find((item) => item.status === "running" && item.id === spawnedId);
                 if (row) {
                     evidence.providerRowsWhileRunning = rows;
                     evidence.liveRow = row;
@@ -104,9 +106,16 @@ export default function navigatorLiveRowProbe(pi: ExtensionAPI) {
             if (still?.status !== "running") {
                 throw new Error(`named-agent row ${row.id} left running before the list could be read (${still?.status ?? "missing"})`);
             }
-            evidence.navigator = hooks.renderDetail(row.id, 100);
-            evidence.stopped = await hooks.subagentStop.execute("acceptance-live-row-stop", { id: row.id });
-            evidence.result = await hooks.subagentResult.execute("acceptance-live-row-result", { id: row.id });
+            // The first real detail read can return the loading placeholder.
+            const detailDeadline = Date.now() + 5_000;
+            let navigator = hooks.renderDetail(row.id, 100);
+            while (!navigator.detail?.metadata?.length && Date.now() < detailDeadline) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+                navigator = hooks.renderDetail(row.id, 100);
+            }
+            evidence.navigator = navigator;
+            evidence.stopped = await hooks.subagentStop.execute("acceptance-live-row-stop", { id: row.id }, undefined, undefined, ctx);
+            evidence.result = await hooks.subagentResult.execute("acceptance-live-row-result", { id: row.id }, undefined, undefined, ctx);
         } catch (error) {
             evidence.error = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
         }
@@ -114,5 +123,5 @@ export default function navigatorLiveRowProbe(pi: ExtensionAPI) {
         setTimeout(() => {
             try { ctx.shutdown(); } catch { /* the pty driver kills the process */ }
         }, 1200);
-    });
+    }
 }

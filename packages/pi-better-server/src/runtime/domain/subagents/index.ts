@@ -2801,7 +2801,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     const registeredSpawnSchemas = new Map<string, object>();
     const registerSpawnTool: ExtensionAPI["registerTool"] = (definition) => {
         registeredSpawnSchemas.set(definition.name, definition.parameters);
-        pi.registerTool(managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
+        const registered: typeof definition = managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
             ctx = captureLaunchContext(ctx);
             restoreDelegationMode(ctx);
             await workerOperations.start();
@@ -2813,7 +2813,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             void activateWorkObservation();
             return launchWorkflowAssignment(pi, ctx, key, params, async args =>
                 await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, args, signal)) as never);
-        } });
+        } };
+        pi.registerTool(registered);
+        if (definition.name === "subagent_spawn") acceptanceSpawnToolRef = registered;
     };
     announceExecutionAdapter(pi, {
         parametersFor: (name) => registeredSpawnSchemas.get(name),
@@ -4172,7 +4174,6 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             }
         },
     };
-    acceptanceSpawnToolRef = acceptanceSpawnTool;
     registerSpawnTool(acceptanceSpawnTool);
 
     // ---- subagent_spawn_batch -------------------------------------------
@@ -4475,7 +4476,6 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         // completion callback even when the caller is the one who asked (#624).
         enqueueCompletionCallback(pi, id);
     } });
-    acceptanceStopToolRef = acceptanceStopTool;
     // A parked attempt may have exited, but its automatic resume is still armed.
     // Explicit stop must confirm durable cancellation, not just stop a process.
     const acceptanceStopToolWithParked = {
@@ -4501,7 +4501,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ) => Promise<unknown>)(toolCallId, params, signal, onUpdate, ctx) as Promise<never>;
         },
     };
-    pi.registerTool(acceptanceStopToolWithParked as typeof acceptanceStopTool);
+    acceptanceStopToolRef = acceptanceStopToolWithParked as typeof acceptanceStopTool;
+    pi.registerTool(acceptanceStopToolRef);
     publishAcceptanceHooks();
 
     const agentOperations = createAgentOperations({
