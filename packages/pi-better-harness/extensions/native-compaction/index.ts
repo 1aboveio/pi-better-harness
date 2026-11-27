@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
+import { createRequire } from "node:module";
 import {
   convertToLlm, getLatestCompactionEntry, sessionEntryToContextMessages,
   type CompactionEntry, type ExtensionAPI, type ExtensionContext, type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import { compactWindow, route, supportsCompaction, type Item } from "./provider.ts";
+
+const requireFromExtension = createRequire(import.meta.url);
+type ResponsesConverter = Pick<typeof import("@earendil-works/pi-ai/api/openai-responses-shared"), "convertResponsesMessages">;
 
 const key = "openaiNativeCompaction";
 const summaryPrefix = "OpenAI compacted the earlier conversation. Checkpoint ";
@@ -70,6 +73,10 @@ export default function registerNativeCompaction(pi: ExtensionAPI) {
         const history = previousNative ? archivedPrefix(branchEntries, previousNative) : sessionEntryToContextMessages(previous);
         messages = [...history, ...messages];
       }
+      const { loadResponsesConverter } = requireFromExtension("../../lib/openai-responses.mjs") as {
+        loadResponsesConverter(): Promise<ResponsesConverter>;
+      };
+      const { convertResponsesMessages } = await loadResponsesConverter();
       const items = convertResponsesMessages(model, { messages: convertToLlm(messages) }, responsesProviders);
       const output = await compactWindow(ctx, model, [...prefix, ...items], event.customInstructions, signal);
       signal.throwIfAborted();
