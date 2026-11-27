@@ -46,6 +46,10 @@ test("this workflow selects every lane", () => {
   assert.deepEqual(selected([".github/workflows/ci.yml"]), [...AREA_NAMES]);
 });
 
+test("editing a catalog role selects the workspace catalog check", () => {
+  assert.ok(selected(["packages/pi-better-subagents/roles/role.developer.md"]).includes("workspace"));
+});
+
 test("a path no area claims selects every lane", () => {
   assert.deepEqual(selected(["vitest.shared.config.ts"]), [...AREA_NAMES]);
 });
