@@ -2,6 +2,7 @@ import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { currentInstructions, manageInstructions, validateInstructionsPrompt } from "../../lib/instructions.mjs";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import { openSupervisorScenarios, readSupervisorSettings, setSupervisorEnabled } from "./supervisor.ts";
+import registerNativeCompaction, { nativeCompactionSetting } from "../native-compaction/index.ts";
 import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
 import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from "pi-better-background-tasks/src/shared-callback-batcher.ts";
@@ -9,6 +10,7 @@ import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from 
 import { getNavigatorView, loadNavigatorView, setNavigatorView } from "pi-better-background-tasks/src/shared-navigator.ts";
 
 export default function harnessSettingsExtension(pi: ExtensionAPI): void {
+  registerNativeCompaction(pi);
   const registry = createSettingsRegistry(pi);
   const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"],
     get: getNavigatorView, change: (value: string) => setNavigatorView(value) };
@@ -54,7 +56,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
             get: readSettings,
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
-          }, [...registry.controls(), supervisorMode], view, [
+          }, [...registry.controls(), nativeCompactionSetting, supervisorMode], view, [
             { id: "supervisor:scenarios", label: "Supervisor scenarios", kind: "page",
               description: "Choose which scenarios run when Supervisor mode is on." },
             { id: "instructions:toggle", label: "Harness instructions", kind: "toggle", value: state,

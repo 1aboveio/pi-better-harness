@@ -271,6 +271,14 @@ prompt; in Instructions, it restores the prompt while preserving model/effort.
 A user Markdown override is archived when its prompt is reset. Saved defaults
 survive sessions and upgrades.
 
+### OpenAI native compaction
+
+Turn on **OpenAI native compaction** under **Recaps & instructions** in `/harness-settings` to use the provider’s native compressor for manual `/compact` and automatic compaction. The switch defaults to Off and applies to future compactions. It supports GPT models on OpenAI Responses and Codex Responses routes. If the standalone endpoint is unavailable, Harness tries the Responses compaction trigger. Routes without either capability use Pi’s summary.
+
+Pi saves the complete compacted window in the session journal alongside the boundary of the recent messages it kept. Restarting before that write leaves the previous history available for retry. After the write, Pi can reopen the session and reuse the saved window. Switching to another route restores the original Pi history for that route.
+
+The first request with a newly compacted prefix can be cold. Later turns reuse the same prefix, including across a restart. Cache hit rate depends on the length of the reusable input and the provider. To run the metered acceptance check, set `PI_NATIVE_COMPACTION_LIVE=1` and run `node --import tsx --test --test-name-pattern 'live GPT' packages/pi-better-harness/test/native-compaction.test.mjs` from the repository root with a configured `OPENAI_API_KEY`. The check reports each turn and requires more than 95% cached input on each of three warm follow-ups.
+
 ### Session recap
 
 Enable **Session recap** in `/harness-settings` to add a one-line summary to the conversation transcript. The default is Off. Expand the entry with Pi’s expand-output shortcut to read the full text and any agreed next step. Saved recaps scroll with the conversation and reappear on their original branch.
