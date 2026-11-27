@@ -65,10 +65,12 @@ function parseShard(args) {
 
 export function runWorkspaceTests(root, args = []) {
   const shard = parseShard(args);
-  const workspaces = selectWorkspaces(root).filter((_, position) =>
-    !shard || position % shard.total === shard.index - 1);
-  for (const workspace of workspaces) {
-    const result = spawnSync("npm", ["run", "test", "--workspace", workspace], { cwd: root, stdio: "inherit" });
+  for (const [position, workspace] of selectWorkspaces(root).entries()) {
+    const splitSuite = shard && workspace === "packages/pi-better-subagents";
+    if (shard && !splitSuite && position % shard.total !== shard.index - 1) continue;
+    const args = ["run", "test", "--workspace", workspace];
+    if (splitSuite) args.push("--", `--test-shard=${shard.index}/${shard.total}`);
+    const result = spawnSync("npm", args, { cwd: root, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.signal) throw new Error(`Workspace ${workspace} terminated by ${result.signal}`);
     if (result.status !== 0) return result.status ?? 1;

@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
-        group: [runtime, reads]
+        group: [runtime, standalone, reads]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -68,7 +68,7 @@ jobs:
           PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
         run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
       - name: Qualify packed standalone domains and cached offline restart
-        if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'standalone' && !cancelled() && steps.install.outcome == 'success' }}
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-standalone.test.ts
       - name: Prove real socket recipient backpressure recovery
@@ -96,8 +96,6 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
-  # Two groups so the Node 24 kernel proofs and the real-SDK replays do not wait
-  # for each other. Both keep the require-backend contract.
   node24-sandbox:
     name: node24-sandbox (${{ matrix.group }})
     needs: changes
@@ -107,7 +105,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [confinement, sdk]
+        group: [confinement, sdk, launch]
     env:
       PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
     steps:
@@ -157,7 +155,7 @@ jobs:
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
       - name: Real SDK subagent launch and bootstrap fences
-        if: matrix.group == 'sdk'
+        if: matrix.group == 'launch'
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
 
@@ -223,7 +221,7 @@ jobs:
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/3)
+    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/5)
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -232,7 +230,7 @@ jobs:
       fail-fast: false
       matrix:
         pi-version: ["1.2.0", "1.6.1"]
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
@@ -260,7 +258,7 @@ jobs:
 
       - name: pi-better-server suite on Pi ${{ matrix.pi-version }}
         env:
-          TEST_SHARD: ${{ matrix.shard }}/3
+          TEST_SHARD: ${{ matrix.shard }}/5
           PI_SDK_VERSION: ${{ matrix.pi-version }}
         run: bash packages/pi-better-server/scripts/test-on-pi.sh "$PI_SDK_VERSION" "$RUNNER_TEMP/pi-compat"
 
@@ -567,7 +565,7 @@ jobs:
           node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
 
   server-tests:
-    name: server-tests (${{ matrix.shard }}/3)
+    name: server-tests (${{ matrix.shard }}/6)
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -575,7 +573,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
 
@@ -615,7 +613,7 @@ jobs:
         working-directory: packages/pi-better-server
         env:
           TEST_SHARD: ${{ matrix.shard }}
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/3" test/*.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/6" test/*.test.ts
 
   # Keep the existing required check name. A lane may report skipped only when the
   # selector said its area did not change; any other skip, failure or cancellation
@@ -749,7 +747,7 @@ jobs:
         if: matrix.shard == 1
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/isolated-workspace.test.mjs
       - name: Accept tool loading and use permissions in a real SDK worker
-        if: matrix.shard == 1
+        if: matrix.shard == 2
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs
       - name: Prove subagent launch and bootstrap ownership on Node 24
         working-directory: packages/pi-better-server
