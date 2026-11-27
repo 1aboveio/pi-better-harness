@@ -285,6 +285,50 @@ function recentEntries(origin) {
 export function recentMetaDeadline(origin) {
     return recentEntries(origin).map(entry => entry.observedAt + RECENT_MS);
 }
+/** Read each task once, even when its active and recent pointers overlap. */
+export function observeOriginActivity(origin, retained = [], exactId) {
+    let active;
+    let recent;
+    if (exactId !== undefined) {
+        if (!/^[A-Za-z0-9_-]+$/.test(exactId))
+            throw new Error("Invalid Background task ID");
+        registryIo.indexRevisionChecks += 2;
+        const marker = statSync(join(recentPath(origin), exactId), { throwIfNoEntry: false });
+        recent = marker && marker.mtimeMs + RECENT_MS > Date.now() ? [{ id: exactId, observedAt: marker.mtimeMs }] : [];
+        active = statSync(join(originActiveIndexDir(origin), exactId), { throwIfNoEntry: false }) ? [exactId] : [];
+    }
+    else {
+        registryIo.indexDirectoryReads++;
+        try {
+            active = readdirSync(originActiveIndexDir(origin)).filter(id => id !== ".initialized");
+        }
+        catch (error) {
+            if (error.code !== "ENOENT")
+                throw error;
+            active = [];
+        }
+        recent = recentEntries(origin);
+    }
+    const deadlines = recent.map(entry => entry.observedAt + RECENT_MS);
+    const recentIds = new Set(recent.map(entry => entry.id));
+    const activeIds = new Set(active);
+    const retainedIds = new Set(retained);
+    const rows = [];
+    for (const id of new Set([...active, ...recentIds, ...retained])) {
+        const record = inspectMeta(id);
+        if (record.found && !record.meta)
+            throw new Error(`Unverified background task ${id}: ${record.error}`);
+        const meta = record.meta;
+        if (!meta || !belongsToOrigin(meta, origin) || meta.dismissedAt !== undefined)
+            continue;
+        const wasRetained = retainedIds.has(id) && meta.status !== "running" && (!meta.endedAt || meta.endedAt + RECENT_MS > Date.now());
+        if (wasRetained && meta.endedAt)
+            deadlines.push(meta.endedAt + RECENT_MS);
+        if (wasRetained || recentIds.has(id) || (activeIds.has(id) && meta.callbackOrigin && meta.status === "running"))
+            rows.push(meta);
+    }
+    return { rows, deadline: deadlines.length ? Math.min(...deadlines) : null };
+}
 /** Exact cooperative source identity; no metadata or historical enumeration. */
 export function observationRevisionForOrigin(origin) {
     return observedIndexRevision(originKey(origin));

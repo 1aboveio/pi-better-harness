@@ -35,6 +35,7 @@ export class BackgroundHistory {
   private generation = 0;
   private watchers = new Map<string, FSWatcher>();
   private activated = false;
+  get active() { return this.activated; }
   private scheduled = false;
   private timer?: ReturnType<typeof setInterval>;
   private changes = 0;
@@ -151,7 +152,7 @@ export class BackgroundHistory {
   private startRefresh(version?: string) {
     if (this.source()?.observationActive) return;
     if (this.closed || this.pending) return;
-    const previous = this.status, changes = this.changes;
+    const previous = this.queryStatus, changes = this.changes;
     this.status = "rebuilding";
     this.pending = Promise.resolve().then(() => this.refresh(version ?? this.sourceVersion())).catch(error => {
       for (const id of this.applying) this.dirty.add(id);
@@ -170,7 +171,7 @@ export class BackgroundHistory {
     });
   }
 
-  read(scope: WorkScope) {
+  private prepareRead() {
     this.observeSources();
     if (!this.activated) {
       this.activated = true;
@@ -182,6 +183,10 @@ export class BackgroundHistory {
     if (!this.pending && (this.version !== version || Date.now() - this.completed >= 30000)) {
       this.startRefresh(version);
     }
+  }
+
+  read(scope: WorkScope, published = false) {
+    if (!published || !this.activated) this.prepareRead();
     const resource = `list:${sessionScopeKey({ all: scope.backgroundAll, origin: { cwd: scope.cwd, sessionId: scope.sessionId }, processId: scope.processId })}:${[...(scope.statuses ?? [])].sort().join(",")}`;
     const ownerClauses: string[] = [], ownerArgs: any[] = [];
     if (!scope.backgroundAll) {
@@ -202,7 +207,7 @@ export class BackgroundHistory {
     const before = anchor ? Number(this.db.prepare(`SELECT count(*) AS n FROM background_history WHERE ${where} AND (started > ? OR (started = ? AND id >= ?))`).get(...args, ...anchorArgs).n) : 0;
     const selected = this.db.prepare(`SELECT key, id, payload, context FROM background_history WHERE ${where}${after} ORDER BY started DESC, id DESC LIMIT ?`)
       .all(...args, ...anchorArgs, (scope.limit ?? 10) + 1);
-    for (const row of selected) {
+    if (!published) for (const row of selected) {
       if (row.key.startsWith("d:")) this.metrics.operationQueries++;
       const op = row.key.startsWith("d:") ? this.source()?.prepare("SELECT * FROM operations WHERE operation_id=?").get(row.key.slice(2)) : undefined;
       const path = row.key.startsWith("d:") ? join(op ? this.directoryFor(op) : this.directory, "observed", `${row.id}.json`) : join(tasksDir(), row.id, "meta.json");

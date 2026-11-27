@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, beginOriginIndexScan, observationRevisionForOrigin, belongsToOrigin, metaPathFor, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
+import { observeOriginActivity, beginOriginIndexScan, observationRevisionForOrigin, belongsToOrigin, metaPathFor, getRegistryIoMetrics } from "./domain/background/registry.mjs";
 // @ts-expect-error Generated canonical progress policy.
 import { supervisedProgress } from "./domain/background-service/supervised-progress.domain.mjs";
 import { BackgroundHistory } from "./background-history.ts";
@@ -16,11 +16,21 @@ import { isSqliteLockContention } from "./log-checkpoints.ts";
 // @ts-expect-error Shared durable observation inbox, not execution authority.
 import { AssignmentInbox } from "./domain/assignment-inbox.mjs";
 
+type LegacyActivity = { rows: any[]; deadline: number | null; signature: string; index: string };
 type BackgroundScope = { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number;
-  version: number; signature: string; legacyRevision?: string; legacyDeadline: number | null; recentDeadline?: number; recentDirty?: boolean;
+  version: number; signature: string; local?: LegacyActivity; workspace?: LegacyActivity; legacyDeadline: number | null; recentDeadline?: number; recentDirty?: boolean; legacyDirty?: boolean;
   pending: any[]; pendingRevision?: number; recent: any[]; recentRevision?: number };
 const DISCOVERY_PAGE_SIZE = 256;
 const malformedHistoryContext = Symbol("malformed terminal history context");
+
+function runnerReasons(op: any, inspection: any) {
+  const claim = inspection?.claim;
+  if (!claim || inspection.terminal || inspection.token !== op.launch_token || !processMatchesStart(claim.pid, claim.pidStartTime)) return [];
+  return [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
+    lastProgressAt: inspection.command?.startedAt ?? claim.claimedAt,
+    nextDeadline: inspection.launch.timeoutSeconds ? inspection.launch.createdAt + inspection.launch.timeoutSeconds * 1000 : null,
+    recovery: "observe-existing-runner" }];
+}
 
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
@@ -31,6 +41,7 @@ export class BackgroundObservation {
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
+  private runnerObservations = new WeakMap<object, { operation: any; inspection: any; reasons?: ReturnType<typeof runnerReasons> }>();
   private terminalProjections = new Map<string, { version: string; authority: string; operation: any; inspection: any; row: any; dependencyVersion?: number }>();
   private hasInputVersions = false;
   private inbox: any;
@@ -41,6 +52,8 @@ export class BackgroundObservation {
   private scopeVersions = new Map<string, number>();
   private watchers = new Map<string, FSWatcher>();
   private repairAfter = "";
+  private recentRepairAfter: [number, string] = [0, ""];
+  private nextHistoryRepair = 0;
   private repairIds = new Set<string>();
   private changedOperations = new Map<string, any>();
   private scheduled = false;
@@ -81,24 +94,8 @@ export class BackgroundObservation {
   contentRevision(scope: WorkScope, fromRefresh: boolean): string {
     if (!this.ready || !scope.cwd) return JSON.stringify([this.status, this.reason]);
     const entry = this.legacy.get(JSON.stringify([scope.cwd, scope.sessionId])) ?? this.legacyScope(scope);
-    // An explicit query can arrive before the timer observes a legacy write.
     const legacy = fromRefresh ? undefined : this.sourceRevision(scope);
     return JSON.stringify([entry.version, this.status, this.reason, legacy]);
-  }
-  private legacyRevision(entry: BackgroundScope, revision = observationRevisionForOrigin): string {
-    // Older writers can edit meta.json in place without updating their origin index.
-    const files = entry.rows.map(row => {
-      const stat = statSync(metaPathFor(row.id), { bigint: true, throwIfNoEntry: false });
-      return stat ? [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join("/") : "missing";
-    });
-    return [...this.sourceRevision(entry.origin, revision), ...files].join("|");
-  }
-  nextDeadline(scope: WorkScope): number | null {
-    if (!this.ready) return null;
-    if (!scope.cwd) return null;
-    const deadlines = [...recentMetaDeadline({ cwd: scope.cwd, sessionId: scope.sessionId }),
-      ...(scope.sessionId ? recentMetaDeadline({ cwd: scope.cwd }) : [])];
-    return deadlines.length ? Math.min(...deadlines) : null;
   }
   get registryMetrics() { return getRegistryIoMetrics(); }
   private get inboxMetrics() {
@@ -114,9 +111,16 @@ export class BackgroundObservation {
     fileCoverage: "active-and-retained; historical-files-only-when-history-requested" }; }
   livenessReasons(options: { refresh?: boolean } = {}) {
     if (!this.ready) throw new Error("Background inbox coverage is unverified");
+    if (options.refresh === false && this.enabled && this.status === "ready") {
+      return this.rows.flatMap(row => {
+        const seen = this.runnerObservations.get(row);
+        if (!seen) return [];
+        return seen.reasons ??= runnerReasons(seen.operation, seen.inspection);
+      });
+    }
     if (options.refresh !== false) {
       this.enabled = true;
-      this.refresh({ pollLegacy: false });
+      this.refresh({ pollLegacy: false, checkRunning: true });
     }
     if (!this.db) return [];
     let operations: any[] = [];
@@ -134,12 +138,7 @@ export class BackgroundObservation {
         const cached = this.terminalProjections.get(op.operation_id);
         const inspection = cached?.authority === JSON.stringify([op, directory]) ? cached.inspection : snapshot(directory, op.task_id);
         if (!cached || cached.authority !== JSON.stringify([op, directory])) this.metrics.runnerSnapshots++;
-        const claim = inspection?.claim;
-        return claim && !inspection.terminal && inspection.token === op.launch_token && processMatchesStart(claim.pid, claim.pidStartTime)
-          ? [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
-            lastProgressAt: inspection.command?.startedAt ?? claim.claimedAt,
-            nextDeadline: inspection.launch.timeoutSeconds ? inspection.launch.createdAt + inspection.launch.timeoutSeconds * 1000 : null,
-            recovery: "observe-existing-runner" }] : [];
+        return runnerReasons(op, inspection);
       } catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     });
   }
@@ -160,15 +159,14 @@ export class BackgroundObservation {
     try {
       const watcher = watch(directory, { recursive: true }, (_event, file) => {
         if (this.closed) return;
-        // Progress changes only the active overlay. Historical rows and wait inputs stay cached.
-        if (file && /^tasks[/\\][^/\\]+[/\\]progress\.json$/.test(String(file))) { this.schedule(); return; }
-        const match = file && /^(?:observed[/\\]([^/\\]+)\.json|tasks[/\\]([^/\\]+)[/\\](?:launch|claim|command|result|lost|stop|cleanup)\.json)$/.exec(String(file));
+        const match = file && /^(?:observed[/\\]([^/\\]+)\.json|tasks[/\\]([^/\\]+)[/\\](?:launch|claim|command|result|lost|stop|cleanup|progress)\.json)$/.exec(String(file));
         if (match) {
           const op = this.db?.prepare("SELECT operation_id FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").get(match[1] ?? match[2]);
           if (op) {
             if (this.dirtyOperations.size < 256) this.dirtyOperations.add(op.operation_id);
             else { this.oweRepair(); this.metrics.overflows++; }
-            this.history?.invalidateOperation(op.operation_id); this.metrics.exactHints++;
+            if (!String(file).endsWith("progress.json")) this.history?.invalidateOperation(op.operation_id);
+            this.metrics.exactHints++;
           }
         } else if (!file) { this.oweRepair(); this.metrics.overflows++; }
         else return;
@@ -223,18 +221,20 @@ export class BackgroundObservation {
       throw error;
     }
   }
-  refresh({ pollLegacy = true } = {}): boolean {
+  refresh({ pollLegacy = true, checkRunning = false } = {}): boolean {
     if (!this.ready) return false;
     if (this.observationActive) return false;
     if (!this.enabled) return false;
     let observation: { commit(): void; release(): void } | undefined;
+    const previousIdentity = this.identity;
+    const historyStatus = this.historyStatus;
     const previousScopes = new Map<string, BackgroundScope>();
     const saveScope = (key: string, entry: BackgroundScope) => {
       if (!previousScopes.has(key)) previousScopes.set(key, { ...entry });
     };
     const previous = { rows: this.rows, rowSignatures: this.rowSignatures,
       terminalProjections: new Map(this.terminalProjections), scopeVersions: new Map(this.scopeVersions), recent: this.recent,
-      recentRevision: this.recentRevision, repairAfter: this.repairAfter, repairComplete: this.repairComplete,
+      recentRevision: this.recentRevision, recentRepairAfter: this.recentRepairAfter, nextHistoryRepair: this.nextHistoryRepair, repairAfter: this.repairAfter, repairComplete: this.repairComplete,
       dirtyOperations: new Set(this.dirtyOperations), changedOperations: new Map(this.changedOperations) };
     try {
       const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
@@ -266,27 +266,26 @@ export class BackgroundObservation {
           this.history?.invalidateOperation(operationId);
           this.metrics.journalEntities++;
         }
-        if (batch.has("*")) { this.terminalProjections.clear(); this.recentRevision = undefined; for (const [key, entry] of this.legacy) { saveScope(key, entry); entry.recentRevision = undefined; entry.pendingRevision = undefined; } this.history?.invalidate(); }
+        if (batch.has("*")) { this.repairComplete = false; this.repairAfter = ""; this.terminalProjections.clear(); this.recentRevision = undefined; for (const [key, entry] of this.legacy) { saveScope(key, entry); entry.recentRevision = undefined; entry.pendingRevision = undefined; } this.history?.invalidate(); }
       }
       const revision = this.hasInputVersions ? Math.max(0, ...this.scopeVersions.values())
         : Number(this.db?.prepare("SELECT value FROM coordinator_state WHERE key = 'change_revision'").get()?.value ?? 0);
+      this.changedOperations.clear();
       this.repairIds.clear();
-      if (this.db) {
-        const repair = this.db.prepare("SELECT operation_id FROM operations WHERE observer_kind='local-supervisor' AND operation_id>? ORDER BY operation_id LIMIT ?").all(this.repairAfter, ENTITY_BUDGET);
-        for (const op of repair) { this.repairIds.add(op.operation_id); this.metrics.repairEntries++; }
-        this.repairAfter = repair.length === ENTITY_BUDGET ? repair.at(-1).operation_id : "";
-        if (!this.repairAfter) this.repairComplete = true;
-        const saved = this.inbox.db.prepare(`SELECT * FROM ${this.inbox.prefix}background_file_repair WHERE singleton=1`).get();
-        if (!saved || saved.identity !== (this.identity ?? "") || saved.after_id !== this.repairAfter || saved.complete !== Number(this.repairComplete))
-          this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,?,?)`).run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
+      if (this.db) this.repairOperations(pollLegacy);
+      for (const row of this.rows) {
+        if ((row.progress?.nextDeadline ?? Infinity) <= Date.now()) this.dirtyOperations.add(row.operationId);
       }
       const hasPendingIndex = Boolean(this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get());
-      this.changedOperations.clear();
-      if (this.db) for (const id of new Set([...this.dirtyOperations, ...this.repairIds])) {
+      if (this.db) for (const id of this.dirtyOperations) {
+        if (this.changedOperations.has(id)) continue;
         this.metrics.exactOperationQueries++;
         this.changedOperations.set(id, this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id));
       }
-      const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];
+      const inventory = checkRunning || pollLegacy || !this.hasInputVersions || this.status !== "ready" || batch?.has("*") || identity !== previousIdentity;
+      const operations = inventory && this.db
+        ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all()
+        : [...this.changedOperations.values()].filter(op => op?.phase === "running" && op.observer_kind === "local-supervisor");
       this.metrics.activeRows += operations.length;
       // Active snapshots retain a bounded recent window. Complete history is
       // available through the separately paginated history index.
@@ -305,8 +304,15 @@ export class BackgroundObservation {
         this.recentRevision = revision;
       }
       this.recent = this.recent.filter(op => Date.now() - op.terminal_at < 30000);
-      operations.push(...this.recent);
-      const rows = this.project(operations);
+      const changedIds = new Set(this.changedOperations.keys());
+      const previousRecent = new Set(previous.recent.map(op => op.operation_id));
+      for (const op of this.recent) {
+        if (inventory || changedIds.has(op.operation_id) || !previousRecent.has(op.operation_id)) operations.push(op);
+        previousRecent.delete(op.operation_id);
+      }
+      const updated = this.project(operations);
+      const rows = inventory ? updated : [...this.rows.filter(row => !changedIds.has(row.operationId)
+        && !previousRecent.has(row.operationId)), ...updated];
       // A passive runner may finish before its manager publishes the outcome.
       // Invalidate history on that exact state transition, not on scope/projection
       // churn (which would continually restart a yielding history build).
@@ -320,7 +326,7 @@ export class BackgroundObservation {
       };
       const signatures = new Map<string, string>();
       for (const row of rows) {
-        const signature = JSON.stringify(row);
+        const signature = previousRows.get(row.id) === row ? this.rowSignatures.get(row.id)! : JSON.stringify(row);
         signatures.set(row.id, signature);
         if (signature === this.rowSignatures.get(row.id)) continue;
         const before = previousRows.get(row.id);
@@ -355,13 +361,17 @@ export class BackgroundObservation {
       // Journal entries and runner hints say nothing about unrelated legacy files.
       // The periodic inventory verifies old writers even when no journal event arrives.
       const scan = this.legacy.size && (pollLegacy || this.status !== "ready") ? beginOriginIndexScan(this.legacyIndexState) : undefined;
+      const origins = new Map<string, LegacyActivity>();
       let changed = changedParents.size > 0 || this.status !== "ready";
       for (const [key, entry] of this.legacy) {
         const scopedRevision = this.hasInputVersions ? this.scopeVersions.get(key) ?? 0 : revision;
         const expired = entry.legacyDeadline !== null && entry.legacyDeadline <= now;
-        const legacyRevision = scan || expired || entry.legacyRevision === undefined
-          ? this.legacyRevision(entry, scan?.revision) : entry.legacyRevision;
-        const legacyChanged = expired || legacyRevision !== entry.legacyRevision;
+        let local = entry.local, workspace = entry.workspace;
+        if (scan || expired || !local) {
+          local = this.observeOrigin(entry.origin, local, origins, scan?.revision);
+          if (entry.origin.sessionId) workspace = this.observeOrigin({ cwd: entry.origin.cwd }, workspace, origins, scan?.revision);
+        }
+        const legacyChanged = entry.legacyDirty || local !== entry.local || workspace !== entry.workspace;
         const recentChanged = this.db && (entry.recentDirty || entry.recentRevision !== scopedRevision || recentParents.has(key)
           || (entry.recentDeadline ?? Infinity) <= now
           || (unknownPreviousParents.size > 0 && entry.recent.some(row => unknownPreviousParents.has(row.operationId))));
@@ -370,10 +380,13 @@ export class BackgroundObservation {
         saveScope(key, entry);
         if (pendingChanged) this.refreshPending(entry, scopedRevision);
         if (recentChanged) {
-          this.refreshRecent(entry, scopedRevision, projected);
+          this.refreshRecent(entry, scopedRevision, projected, false);
           entry.recentDirty = false;
         }
-        if (legacyChanged) this.refreshLegacy(entry, legacyRevision);
+        if (legacyChanged) {
+          this.setLegacy(entry, local!, workspace);
+          entry.legacyDirty = false;
+        }
         let scopeChanged = changedParents.has(key);
         if (recentChanged || pendingChanged || legacyChanged) {
           const signature = this.scopeSignature(entry);
@@ -400,7 +413,7 @@ export class BackgroundObservation {
       }
       observation?.commit();
       if (scan) this.legacyIndexState = scan.state;
-      return changed;
+      return changed || this.historyStatus !== historyStatus;
     } catch (error) {
       observation?.release();
       for (const [key, entry] of previousScopes) this.legacy.set(key, entry);
@@ -410,6 +423,31 @@ export class BackgroundObservation {
       this.status = "degraded"; this.reason = reason;
       return changed;
     } finally { observation?.release(); }
+  }
+  private repairOperations(maintenance: boolean) {
+    let page: any[];
+    if (!this.repairComplete || maintenance && (!this.hasInputVersions || this.history?.active && Date.now() >= this.nextHistoryRepair)) {
+      page = this.db.prepare("SELECT * FROM operations WHERE observer_kind='local-supervisor' AND operation_id>? ORDER BY operation_id LIMIT ?").all(this.repairAfter, ENTITY_BUDGET);
+      this.repairAfter = page.length === ENTITY_BUDGET ? page.at(-1).operation_id : "";
+      if (!this.repairAfter) {
+        this.repairComplete = true;
+        this.nextHistoryRepair = Date.now() + 30000;
+      }
+      const saved = this.inbox.db.prepare(`SELECT * FROM ${this.inbox.prefix}background_file_repair WHERE singleton=1`).get();
+      if (!saved || saved.identity !== (this.identity ?? "") || saved.after_id !== this.repairAfter || saved.complete !== Number(this.repairComplete))
+        this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,?,?)`).run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
+    } else if (maintenance) {
+      // The recent index covers retained sidecars if a watcher misses an in-place edit.
+      page = this.db.prepare(`SELECT * FROM operations WHERE observer_kind='local-supervisor' AND terminal_revision>0
+        AND terminal_at>=? AND (terminal_at,operation_id)>(?,?) ORDER BY terminal_at,operation_id LIMIT ?`)
+        .all(Date.now() - 30000, ...this.recentRepairAfter, ENTITY_BUDGET);
+      this.recentRepairAfter = page.length === ENTITY_BUDGET ? [page.at(-1).terminal_at, page.at(-1).operation_id] : [0, ""];
+    } else return;
+    for (const op of page) {
+      this.changedOperations.set(op.operation_id, op);
+      this.repairIds.add(op.operation_id);
+      this.metrics.repairEntries++;
+    }
   }
   /** Captured assignment, never the newest assignment in a reused conversation. */
   private workerParent(op: any, context: any): any {
@@ -505,8 +543,10 @@ export class BackgroundObservation {
         } catch (error) { this.dirtyOperations.add(op.operation_id); throw error; }
       }).filter(Boolean).map(row => {
         if (!row.active) return row;
-        const inspection = this.terminalProjections.get(row.operationId)?.inspection;
-        return { ...row, progress: supervisedProgress(inspection) };
+        const projection = this.terminalProjections.get(row.operationId);
+        const active = { ...row, progress: supervisedProgress(projection?.inspection) };
+        if (projection?.inspection?.claim) this.runnerObservations.set(active, { operation: projection.operation, inspection: projection.inspection });
+        return active;
       });
   }
   private pendingRows(entry: BackgroundScope): any[] { return entry.pending; }
@@ -529,7 +569,7 @@ export class BackgroundObservation {
       ? row.owner.workspace === origin.cwd && row.owner.sessionId === origin.sessionId
       : row.parentRecipient?.workspace === origin.cwd && row.parentRecipient?.sessionId === origin.sessionId;
   }
-  private refreshRecent(entry: BackgroundScope, revision: number, projected = new Map<string, any>()): void {
+  private refreshRecent(entry: BackgroundScope, revision: number, projected = new Map<string, any>(), verifyRetained = true): void {
     if (!this.db) return;
     if (entry.recentRevision === undefined || !this.hasInputVersions && entry.recentRevision !== revision) {
       const operations = this.db.prepare(`SELECT * FROM operations o WHERE observer_kind='local-supervisor' AND (
@@ -546,7 +586,7 @@ export class BackgroundObservation {
       const rows = new Map(entry.recent.filter(row => Date.now() - row.endedAt < 30000).map(row => [row.operationId, row]));
       // Retained visible terminals must observe atomic file replacement even
       // before a watcher hint arrives or the historical repair cursor reaches them.
-      for (const id of rows.keys()) if (!this.changedOperations.has(id)) {
+      for (const id of rows.keys()) if (verifyRetained && !this.changedOperations.has(id)) {
         let op = this.terminalProjections.get(id)?.operation;
         if (!op) { this.metrics.exactOperationQueries++; op = this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id); }
         const row = op && this.project([op])[0];
@@ -570,16 +610,30 @@ export class BackgroundObservation {
   private scopeSignature(entry: BackgroundScope): string {
     return JSON.stringify([entry.rows, entry.recent, entry.pending]);
   }
-  private refreshLegacy(entry: BackgroundScope, revision = this.legacyRevision(entry)): void {
-    const active = this.visibleLegacy(entry.origin);
-    const retained = entry.rows.map(row => readMeta(row.id)).filter((row: any) => row && row.dismissedAt === undefined
-      && row.status !== "running" && (!row.endedAt || Date.now() - row.endedAt < 30000));
-    entry.rows = [...new Map([...retained, ...active].map(row => [row.id, row])).values()];
-    const deadlines = retained.flatMap(row => row.endedAt ? [row.endedAt + 30000] : []);
-    const indexed = this.nextDeadline(entry.origin);
-    if (indexed !== null) deadlines.push(indexed);
-    entry.legacyDeadline = deadlines.length ? Math.min(...deadlines) : null;
-    entry.legacyRevision = revision;
+  private observeOrigin(origin: { cwd: string; sessionId?: string }, prior?: LegacyActivity,
+    pass = new Map<string, LegacyActivity>(), revision = observationRevisionForOrigin): LegacyActivity {
+    const key = JSON.stringify([origin.cwd, origin.sessionId]);
+    const shared = pass.get(key);
+    if (shared) return shared;
+    const index = revision(origin);
+    const fileSignature = (rows: any[]) => rows.map(row => {
+      const stat = statSync(metaPathFor(row.id), { bigint: true, throwIfNoEntry: false });
+      return stat ? [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join("/") : "missing";
+    }).join("|");
+    // Fence before reading metadata. A concurrent edit or new member is
+    // verified on the next poll, even when an older writer leaves the index intact.
+    const signature = fileSignature(prior?.rows ?? []);
+    const current: LegacyActivity = prior && index === prior.index && (prior.deadline ?? Infinity) > Date.now() && signature === prior.signature
+      ? prior : { ...observeOriginActivity(origin, prior?.rows.map(row => row.id)), signature, index };
+    pass.set(key, current);
+    return current;
+  }
+  private setLegacy(entry: BackgroundScope, local: LegacyActivity, workspace?: LegacyActivity) {
+    entry.local = local;
+    entry.workspace = workspace;
+    entry.rows = [...local.rows, ...(workspace?.rows.filter(row => !row.callbackOrigin) ?? [])];
+    const deadline = Math.min(local.deadline ?? Infinity, workspace?.deadline ?? Infinity);
+    entry.legacyDeadline = Number.isFinite(deadline) ? deadline : null;
   }
   private legacyScope(scope: { cwd?: string; sessionId?: string }) {
     if (!scope.cwd) throw new Error("Background activity requires an exact workspace");
@@ -594,7 +648,7 @@ export class BackgroundObservation {
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
       entry = { origin, rows: [], references: 0, pending: [], recent: [], version: ++this.nextScopeVersion,
         signature: "", legacyDeadline: null };
-      if (this.ready) this.refreshLegacy(entry);
+      if (this.ready) this.setLegacy(entry, this.observeOrigin(origin), origin.sessionId ? this.observeOrigin({ cwd: origin.cwd }) : undefined);
       const revision = !this.ready || this.status === "degraded" ? 0 : this.hasInputVersions ? this.scopeVersions.get(key) ?? 0
         : Number(this.db?.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0);
       if (this.ready && this.status !== "degraded" && this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
@@ -605,11 +659,6 @@ export class BackgroundObservation {
     this.legacy.delete(key); this.legacy.set(key, entry);
     return entry;
   }
-  private visibleLegacy(origin: { cwd: string; sessionId?: string }): any[] {
-    return [...new Map([...observeMetasForOrigin(origin), ...observeRecentMetasForOrigin(origin),
-      ...(origin.sessionId ? observeRecentMetasForOrigin({ cwd: origin.cwd }).filter((row: any) => !row.callbackOrigin) : [])]
-      .map((row: any) => [row.id, row])).values()];
-  }
   retain(scope: { cwd?: string; sessionId?: string }) {
     if (!this.ready) this.enabled = true;
     const entry = this.legacyScope(scope);
@@ -618,29 +667,57 @@ export class BackgroundObservation {
     let released = false;
     return () => { if (!released) { released = true; this.legacy.get(key)!.references--; } };
   }
-  read(scope: WorkScope, index?: any): any[] {
-    if (!this.ready) { this.enabled = true; return []; }
+  private enable(scope: WorkScope) {
+    if (!scope.cwd) throw new Error("Background activity requires an exact workspace");
     const newlyGlobal = scope.backgroundAll && !this.allRequested;
     if (scope.backgroundAll) this.allRequested = true;
     if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh({ pollLegacy: false }); }
+  }
+  read(scope: WorkScope, index?: any): any[] {
+    return this.query(scope, index).rows;
+  }
+  query(scope: WorkScope, index?: any, published = false): { rows: any[]; nextDeadline: number | null } {
+    if (!this.ready) { this.enabled = true; return { rows: [], nextDeadline: null }; }
+    this.enable(scope);
+    if (scope.backgroundHistory) {
+      this.metrics.historyQueries++;
+      return { rows: index.records.map((record: any) => record.meta), nextDeadline: null };
+    }
+    if (scope.id && this.status !== "degraded") {
+      if (!/^[A-Za-z0-9_-]+$/.test(scope.id)) throw new Error("Invalid Background task ID");
+      const operations = this.db?.prepare("SELECT * FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").all(scope.id) ?? [];
+      const durable = this.project(operations).filter(row => this.belongsToDurableOrigin(row, scope) && row.dismissedAt === undefined && (!scope.active || row.active));
+      const local = observeOriginActivity(scope, [], scope.id);
+      const workspace = scope.sessionId ? observeOriginActivity({ cwd: scope.cwd }, [], scope.id) : undefined;
+      const visible = [...local.rows.filter((row: any) => !row.callbackOrigin || scope.sessionId || row.spawnPid === scope.processId),
+        ...(workspace?.rows.filter((row: any) => !row.callbackOrigin) ?? [])];
+      const deadline = Math.min(local.deadline ?? Infinity, workspace?.deadline ?? Infinity);
+      return { rows: [...durable, ...visible.filter(row => !scope.active || row.status === "running")],
+        nextDeadline: Number.isFinite(deadline) ? deadline : null };
+    }
     const legacy = this.legacyScope(scope);
-    if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     // Retained terminals stay visible by default, but a sidecar dismissal must
     // be observed even before its watcher notification is delivered.
-    if (!this.observationActive && this.status !== "degraded" && this.db) {
+    if (!published && !this.observationActive && this.status !== "degraded" && this.db) {
       const previous = legacy.recent;
       this.refreshRecent(legacy, legacy.recentRevision ?? 0);
       // A synchronous read can beat the expiry timer or file watcher. Subscribers still need publication.
       if (previous.length !== legacy.recent.length || previous.some((row, index) => row !== legacy.recent[index])) legacy.recentDirty = true;
     }
-    const legacyRows = this.observationActive || this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
-    const exact = scope.id && this.status !== "degraded" && this.db
-      ? this.project(this.db.prepare("SELECT * FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").all(scope.id)) : [];
-    const rows = [...new Map([...this.pendingRows(legacy), ...this.rows, ...(scope.backgroundAll ? [] : legacy.recent), ...exact].map(row => [row.id, row])).values()];
-    return [...rows.filter(row => (!scope.id || row.id === scope.id) && row.dismissedAt === undefined
+    if (!published && !this.observationActive && this.status !== "degraded") {
+      const local = this.observeOrigin(legacy.origin, legacy.local);
+      const workspace = scope.sessionId ? this.observeOrigin({ cwd: legacy.origin.cwd }, legacy.workspace) : undefined;
+      if (local !== legacy.local || workspace !== legacy.workspace) {
+        this.setLegacy(legacy, local, workspace);
+        legacy.legacyDirty = true;
+      }
+    }
+    const rows = [...new Map([...this.pendingRows(legacy), ...this.rows, ...(scope.backgroundAll ? [] : legacy.recent)].map(row => [row.id, row])).values()];
+    const visible = [...rows.filter(row => (!scope.id || row.id === scope.id) && row.dismissedAt === undefined
       && (scope.backgroundAll ? row.owner.kind === "parent-session" : this.belongsToDurableOrigin(row, scope)) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => (!scope.id || row.id === scope.id) && (scope.backgroundAll || !row.callbackOrigin || belongsToOrigin(row, legacy.origin)
+      ...legacy.rows.filter((row: any) => (!scope.id || row.id === scope.id) && (scope.backgroundAll || !row.callbackOrigin || belongsToOrigin(row, legacy.origin)
         && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
+    return { rows: visible, nextDeadline: legacy.legacyDeadline };
   }
   close(): Promise<void> {
     this.closed = true;
@@ -653,10 +730,10 @@ export class BackgroundObservation {
   get historyStatus() { return this.history?.queryStatus ?? "degraded"; }
   get historyReason() { return this.history?.reason; }
   get historyMetrics() { return this.history?.metrics; }
-  historyIndex(scope: WorkScope) {
+  historyIndex(scope: WorkScope, published = false) {
     if (!this.ready) throw new Error("Background inbox coverage is unverified");
-    this.read({ ...scope, backgroundHistory: false });
+    this.enable(scope);
     if (!this.history) throw new Error("Background history requires the shared root index");
-    return this.history.read(scope);
+    return this.history.read(scope, published);
   }
 }

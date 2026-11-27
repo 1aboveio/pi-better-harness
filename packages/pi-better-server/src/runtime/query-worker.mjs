@@ -88,15 +88,17 @@ const cacheComparisons = workerData.queryCacheDiagnostics ? [] : undefined;
 const metrics = () => ({ ...model.indexCounters, background: model.backgroundCounters, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
   cacheEntries: cache.size, queryDurationMs: [...durations], ...(cacheComparisons ? { cacheComparisons: [...cacheComparisons] } : {}) });
 const snapshot = model.snapshot.bind(model);
-model.snapshot = scope => observeExecution("snapshot", () => {
+model.snapshot = (scope, published = false) => observeExecution("snapshot", () => {
   scope = workScope(scope ?? {});
   const key = JSON.stringify(scope ?? {});
-  const revision = model.contentRevision(scope);
+  // Explicit exact and history requests verify their sources inside snapshot().
+  // During publication identical subscribers can share the committed observation.
+  const cacheable = published || !scope?.backgroundHistory && !(scope?.background && scope.id);
+  const revision = cacheable ? model.contentRevision(scope, published) : undefined;
   // Historical IDs can outlive the parent's active/recent observation window.
-  const cacheable = !scope?.backgroundHistory && !(scope?.background && scope.id);
   const previous = cacheable ? cache.get(key) : undefined;
   const comparedAt = Date.now();
-  const hit = previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > comparedAt);
+  const hit = previous && previous.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > comparedAt);
   // Only the original regression fixture opts in; no extra source reads.
   let comparison;
   if (cacheComparisons) {
@@ -112,7 +114,7 @@ model.snapshot = scope => observeExecution("snapshot", () => {
   }
   if (previous) { cacheBytes -= previous.bytes; cache.delete(key); }
   const started = performance.now();
-  const value = snapshot(scope);
+  const value = snapshot(scope, published);
   if (comparison) Object.assign(comparison, { scopeRevision: value.scopeRevision,
     nextDeadline: value.nextDeadline, seq: value.seq, observedRevisionVector: value.observedRevisionVector });
   const json = snapshotJSON(value);
@@ -204,7 +206,7 @@ parentPort.on("message", async message => {
       return;
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
-    const indexed = command.type !== "runtime_get_snapshot" || !command.scope?.id || await model.ensureId(command.scope.id);
+    const indexed = command.type !== "runtime_get_snapshot" || !command.scope?.id || command.scope.background === true || await model.ensureId(command.scope.id);
     if (request.cancelled) return;
     observeExecution("request", () => {
       const state = session(message.connection);
