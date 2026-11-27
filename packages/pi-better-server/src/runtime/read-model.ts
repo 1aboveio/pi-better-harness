@@ -99,6 +99,8 @@ export class WorkReadModel {
   private rootParents = new Map<string, { path: string; identity: string; watcher: FSWatcher }>();
   private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
+  private subagentListeners = new Set<() => void>();
+  private backgroundRevision = 0;
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
   private dirty = false;
@@ -354,8 +356,9 @@ export class WorkReadModel {
       if (scope && next === revision) return;
       revision = next; listener();
     };
-    this.listeners.add(notify);
-    return () => { this.listeners.delete(notify); release?.(); };
+    const listeners = scope && !scope.background ? this.subagentListeners : this.listeners;
+    listeners.add(notify);
+    return () => { listeners.delete(notify); release?.(); };
   }
   get inboxDiagnostics() {
     // The owner can yield while applying a batch. Only sample committed queue state.
@@ -427,8 +430,8 @@ export class WorkReadModel {
   }
   contentRevision(scope: WorkScope = {}, fromRefresh = false) {
     if (scope.background) {
-      if (scope.backgroundHistory) return String(this.revision);
       if (!this.observationInitialized) return hash([this.state, this.reason]);
+      if (scope.backgroundHistory) return String(this.backgroundRevision);
       return this.background.contentRevision(scope, fromRefresh);
     }
     const entry = this.scopeEntry(scope);
@@ -454,8 +457,8 @@ export class WorkReadModel {
   }
   private publish(backgroundOnly = false) {
     this.revision++;
-    for (const entry of this.scopes.values()) {
-      if (backgroundOnly) continue;
+    if (backgroundOnly) this.backgroundRevision++;
+    else for (const entry of this.scopes.values()) {
       const status = hash(this.scopeStatus(entry.scope));
       if (entry.status !== status || this.changedRows.some(({ before, after }) =>
         this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
@@ -464,6 +467,7 @@ export class WorkReadModel {
     }
     this.changedRows = [];
     for (const listener of this.listeners) listener();
+    if (!backgroundOnly) for (const listener of this.subagentListeners) listener();
   }
 
   /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
@@ -630,7 +634,7 @@ export class WorkReadModel {
         this.inventoryPhase?.("background");
         const pollLegacy = this.legacyPollOwed;
         this.legacyPollOwed = false;
-        if (this.background.refresh({ pollLegacy })) this.publish(true);
+        if (this.background.refresh({ pollLegacy, checkRunning: resetRepair })) this.publish(true);
         if (this.rejectUnsupportedAssignmentRevision()) break;
         this.refreshAssignments();
         // Metadata repair cannot verify an incompatible coordinator. Keep its
@@ -1155,7 +1159,7 @@ export class WorkReadModel {
     for (const entry of batch) acknowledge.run(entry.revision, ++this.foldQueueSequence, entry.id);
   }
 
-  snapshot(scope: WorkScope = {}): WorkSnapshot {
+  snapshot(scope: WorkScope = {}, published = false): WorkSnapshot {
     if (!this.observationInitialized && !this.closed) return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, this.state, this.reason]), seq: this.revision,
       observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
       rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
@@ -1167,18 +1171,18 @@ export class WorkReadModel {
           observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
           status, reason, rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
       }
-      if (scope.backgroundHistory && this.background.refresh({ pollLegacy: false })) this.publish(true);
-      const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
-      const tasks = this.background.read(scope, index);
+      if (!published && scope.backgroundHistory && this.background.refresh({ pollLegacy: false })) this.publish(true);
+      const index = scope.backgroundHistory ? this.background.historyIndex(scope, published) : undefined;
+      const { rows: tasks, nextDeadline } = this.background.query(scope, index, published);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
-      const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
+      const active = (index ? this.background.query({ ...scope, backgroundHistory: false, active: true }, undefined, published).rows : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
       return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
         status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
         rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
         ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
-        activity: { active }, nextDeadline: scope.backgroundHistory ? null : this.background.nextDeadline(scope) };
+        activity: { active }, nextDeadline };
     }
     const clauses: string[] = [], args: any[] = [];
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }
@@ -1249,7 +1253,7 @@ export class WorkReadModel {
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader?.close(); this.checkpoints.close(); this.db.close();
+    await this.pending; await this.repairWrite; this.listeners.clear(); this.subagentListeners.clear(); await this.background.close(); this.reader?.close(); this.checkpoints.close(); this.db.close();
     await this.repair?.return(undefined);
   }
 }

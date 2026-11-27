@@ -97,10 +97,10 @@ export class WorkQueries {
       this.close();
       this.subscriptionGeneration = Number.isSafeInteger(command.subscriptionGeneration) ? Number(command.subscriptionGeneration) : undefined;
       this.lastSnapshotSeq = snapshot.seq;
-      this.lastBackgroundKey = scope.background && !scope.backgroundHistory ? backgroundNotificationKey(snapshot) : undefined;
+      this.lastBackgroundKey = scope.background ? backgroundNotificationKey(snapshot) : undefined;
       this.dispose = this.model.onChange(() => {
         try {
-          this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) });
+          this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }, true) });
         } catch (error) {
           // A stale detail or oversized scope must not fail shared reconciliation.
           this.close();
