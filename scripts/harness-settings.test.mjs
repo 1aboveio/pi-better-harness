@@ -396,3 +396,24 @@ test("Harness instructions start Off, allow editing while On, and keep the draft
   assert.equal(pages.length, 0);
   assert.equal(edits.length, 0);
 });
+
+test("the installed settings hub saves the OpenAI native compaction toggle in both directions", async () => {
+  const pi = eventApi();
+  let command;
+  pi.on = () => {};
+  pi.registerCommand = (_name, options) => { command = options.handler; };
+  harnessSettings(pi);
+  let page;
+  const errors = [];
+  const opening = command("", { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => [] },
+    ui: { notify: message => errors.push(message), custom: build => new Promise(resolve => { page = build({}, theme, {}, resolve); }) } });
+  for (const expected of [true, false]) {
+    selectRow(page, "OpenAI native compaction");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(JSON.parse(readFileSync(join(isolatedAgentDir, "settings.json"), "utf8")).piBetterHarness.openaiNativeCompaction, expected);
+    assert.match(page.render(80).join("\n"), expected ? /OpenAI native compaction\s+On/ : /OpenAI native compaction\s+Off/);
+  }
+  page.handleInput("\x1b");
+  await opening;
+  assert.deepEqual(errors, []);
+});
