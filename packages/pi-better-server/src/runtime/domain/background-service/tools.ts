@@ -1,4 +1,4 @@
-import { TASK_TIMEOUT_HELP } from "./managed-authority.js";
+import { JSON_PATH_ROOT_PATTERN, TASK_TIMEOUT_HELP } from "./managed-authority.js";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -38,7 +38,7 @@ export { formatLaunch } from "./output.js";
 type ToolRuntime = Pick<BackgroundTaskRuntime, "awaitFirstWatchCheck" | "resumeRunningTask" | "spawnTask" | "startWatchTask" | "stopTask">;
 
 const JsonPathSchema = Type.String({
-  pattern: "^\\$",
+  pattern: JSON_PATH_ROOT_PATTERN,
   description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
 });
 

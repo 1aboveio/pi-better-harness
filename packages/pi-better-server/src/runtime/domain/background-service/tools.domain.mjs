@@ -1,5 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/tools.ts. Do not edit directly.
-import { TASK_TIMEOUT_HELP } from "./managed-authority.domain.mjs";
+import { JSON_PATH_ROOT_PATTERN, TASK_TIMEOUT_HELP } from "./managed-authority.domain.mjs";
 import { Type } from "typebox";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth, wrapTextWithAnsi as piWrapTextWithAnsi, } from "@earendil-works/pi-tui";
 import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
@@ -16,7 +16,7 @@ import { inspectTaskProcess } from "./task-diagnostics.domain.mjs";
 import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.domain.mjs";
 export { formatLaunch } from "./output.domain.mjs";
 const JsonPathSchema = Type.String({
-    pattern: "^\\$",
+    pattern: JSON_PATH_ROOT_PATTERN,
     description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
 });
 const ConditionSchema = Type.Union([
