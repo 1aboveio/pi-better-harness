@@ -121,11 +121,12 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
         wait(/Run timeout\s+24 hours/);
-        select("Agents"); key("Enter");
+        select("Agent catalog"); key("Enter");
         const catalog = wait(/Agents\s+.*definitions/);
         assert.doesNotMatch(catalog, /Subagent settings/, "the settings pane closes before opening Agents");
         key("Escape");
-        wait(/^(?![\s\S]*Agents\s+.*definitions)/);
+        wait(/> Agent catalog\s+›/);
+        key("Escape"); wait(/^(?![\s\S]*Subagent settings)/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);

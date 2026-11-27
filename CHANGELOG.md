@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.59.0] - 2026-11-27
+
+### Changed
+
+- Browse Harness settings by function. Switches show their current value, page links show `›`, and prompt editors show **Edit…**. Narrow terminals display values below their labels.
+- Use **Supervisor mode** to turn supervision on or off. **Supervisor scenarios** lets you choose scenarios even while supervision is off.
+
+## [pi-better-subagents@0.40.0] - 2026-11-27
+
+### Changed
+
+- Group delegation, run limits and alerts, skills and agents, and session defaults in Subagent settings. Returning from **Agent catalog** restores focus to its row.
+- Reuse the settings snapshot while navigating and resizing the menu.
+
+## [pi-better-background-tasks@0.21.4] - 2026-11-27
+
+### Changed
+
+- Bundle the managed runtime that points users to **Supervisor scenarios** when CI observation recovery is disabled.
+
+## [pi-better-server@0.8.4] - 2026-11-27
+
+### Changed
+
+- Update the settings path in the CI observation recovery message and include the grouped Subagent settings in the hosted runtime.
+
 ## [pi-better-harness@0.58.0] - 2026-11-27
 
 ### Changed

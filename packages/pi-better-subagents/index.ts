@@ -4536,7 +4536,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     });
     const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
         if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
-            const next = await ctx.ui.custom<"agents" | undefined>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
+            const showSettings = (selected?: "agents") => ctx.ui.custom<"agents" | undefined>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
                 get: () => {
                     const settings = effectiveSettings();
                     const skills = activeSkills();
@@ -4563,8 +4563,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
-            }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));
-            if (next === "agents") await agentOperations.openCatalog(ctx);
+                settingsChanged: () => refreshBackgroundWorkNavigator(ctx),
+            }, () => tui.requestRender(), () => done(undefined), () => tui.terminal?.rows ?? 30, selected));
+            let next = await showSettings();
+            while (next === "agents") {
+                await agentOperations.openCatalog(ctx);
+                next = await showSettings(next);
+            }
         } else {
             const skills = activeSkills();
             const skillChoice = skills.mode === "inherit" ? "discovery"

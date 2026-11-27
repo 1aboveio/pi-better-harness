@@ -272,7 +272,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const reply = (status: string, text: string) => ({ content: [{ type: 'text', text }], details: { status } });
                     if (!recoveryEnabled()) {
                         invalidateRecovery();
-                        return reply('disabled', 'CI observation recovery is disabled or the daemon is draining. Check /harness-settings → Supervisor mode → CI observation recovery.');
+                        return reply('disabled', 'CI observation recovery is disabled or the daemon is draining. Check Supervisor mode and /harness-settings → Supervisor scenarios → CI observation recovery.');
                     }
                     const evidence = typeof record.params?.id === 'string' && ciEvidence(record.params.id);
                     if (!evidence || !recoveryInput) return reply('outside-scope', 'No supported watcher belongs to this active Outcome and branch.');

@@ -211,15 +211,17 @@ test("subagents contributes the standalone settings opener with shared session a
     const beforeAgents = entries.length;
     const openedBefore = pages.length;
     const eventsBefore = uiEvents.length;
-    keyBatches.push(atRow("Agents", "\r"));
+    keyBatches.push(atRow("Agent catalog", "\r"));
     await contribution.open(ctx);
-    assert.match(pages.at(-2), /Agents/);
-    assert.match(pages.at(-2), /Reset to defaults/);
+    assert.match(pages.at(-3), /Agent catalog/);
+    assert.match(pages.at(-3), /Reset to defaults/);
     assert.deepEqual(uiEvents.slice(eventsBefore), [
         `open:${openedBefore}`, `close:${openedBefore}`,
         `open:${openedBefore + 1}`, `close:${openedBefore + 1}`,
-    ], "the settings page closes before the catalog opens, and the catalog closes on its own");
-    assert.equal(pages.at(-1), hubCatalog, "the settings Agents action opens the same catalog as /agents");
+        `open:${openedBefore + 2}`, `close:${openedBefore + 2}`,
+    ], "closing the catalog returns to Subagent settings");
+    assert.equal(pages.at(-2), hubCatalog, "the settings link opens the same catalog as /agents");
+    assert.match(pages.at(-1), /> Agent catalog\s+›/);
     assert.equal(entries.length, beforeAgents, "opening the catalog from settings changes no saved session settings");
 
     ctx.mode = "rpc";

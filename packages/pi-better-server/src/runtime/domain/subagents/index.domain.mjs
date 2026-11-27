@@ -4442,7 +4442,7 @@ export default function (pi, managed) {
     });
     const openSettings = async (ctx) => {
         if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
-            const next = await ctx.ui.custom((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
+            const showSettings = (selected) => ctx.ui.custom((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
                 get: () => {
                     const settings = effectiveSettings();
                     const skills = activeSkills();
@@ -4469,9 +4469,13 @@ export default function (pi, managed) {
                 discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
-            }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));
-            if (next === "agents")
+                settingsChanged: () => refreshBackgroundWorkNavigator(ctx),
+            }, () => tui.requestRender(), () => done(undefined), () => tui.terminal?.rows ?? 30, selected));
+            let next = await showSettings();
+            while (next === "agents") {
                 await agentOperations.openCatalog(ctx);
+                next = await showSettings(next);
+            }
         }
         else {
             const skills = activeSkills();

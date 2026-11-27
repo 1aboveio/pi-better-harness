@@ -26,13 +26,14 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
         skillsMode: "inherit", skillsPaths: [], skillsSource: "default",
         ...skills,
     };
+    let reads = 0;
     let saved = 0;
     let closed = 0;
     let agents = 0;
     let saveFailure = false;
     let savedMaxMinutes = current.maxMinutes;
     const handlers = {
-        get: () => current,
+        get: () => { reads++; return current; },
         changeMode(mode) { current = { ...current, mode, modeSource: "session" }; },
         changeCap(maxConcurrent) { current = { ...current, maxConcurrent, capSource: "session" }; },
         changeTiming(key, minutes) {
@@ -84,12 +85,12 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     if (openAgents) handlers.openAgents = () => { agents++; };
     const page = createSubagentSettingsPage(theme, handlers, () => {}, () => { closed++; }, height);
     page.focused = true;
-    return { page, settings: () => current, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
+    return { page, reads: () => reads, settings: () => current, changeMode: handlers.changeMode, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
 }
 
 const LABELS = [
     "Delegation mode", "Concurrent subagents", "Git workspace", "Run timeout", "Tool-wait alert", "No-progress alert",
-    "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
+    "Skill exposure", "Selected skills", "Agent catalog", "Reset to defaults",
 ];
 
 test("run timeout accepts minutes or 24 hours, supports the existing zero value, and restores saved defaults", () => {
@@ -543,12 +544,34 @@ test("reset restores the saved skill default together with mode and cap", (t) =>
     assert.equal(h.settings().skillsSource, "config");
 });
 
+test("resizing and navigating the grouped menu reuse the settings snapshot", () => {
+    const h = harness();
+    for (let frame = 0; frame < 60; frame++) {
+        h.page.render(frame % 2 ? 24 : 98);
+        h.page.handleInput(frame % 2 ? "\x1b[A" : "\x1b[B");
+    }
+    assert.equal(h.reads(), 1);
+    h.page.handleInput(" ");
+    assert.equal(h.reads(), 3, "activation reads the effective value, then refreshes after saving");
+    assert.match(selectedText(h.page), /coordinator/);
+});
+
+test("external changes are visible after invalidation and are read before an edit", () => {
+    const h = harness();
+    h.changeMode("manual");
+    h.page.invalidate();
+    assert.match(selectedText(h.page), /manual/);
+    h.changeMode("adaptive");
+    h.page.handleInput(" ");
+    assert.match(selectedText(h.page), /coordinator/);
+});
+
 test("Agents row opens the catalog action without touching settings", () => {
     const h = harness();
     h.page.handleInput("\r");
     h.page.handleInput("\x13");
     const before = h.settings();
-    selectLabel(h.page, "Agents");
+    selectLabel(h.page, "Agent catalog");
     h.page.handleInput("\r");
     assert.equal(h.agents(), 1);
     assert.deepEqual(h.settings(), before, "opening Agents changes no settings");
@@ -562,7 +585,7 @@ test("settings follow task order and Reset restores saved defaults", () => {
     const h = harness();
     assert.deepEqual(rowLabels(h.page), LABELS);
     h.page.handleInput("\r");
-    selectLabel(h.page, "Agents");
+    selectLabel(h.page, "Agent catalog");
     h.page.handleInput("\r");
     assert.equal(h.agents(), 1);
     assert.equal(h.settings().mode, "coordinator", "Agents is not the reset action");
@@ -575,7 +598,7 @@ test("settings follow task order and Reset restores saved defaults", () => {
 test("Agents row stays inert when its handler is not provided", () => {
     const h = harness({ openAgents: false });
     const before = h.settings();
-    selectLabel(h.page, "Agents");
+    selectLabel(h.page, "Agent catalog");
     h.page.handleInput("\r");
     assert.deepEqual(h.settings(), before);
     assert.equal(h.saved(), 0);
