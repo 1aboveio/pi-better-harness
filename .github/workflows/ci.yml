@@ -28,6 +28,7 @@ jobs:
       windows: ${{ steps.areas.outputs.windows }}
       server: ${{ steps.areas.outputs.server }}
       extensions: ${{ steps.areas.outputs.extensions }}
+      resources: ${{ steps.areas.outputs.resources }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,20 +37,18 @@ jobs:
       - name: Select the lanes this change needs
         id: areas
         run: node scripts/ci-changed-areas.mjs
-  # Two groups run as separate jobs so a server change waits for the slower
-  # measurement only, not for both. Each group still gets its own clean VM, which
-  # is what makes a resource measurement meaningful.
+  # Keep timing measurements on separate VMs from other tests.
   shared-read-resources:
     name: shared-read-resources (${{ matrix.os }}, ${{ matrix.group }})
     needs: changes
-    if: needs.changes.outputs.server == 'true'
+    if: needs.changes.outputs.resources == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
-        group: [runtime, reads]
+        group: [runtime, standalone, reads]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -68,7 +67,7 @@ jobs:
           PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
         run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
       - name: Qualify packed standalone domains and cached offline restart
-        if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'standalone' && !cancelled() && steps.install.outcome == 'success' }}
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-standalone.test.ts
       - name: Prove real socket recipient backpressure recovery
@@ -96,8 +95,6 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
-  # Two groups so the Node 24 kernel proofs and the real-SDK replays do not wait
-  # for each other. Both keep the require-backend contract.
   node24-sandbox:
     name: node24-sandbox (${{ matrix.group }})
     needs: changes
@@ -107,7 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [confinement, sdk]
+        group: [confinement, sdk, launch]
     env:
       PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
     steps:
@@ -157,7 +154,7 @@ jobs:
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
       - name: Real SDK subagent launch and bootstrap fences
-        if: matrix.group == 'sdk'
+        if: matrix.group == 'launch'
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
 
@@ -223,7 +220,7 @@ jobs:
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/3)
+    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -232,7 +229,7 @@ jobs:
       fail-fast: false
       matrix:
         pi-version: ["1.2.0", "1.6.1"]
-        shard: [1, 2, 3]
+        partition: ["1/3", "2/3", "3/3", standalone, recovery]
     steps:
       - uses: actions/checkout@v4
 
@@ -259,10 +256,33 @@ jobs:
           test "$(codex --version)" = "codex-cli 0.159.2"
 
       - name: pi-better-server suite on Pi ${{ matrix.pi-version }}
+        working-directory: packages/pi-better-server
         env:
-          TEST_SHARD: ${{ matrix.shard }}/3
+          TEST_PARTITION: ${{ matrix.partition }}
           PI_SDK_VERSION: ${{ matrix.pi-version }}
-        run: bash packages/pi-better-server/scripts/test-on-pi.sh "$PI_SDK_VERSION" "$RUNNER_TEMP/pi-compat"
+        run: |
+          set -euo pipefail
+          # Keep the real-pack and slow recovery fixtures off the general shards.
+          standalone=test/runtime-standalone.test.ts
+          recovery=(test/runtime-result-supervision.test.ts test/startup-ensure.test.ts)
+          test -f "$standalone"
+          for file in "${recovery[@]}"; do test -f "$file"; done
+          prefix="$RUNNER_TEMP/pi-compat"
+          if [[ "$TEST_PARTITION" == standalone ]]; then
+            bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "$standalone"
+          elif [[ "$TEST_PARTITION" == recovery ]]; then
+            bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "${recovery[@]}"
+          else
+            tests=()
+            for file in test/*.test.ts; do
+              case "$file" in
+                "$standalone"|"${recovery[0]}"|"${recovery[1]}") ;;
+                *) tests+=("$file") ;;
+              esac
+            done
+            test "${#tests[@]}" -gt 0
+            TEST_SHARD="$TEST_PARTITION" bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "${tests[@]}"
+          fi
 
   # Verify extensions against each supported Pi 1.x baseline.
   pi-1x-compat-extensions:
@@ -384,7 +404,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [scripts-1, scripts-2, scripts-3, workspaces-1, workspaces-2, workspaces-3, meta-1]
+        lane: [scripts-1, scripts-2, scripts-3, scripts-4, workspaces-1, workspaces-2, workspaces-3, workspaces-4, workspaces-5, meta-1]
     steps:
       - uses: actions/checkout@v4
 
@@ -455,7 +475,7 @@ jobs:
         env:
           PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
           TEST_LANE: ${{ matrix.lane }}
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="${TEST_LANE#scripts-}/3" scripts/*.test.mjs
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="${TEST_LANE#scripts-}/4" scripts/*.test.mjs
 
       - name: Stage bundled components for isolated workspace tests
         if: startsWith(matrix.lane, 'workspaces-')
@@ -465,7 +485,8 @@ jobs:
         if: startsWith(matrix.lane, 'workspaces-')
         env:
           TEST_LANE: ${{ matrix.lane }}
-        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/3"
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
+        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/5"
 
       - name: Upload navigator golden-path evidence
         if: ${{ always() && startsWith(matrix.lane, 'scripts-') }}
@@ -567,7 +588,7 @@ jobs:
           node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
 
   server-tests:
-    name: server-tests (${{ matrix.shard }}/3)
+    name: server-tests (${{ matrix.shard }}/6)
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -575,7 +596,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
 
@@ -615,7 +636,7 @@ jobs:
         working-directory: packages/pi-better-server
         env:
           TEST_SHARD: ${{ matrix.shard }}
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/3" test/*.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/6" test/*.test.ts
 
   # Keep the existing required check name. A lane may report skipped only when the
   # selector said its area did not change; any other skip, failure or cancellation
@@ -668,9 +689,8 @@ jobs:
           check server-tests "$SERVER_RESULT" "$SERVER_AREA"
           exit "$fail"
 
-  # Five focused macOS lanes behind one required name. Running the same suites
-  # in a single job took eleven minutes, because every journey waited for the
-  # one before it.
+  # Share macOS runners across isolated functional suites so that resource
+  # measurements can start while the sandbox checks are running.
   macos-lifecycle:
     name: macos-sandbox (lifecycle)
     needs: changes
@@ -691,32 +711,12 @@ jobs:
         run: npm ci
       - name: Require the macOS Seatbelt backend
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-      - name: Prove runtime lifecycle with real processes and sockets
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/daemon-owner.test.ts
-
-  macos-cancellation:
-    name: macos-sandbox (cancellation)
-    needs: changes
-    if: needs.changes.outputs.sandbox == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 10
-    env:
-      # Turns "no backend, so skip" into a hard failure on a lane whose whole
-      # point is that backend.
-      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Require the macOS Seatbelt backend
-        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-      - name: Prove cancellation authority and crash recovery with real processes
+      - name: Prove lifecycle, cancellation and crash recovery
         working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
+        run: |
+          node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=3 \
+            test/runtime-lifecycle.test.ts test/daemon-owner.test.ts \
+            test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
   macos-subagent:
     name: macos-sandbox (subagent ${{ matrix.shard }}/2)
@@ -749,7 +749,7 @@ jobs:
         if: matrix.shard == 1
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/isolated-workspace.test.mjs
       - name: Accept tool loading and use permissions in a real SDK worker
-        if: matrix.shard == 1
+        if: matrix.shard == 2
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs
       - name: Prove subagent launch and bootstrap ownership on Node 24
         working-directory: packages/pi-better-server
@@ -774,6 +774,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Require the macOS Seatbelt backend
+        id: seatbelt
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5
@@ -799,54 +800,30 @@ jobs:
           npm test -w packages/pi-better-sandbox
       - name: Run local background-task confinement checks
         run: npm run test:sandbox -w packages/pi-better-background-tasks
-
-  macos-confined-harness:
-    name: macos-sandbox (confined harness)
-    needs: changes
-    if: needs.changes.outputs.sandbox == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 10
-    env:
-      # Turns "no backend, so skip" into a hard failure on a lane whose whole
-      # point is that backend.
-      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Require the macOS Seatbelt backend
-        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-      # The whole-session demonstration gates itself on a real backend, and the
-      # only job that runs the root suite is `ci`, which has none — so without
-      # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
-      # is already set for this lane, which turns that skip into a hard failure.
+      # Keep running the harness checks if a package check fails, as the
+      # independent job did. Both groups require the same Seatbelt preflight.
       - name: Run the whole-session harness demonstration
+        id: confined-harness
+        if: ${{ !cancelled() && steps.seatbelt.outcome == 'success' }}
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-session.e2e.test.mjs
       - name: Run macOS sandbox-exec confinement checks
+        if: ${{ !cancelled() && steps.confined-harness.outcome == 'success' }}
         run: npm run test:macos-sandbox -w packages/pi-better-subagents
 
-  # Required check name for the macOS sandbox proof. The work runs in two
-  # parallel halves so neither sits near a twenty-minute ceiling; this job only
-  # reduces their results, so the required name keeps reporting.
+  # Keep the required name while the sandbox jobs run in parallel.
   macos-sandbox:
     name: macos-sandbox
-    needs: [changes, macos-lifecycle, macos-cancellation, macos-subagent, macos-confined-packages, macos-confined-harness]
+    needs: [changes, macos-lifecycle, macos-subagent, macos-confined-packages]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require both macOS halves
+      - name: Require all macOS sandbox jobs
         env:
           AFFECTED: ${{ needs.changes.outputs.sandbox || 'true' }}
           LIFECYCLE_RESULT: ${{ needs.macos-lifecycle.result }}
-          CANCELLATION_RESULT: ${{ needs.macos-cancellation.result }}
           SUBAGENT_RESULT: ${{ needs.macos-subagent.result }}
           PACKAGES_RESULT: ${{ needs.macos-confined-packages.result }}
-          HARNESS_RESULT: ${{ needs.macos-confined-harness.result }}
         run: |
           set -uo pipefail
           fail=0
@@ -865,10 +842,8 @@ jobs:
             esac
           }
           check macos-lifecycle "$LIFECYCLE_RESULT"
-          check macos-cancellation "$CANCELLATION_RESULT"
           check macos-subagent "$SUBAGENT_RESULT"
           check macos-confined-packages "$PACKAGES_RESULT"
-          check macos-confined-harness "$HARNESS_RESULT"
           exit "$fail"
 
   linux-sandbox:

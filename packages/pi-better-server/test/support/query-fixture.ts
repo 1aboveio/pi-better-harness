@@ -32,16 +32,28 @@ function waitForStallHandler(worker: Worker, failure: (detail: string, cause?: u
   });
 }
 
-export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; logWatchdog?: (line: string) => void; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+export async function fixture({ startupWatchdogMs, ...options }: {
+  intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; startupWatchdogMs?: number;
+  workerUrl?: URL; logWatchdog?: (line: string) => void; onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   // A short relative directory lets constrained test runs keep the socket in
   // their workspace without exceeding the platform's Unix socket path limit.
   const transport = mkdtempSync(join(process.env.PI_TEST_QUERY_SOCKET_DIR ?? "/tmp", "query-socket-"));
-  const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
+  const executorOptions = { ...options,
     workerUrl: options.workerUrl ?? new URL("./slow-query-worker.mjs", import.meta.url),
-    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });
+    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } };
+  const executor = new WorkQueryExecutor(root, "query-instance", executorOptions);
   const worker = (executor as unknown as { worker: Worker }).worker;
+  if (startupWatchdogMs !== undefined) {
+    // Keep the cadence chosen at construction. The watchdog re-reads its
+    // failure threshold, so cold inventory need not use the wedge deadline.
+    const useStartupBudget = () => { executorOptions.watchdogMs = startupWatchdogMs; };
+    useStartupBudget();
+    worker.once("exit", useStartupBudget); // Restore it before the replacement starts.
+  }
+  const armWatchdog = () => { executorOptions.watchdogMs = options.watchdogMs; };
   const diagnostic = () => {
     const metrics = executor.metrics().executor;
     const observation = executor.observation();
@@ -158,5 +170,5 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
   after(close);
   server.listen(path); await once(server, "listening");
   const waitForSourceReady = () => querySourceReady(worker, () => executor.observation());
-  return { executor, client, stall, worker, bootstrapped, waitForSourceReady, close, root, path, sockets, peerErrors, peerActivity };
+  return { executor, client, stall, worker, bootstrapped, waitForSourceReady, armWatchdog, close, root, path, sockets, peerErrors, peerActivity };
 }
