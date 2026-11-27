@@ -210,6 +210,27 @@ test("automatic Goals retain the workflow's completion gates on creation and reo
   assert.equal(h.goal()?.command, undefined, "a new task with the same objective has its own binding");
 });
 
+for (const legacy of [true, false]) test(`reopening restores the original coordinator after a different coordinator owned the session (legacy: ${legacy})`, async t => {
+  const h = await fixture(t, { workflow: "available" });
+  await h.update({ outcome: accepted });
+  const original = h.goal()!;
+  const other = { ...currentWorkflowOwner(h.entries)!, name: "another-coordinator", path: join(h.ctx.cwd, "other.md") };
+  h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(other) });
+  await h.command("complete");
+  if (legacy) {
+    for (const entry of h.entries) if (entry.data?.goal) delete entry.data.goal.workflowBinding;
+  }
+  assert.deepEqual(currentWorkflowOwner(h.entries), other);
+  await h.update({ outcome: { ...accepted, status: "active" } });
+  assert.equal(h.goal()?.status, "active");
+  assert.deepEqual(h.goal()?.command, original.command);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  await h.command("complete");
+  await h.update({ outcome: { ...accepted, status: "active" } });
+  assert.deepEqual(h.goal()?.workflowBinding, original.workflowBinding);
+  assert.equal(h.goal()?.status, "active");
+});
+
 test("a failed workflow reopen keeps its binding across edits and reload", async t => {
   const h = await fixture(t, { workflow: "available" });
   await h.update({ outcome: accepted });

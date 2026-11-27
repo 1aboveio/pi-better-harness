@@ -15,6 +15,9 @@ export function shouldRestoreWorkObservation(event, session) {
     const file = session.getSessionFile();
     return file ? existsSync(file) : Boolean(session.getLeafId?.());
 }
+function unknownLaunchReceipt(cause) {
+    return Object.assign(new Error(`Launch receipt unavailable: ${cause.message}`, { cause }), { code: "LAUNCH_OUTCOME_UNKNOWN" });
+}
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {
     socket;
@@ -88,8 +91,12 @@ export class WorkClient {
             return Promise.reject(new Error("runtime-unhealthy: too many in-flight queries"));
         const id = `work-${++this.sequence}`;
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`runtime-unhealthy: ${type} timed out`)); }, 5000);
-            this.pending.set(id, { resolve, reject, timer });
+            const rejectPending = type === "runtime_launch_subagent" ? error => reject(unknownLaunchReceipt(error)) : reject;
+            const timer = setTimeout(() => {
+                this.pending.delete(id);
+                rejectPending(new Error(`runtime-unhealthy: ${type} timed out`));
+            }, 5000);
+            this.pending.set(id, { resolve, reject, rejectPending, timer });
             this.socket.write(JSON.stringify({ id, type, ...params }) + "\n");
         });
     }
@@ -195,7 +202,7 @@ export class WorkClient {
         this.recoveryTimer = undefined;
         for (const request of this.pending.values()) {
             clearTimeout(request.timer);
-            request.reject(error);
+            request.rejectPending(error);
         }
         this.pending.clear();
         this.socket.destroy();
