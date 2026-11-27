@@ -96,9 +96,9 @@ test("valid empty shards succeed without running scripts but still validate work
 test("all CI shards run a distinct subagent partition through npm", (t) => {
   const root = fixture(t);
   workspace(root, "pi-better-server", {});
-  workspace(root, "pi-better-subagents", { scripts: { test: "node record.cjs" } });
+  workspace(root, "pi-better-subagents", { scripts: { test: "node record.cjs", "test:shard": "node record.cjs" } });
   writeFileSync(join(root, "packages/pi-better-subagents/record.cjs"), "console.log('partition=' + process.argv.slice(2).join(','))");
-  for (const [args, expected] of [[[], ""], [["--shard", "1/2"], "--test-shard=1/2"], [["--shard", "2/2"], "--test-shard=2/2"]]) {
+  for (const [args, expected] of [[[], ""], [["--shard", "1/2"], "--test-shard=1/2,tests/*.test.mjs"], [["--shard", "2/2"], "--test-shard=2/2,tests/*.test.mjs"]]) {
     const result = run(root, args);
     assert.equal(result.status, 0, result.stderr);
     assert.ok(result.stdout.trimEnd().endsWith(`partition=${expected}`));
