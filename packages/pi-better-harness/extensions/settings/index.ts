@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentInstructions, manageInstructions, validateInstructionsPrompt } from "../../lib/instructions.mjs";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
-import { openSupervisorSettings } from "./supervisor.ts";
+import { openSupervisorScenarios, readSupervisorSettings, setSupervisorEnabled } from "./supervisor.ts";
 import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
 import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from "pi-better-background-tasks/src/shared-callback-batcher.ts";
@@ -40,26 +40,37 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
         try { prompt = currentInstructions(agentDir); }
         catch (error) { readError = error instanceof Error ? error : new Error(String(error)); }
         const state = readError ? "Unavailable" : prompt === undefined ? "Off" : "On";
+        let supervisor: ReturnType<typeof readSupervisorSettings> | undefined;
+        let supervisorError: unknown;
+        try { supervisor = readSupervisorSettings(); }
+        catch (error) { supervisorError = error; }
         try {
           selected = await chooseHarnessSetting(ctx, links, selected, {
             get: readSettings,
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
           }, registry.controls(), view, [
-            { id: "supervisor:open", label: "Supervisor mode", currentValue: "Open", values: ["Open"],
-              description: "Choose the supervision scenarios shared by this agent directory." },
-            { id: "instructions:toggle", label: "Harness instructions", currentValue: state, values: [state],
+            { id: "supervisor:toggle", label: "Supervisor mode", kind: "toggle",
+              value: supervisor ? (supervisor.enabled ? "On" : "Off") : "Unavailable",
+              description: "Run the selected scenarios for sessions sharing this agent directory. Turning the mode off keeps your selections." },
+            { id: "supervisor:scenarios", label: "Supervisor scenarios", kind: "page",
+              description: "Choose which scenarios run when Supervisor mode is on." },
+            { id: "instructions:toggle", label: "Harness instructions", kind: "toggle", value: state,
               description: "Toggle the global APPEND_SYSTEM.md block. Applies on startup or /reload." },
-            ...(prompt === undefined ? [] : [{ id: "instructions:edit", label: "Instructions prompt", currentValue: "Edit",
-              values: ["Edit"], description: "Edit the Markdown included in the Harness block." }]),
+            ...(prompt === undefined ? [] : [{ id: "instructions:edit", label: "Instructions prompt", kind: "editor" as const,
+              description: "Edit the Markdown included in the Harness block." }]),
           ]);
         } catch (error) {
           ctx.ui.notify(`Settings unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
           return;
         }
         if (!selected) return;
-        if (selected === "supervisor:open") {
-          try { await openSupervisorSettings(ctx); }
+        if (selected.startsWith("supervisor:")) {
+          try {
+            if (!supervisor) throw supervisorError;
+            if (selected === "supervisor:toggle") setSupervisorEnabled(!supervisor.enabled);
+            else await openSupervisorScenarios(ctx);
+          }
           catch (error) { ctx.ui.notify(`Supervisor mode: ${error instanceof Error ? error.message : String(error)}`, "error"); }
           continue;
         }

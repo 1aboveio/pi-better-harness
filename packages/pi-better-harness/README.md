@@ -214,14 +214,14 @@ pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 
 ## Harness Settings
 
-The bundled harness provides `/harness-settings`, using Pi's native settings
-list. Work planning comes first, followed by delegation and sandbox access,
-background waits and completion delivery, then display settings. It opens
-the settings screens of loaded Sandbox and Subagents
-packages without duplicating their configuration, plus the **Agent catalog** shortcut
-to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
-`/goal settings` remain available in standalone installations.
-Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
+Open `/harness-settings` to browse settings by function. Use the up and down
+keys to move between settings. Each row shows its current value, a `›` for a
+page, or **Edit…** for a prompt editor. Enter or Space activates the focused
+row. Escape returns from a child page to the row that opened it.
+
+**Agents & permissions** includes the settings pages of loaded Sandbox and
+Subagents packages and the **Agent catalog** shortcut. Standalone installations
+also provide `/sandbox`, `/subagents settings`, `/agents`, and `/goal settings`.
 
 **Navigator layout** selects **Flat list** (the default) or **Tree**. Flatten keeps the Subagents
 and Background Tasks groups and includes tasks launched by subagents. Tree puts
@@ -333,7 +333,7 @@ pi -e ./packages/pi-better-harness/extensions/settings/index.ts
 
 ### Agent Supervisor
 
-Open **Supervisor mode** in `/harness-settings`. Turn it on and select the scenarios to run. First use starts with an empty selection. Settings apply to sessions sharing the Pi agent directory. Turning the mode off preserves the selection and lets existing tasks continue.
+In `/harness-settings`, use **Supervisor scenarios** to choose which scenarios to run. **Supervisor mode** turns that selection on or off. You can edit the selection while the mode is off. First use starts with an empty selection. Settings apply to sessions sharing the Pi agent directory. Turning the mode off preserves the selection and lets existing tasks continue.
 
 | Scenario | What the owner receives |
 | --- | --- |

@@ -42,23 +42,43 @@ export function scenarioRevision(scenario: string) {
   if (enabledScenarios().includes(scenario)) return cache?.revision;
 }
 
-export async function openSupervisorSettings(ctx: Pick<ExtensionCommandContext, "ui">): Promise<void> {
+export function readSupervisorSettings() {
+  return decode(readHarnessSetting(key));
+}
+
+export function setSupervisorEnabled(enabled: boolean) {
+  updateHarnessSetting(key, raw => {
+    const current = decode(raw);
+    return current.enabled === enabled ? raw : { ...current, enabled, revision: randomUUID() };
+  });
+}
+
+export async function openSupervisorScenarios(ctx: Pick<ExtensionCommandContext, "ui">): Promise<void> {
+  const { createSettingsMenu } = await import("./menu.ts");
+  let selected: string | undefined;
   while (true) {
-    const { enabled, scenarios } = decode(readHarnessSetting(key));
-    const mode = enabled ? "Turn Supervisor mode off" : "Turn Supervisor mode on";
-    const rows = [...options].map(([id, label]) => ({ id, selected: scenarios.includes(id), label: `[${scenarios.includes(id) ? "x" : " "}] ${label}` }));
-    const choices = enabled ? [mode, ...rows.map(row => row.label)] : [mode];
-    const choice = await ctx.ui.select("Supervisor mode", choices);
-    const row = rows.find(item => item.label === choice);
+    const { enabled, scenarios } = readSupervisorSettings();
+    const choice = await ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => createSettingsMenu({
+      title: "Supervisor scenarios", theme, selected, height: () => tui.terminal?.rows ?? 32,
+      sections: [{
+        title: enabled ? "Supervisor mode is on" : "Supervisor mode is off",
+        items: [...options].map(([id, label]) => ({
+          id, label, kind: "toggle", value: scenarios.includes(id) ? "[x]" : "[ ]",
+          description: enabled ? "Checked scenarios run for sessions sharing this agent directory."
+            : "Checked scenarios will run when you turn on Supervisor mode.",
+        })),
+      }],
+      activate: item => done(item.id),
+      back: () => done(undefined),
+    }));
     if (choice === undefined) return;
+    selected = choice;
+    const include = !scenarios.includes(choice);
     updateHarnessSetting(key, raw => {
       const current = decode(raw);
-      if (choice === mode) return current.enabled === !enabled ? raw : { ...current, enabled: !enabled, revision: randomUUID() };
-      if (!current.enabled || !row) return raw;
-      const updated = new Set(current.scenarios);
-      if (row.selected) updated.delete(row.id);
-      else updated.add(row.id);
-      return updated.size === current.scenarios.length ? raw : { ...current, scenarios: [...updated], revision: randomUUID() };
+      if (current.scenarios.includes(choice) === include) return raw;
+      const next = include ? [...current.scenarios, choice] : current.scenarios.filter(id => id !== choice);
+      return { ...current, scenarios: next, revision: randomUUID() };
     });
   }
 }

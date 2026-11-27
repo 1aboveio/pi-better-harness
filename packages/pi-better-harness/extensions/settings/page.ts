@@ -1,6 +1,7 @@
-import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Container, SettingsList, Spacer, Text, getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, matchesKey, type SettingItem } from "@earendil-works/pi-tui";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { controlCopy, linkCopy } from "./copy.ts";
+import { createSettingsMenu, type MenuItem, type MenuSection } from "./menu.ts";
 import type { SettingsControl, SettingsLink } from "./registry.ts";
 
 export interface CallbackSettingsControl {
@@ -17,123 +18,112 @@ const callbackDescription = (source: "session" | "default") => [
   "Changes apply to this session. Ctrl+S saves your default.",
 ].join("\n");
 
-// Keep each package page beside the controls used for the same task.
-const taskOrder = [
-  "setting:goal-auto-start", "setting:dynamic-workflow", "setting:outcome-todo-ledger",
-  "link:subagents", "link:agents", "link:sandbox",
-  "setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID,
-  "setting:navigator-view", "setting:navigator-sticky",
-  "setting:tool-output", "setting:tool-animation", "setting:session-recap", "link:recap-prompt",
+const groups = [
+  { title: "Goals & workflows", ids: ["setting:goal-auto-start", "setting:dynamic-workflow", "setting:outcome-todo", "setting:outcome-todo-ledger", "link:goal"] },
+  { title: "Agents & permissions", ids: ["link:subagents", "link:agents", "link:sandbox"] },
+  { title: "Background work", ids: ["setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID] },
+  { title: "Work display", ids: ["setting:navigator-view", "setting:navigator-sticky", "setting:outcome-todo-display", "setting:tool-output", "setting:tool-animation"] },
+  { title: "Supervision", ids: ["supervisor:toggle", "supervisor:scenarios"] },
+  { title: "Recaps & instructions", ids: ["setting:session-recap", "link:recap-prompt", "instructions:toggle", "instructions:edit"] },
 ];
-const position = new Map(taskOrder.map((id, index) => [id, index]));
+
+function groupSettings(items: MenuItem[]): MenuSection[] {
+  const remaining = new Map(items.map(item => [item.id, item]));
+  const sections = groups.map(({ title, ids }) => ({
+    title, items: ids.flatMap(id => {
+      const item = remaining.get(id);
+      remaining.delete(id);
+      return item ? [item] : [];
+    }),
+  }));
+  sections.push({ title: "Extensions", items: [...remaining.values()] });
+  return sections.filter(section => section.items.length);
+}
 
 function presentControl(control: SettingsControl) {
   const copy = controlCopy.get(control.id);
-  const valueLabels = copy?.values;
-  const display = (raw: string) => valueLabels && Object.hasOwn(valueLabels, raw) ? valueLabels[raw]! : raw;
+  const labels = copy?.values;
+  const display = (raw: string) => labels && Object.hasOwn(labels, raw) ? labels[raw]! : raw;
+  const description = (typeof control.description === "string" && control.description.trim()) || copy?.description;
   const values = control.values.map(display);
-  const description = typeof control.description === "string" && control.description.trim()
-    ? control.description : copy?.description;
-  const item: SettingItem = {
+  const raw = control.get();
+  const item: MenuItem = {
     id: `setting:${control.id}`,
     label: copy?.label ?? control.label,
-    currentValue: display(control.get()),
+    kind: values.length === 2 && values.includes("On") && values.includes("Off") ? "toggle" : "choice",
+    value: display(raw),
     description: [description ?? `Available values are ${values.join(", ")}.`, copy && "Saved as a user default."].filter(Boolean).join("\n"),
-    values,
   };
-  return { control, item, display, values };
+  return { control, item, raw, display };
 }
 
-function presentLink(link: SettingsLink): SettingItem {
+function presentLink(link: SettingsLink): MenuItem {
   const copy = linkCopy.get(link.id);
-  const description = typeof link.description === "string" && link.description.trim()
-    ? link.description : copy?.description;
-  const action = "Open";
   return {
     id: `link:${link.id}`,
     label: copy?.label ?? link.label,
-    currentValue: action,
-    description: [description, `You can also run ${link.command}.`].filter(Boolean).join("\n"),
-    values: [action],
+    kind: link.id === "recap-prompt" ? "editor" : "page",
+    description: [(typeof link.description === "string" && link.description.trim()) || copy?.description, `You can also run ${link.command}.`].filter(Boolean).join("\n"),
   };
 }
 
-export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = [], navigatorView?: SettingsControl, actions: SettingItem[] = []): Promise<string | undefined> {
-  return ctx.ui.custom((tui, theme: Theme, _kb, done: (id?: string) => void) => {
+export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = [], navigatorView?: SettingsControl, actions: MenuItem[] = []): Promise<string | undefined> {
+  return ctx.ui.custom((tui, theme, _kb, done: (id?: string) => void) => {
     const currentCallback = callbacks?.get();
     let callbackMode = currentCallback?.mode ?? "hold";
-    const callbackSetting: SettingItem | undefined = currentCallback && {
+    const callbackSetting: MenuItem | undefined = currentCallback && {
       id: CALLBACK_SETTING_ID,
       label: "Completion delivery",
-      currentValue: callbackLabels[callbackMode],
+      kind: "choice",
+      value: callbackLabels[callbackMode],
       description: callbackDescription(currentCallback.source),
-      values: Object.values(callbackLabels),
     };
-    const allControls = navigatorView ? [...controls, navigatorView] : [...controls];
-    const entries = allControls.map(presentControl);
-    const items = [
+    const entries = (navigatorView ? [...controls, navigatorView] : controls).map(presentControl);
+    const sections = groupSettings([
       ...(callbackSetting ? [callbackSetting] : []),
       ...entries.map(({ item }) => item),
       ...links.map(presentLink),
       ...actions,
-    ].sort((a, b) => (position.get(a.id) ?? position.size) - (position.get(b.id) ?? position.size));
-    const feedback = new Text("", 2, 0);
+    ]);
     let changing = false;
     const report = (message: string, error = false) => {
-      feedback.setText(theme.fg(error ? "error" : "text", message));
+      menu.report(message, error);
       tui.requestRender?.();
     };
-    const list = new SettingsList(items, 10, {
-      label: (text, active) => theme.fg(active ? "accent" : "text", text),
-      value: (text, active) => active ? theme.inverse(text) : theme.fg("muted", text),
-      description: text => theme.fg("text", text), cursor: "> ", hint: text => theme.fg("dim", text),
-    }, (id, value) => {
-      const entry = entries.find(({ item }) => item.id === id);
-      if (entry) {
-        const previous = entry.display(entry.control.get());
-        const next = entry.control.values[entry.values.indexOf(value)]!;
+    const menu = createSettingsMenu({
+      title: "Harness settings", theme, sections, selected, height: () => tui.terminal?.rows ?? 32,
+      back: () => done(),
+      activate(item) {
+        if (item === callbackSetting && callbacks) {
+          try {
+            const next = callbackMode === "hold" ? "steer" : "hold";
+            callbacks.change(next);
+            callbackMode = next;
+            item.value = callbackLabels[next];
+            item.description = callbackDescription("session");
+            report("Session setting saved.");
+          } catch (error) { report(error instanceof Error ? error.message : String(error), true); }
+          return;
+        }
+        const entry = entries.find(entry => entry.item === item);
+        if (!entry) { done(item.id); return; }
+        const { control, display } = entry;
         changing = true;
         report("Saving setting...");
-        Promise.resolve().then(() => entry.control.change(next, ctx)).then(() => {
-          list.updateValue(id, entry.display(entry.control.get()));
+        Promise.resolve().then(() => {
+          const index = control.values.indexOf(entry.raw);
+          return control.change(control.values[(index + 1) % control.values.length]!, ctx);
+        }).then(() => {
+          entry.raw = control.get();
+          item.value = display(entry.raw);
           report("Setting saved.");
-        }).catch(error => {
-          list.updateValue(id, previous);
-          report(error instanceof Error ? error.message : String(error), true);
-        }).finally(() => { changing = false; tui.requestRender?.(); });
-        return;
-      }
-      if (id !== CALLBACK_SETTING_ID || !callbacks || !callbackSetting) { done(id); return; }
-      try {
-        const nextMode = value === callbackLabels.steer ? "steer" : "hold";
-        callbacks.change(nextMode);
-        callbackMode = nextMode;
-        callbackSetting.description = callbackDescription("session");
-        report("Session setting saved.");
-      } catch (error) {
-        list.updateValue(CALLBACK_SETTING_ID, callbackLabels[callbackMode]);
-        report(error instanceof Error ? error.message : String(error), true);
-      }
-    }, () => done(), { enableSearch: false });
-
-    const index = selected ? items.findIndex(item => item.id === selected) : 0;
-    if (index > 0) {
-      // SettingsList has no public selection setter. Restore synchronously using
-      // default navigation, then return the untouched user bindings before input.
-      const bindings = getKeybindings();
-      try {
-        setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
-        for (let i = 0; i < index; i++) list.handleInput("\x1b[B");
-      } finally { setKeybindings(bindings); }
-    }
-    const page = new Container();
-    page.addChild(new Text(theme.bold(theme.fg("text", "Harness settings")), 0, 0));
-    page.addChild(new Spacer(1));
-    page.addChild(list);
-    page.addChild(feedback);
+        }).catch(error => report(error instanceof Error ? error.message : String(error), true))
+          .finally(() => { changing = false; });
+      },
+    });
     return {
-      render: (width: number) => page.render(width),
-      invalidate: () => page.invalidate(),
+      render: menu.render,
+      invalidate: menu.invalidate,
       handleInput(data: string) {
         if (changing) return;
         if (callbacks && matchesKey(data, "ctrl+s")) {
@@ -141,7 +131,7 @@ export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: 
           catch (error) { report(error instanceof Error ? error.message : String(error), true); }
           return;
         }
-        list.handleInput(data);
+        menu.handleInput(data);
       },
     };
   });

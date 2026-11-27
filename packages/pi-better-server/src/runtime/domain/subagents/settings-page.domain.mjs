@@ -5,16 +5,16 @@ import { DELEGATION_MODES } from "./delegation.domain.mjs";
 import { createSkillPicker } from "./skill-picker.domain.mjs";
 import { isTimingMinutes, validatedTimingMinutes } from "./timing.domain.mjs";
 const rows = [
-    { kind: "mode", label: "Delegation mode" },
-    { kind: "cap", label: "Concurrent subagents" },
-    { kind: "workspace", label: "Git workspace" },
-    { kind: "timeout", label: "Run timeout" },
-    { kind: "toolWait", label: "Tool-wait alert" },
-    { kind: "stuck", label: "No-progress alert" },
-    { kind: "skills", label: "Skill exposure" },
-    { kind: "choose", label: "Selected skills" },
-    { kind: "agents", label: "Agents" },
-    { kind: "reset", label: "Reset to defaults" },
+    { section: "Delegation", kind: "mode", label: "Delegation mode" },
+    { section: "Delegation", kind: "cap", label: "Concurrent subagents" },
+    { section: "Delegation", kind: "workspace", label: "Git workspace" },
+    { section: "Run limits & alerts", kind: "timeout", label: "Run timeout" },
+    { section: "Run limits & alerts", kind: "toolWait", label: "Tool-wait alert" },
+    { section: "Run limits & alerts", kind: "stuck", label: "No-progress alert" },
+    { section: "Skills & agents", kind: "skills", label: "Skill exposure" },
+    { section: "Skills & agents", kind: "choose", label: "Selected skills" },
+    { section: "Skills & agents", kind: "agents", label: "Agent catalog" },
+    { section: "Session defaults", kind: "reset", label: "Reset to defaults" },
 ];
 const labelWidth = Math.max(...rows.map(({ label }) => Tui.visibleWidth(label)));
 const SKILL_MODES = [
@@ -55,9 +55,9 @@ function settingValue(kind, s) {
         case "toolWait": return s.toolWaitMinutes === 0 ? "Off" : `${s.toolWaitMinutes} min`;
         case "stuck": return s.stuckMinutes === 0 ? "Off" : `${s.stuckMinutes} min`;
         case "skills": return skillLabel(s.skillsMode);
-        case "choose": return s.skillsMode === "explicit" ? `${s.skillsPaths.length} checked` : "Choose…";
-        case "agents": return "Open";
-        case "reset": return "Restore";
+        case "choose": return s.skillsMode === "explicit" ? `${s.skillsPaths.length} checked ›` : "›";
+        case "agents": return "›";
+        case "reset": return "";
     }
 }
 function description(kind, s) {
@@ -102,10 +102,11 @@ function shortcuts(kind, editing) {
         actions.push(`${cancel} to ${editing ? "cancel" : "go back"}`);
     return actions.filter(Boolean).join(" · ");
 }
-export function createSubagentSettingsPage(theme, handlers, requestRender, close, getHeight = () => process.stdout.rows ?? 30) {
+export function createSubagentSettingsPage(theme, handlers, requestRender, close, getHeight = () => process.stdout.rows ?? 30, selected) {
     const input = new Tui.Input();
+    let settings = handlers.get();
     let focused = false;
-    let row = 0;
+    let row = Math.max(0, rows.findIndex(entry => entry.kind === selected));
     let editing;
     let picker;
     let rememberedSkillPaths;
@@ -117,6 +118,11 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         error = failed;
         requestRender();
     }
+    function reportChange(text) {
+        settings = handlers.get();
+        handlers.settingsChanged?.();
+        report(text);
+    }
     function startEditing(target, value) {
         editing = target;
         input.setValue(value);
@@ -127,7 +133,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
     function finishEditing(text) {
         input.focused = false;
         editing = undefined;
-        report(text);
+        reportChange(text);
     }
     function openSkillPicker(initial, previousMode) {
         picker = createSkillPicker({
@@ -142,12 +148,12 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                     if (paths.length === 0) {
                         handlers.changeSkills("none", []);
                         rememberedSkillPaths = [];
-                        report("No skills checked. Skill exposure set to No skill catalog.");
+                        reportChange("No skills checked. Skill exposure set to No skill catalog.");
                         return { ok: true, message: "No skill catalog selected." };
                     }
                     handlers.changeSkills("explicit", paths);
                     rememberedSkillPaths = [...paths];
-                    report(`${paths.length} skill${paths.length === 1 ? "" : "s"} selected.`);
+                    reportChange(`${paths.length} skill${paths.length === 1 ? "" : "s"} selected.`);
                     return { ok: true, message: `${paths.length} selected.` };
                 }
                 catch (cause) {
@@ -164,16 +170,16 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         picker.focused = focused;
         requestRender();
     }
-    function action(settings, selected, key) {
+    function action(selected, key) {
         try {
             if (selected.kind === "workspace") {
                 handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
-                report("Session workspace updated.");
+                reportChange("Session workspace updated.");
             }
             else if (selected.kind === "mode") {
                 const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(settings.mode) + 1) % DELEGATION_MODES.length];
                 handlers.changeMode(next);
-                report("Session mode updated.");
+                reportChange("Session mode updated.");
             }
             else if (selected.kind === "cap") {
                 startEditing({ kind: "cap" }, String(settings.maxConcurrent));
@@ -187,7 +193,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             else if (selected.kind === "timeout") {
                 if (key === " ") {
                     handlers.changeTiming("maxMinutes", 0);
-                    report("Run timeout set to 24 hours.");
+                    reportChange("Run timeout set to 24 hours.");
                 }
                 else {
                     startEditing(selected, settings.maxMinutes === 0 || settings.maxMinutes >= 1440 ? MAX_TIMEOUT : String(settings.maxMinutes));
@@ -198,7 +204,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                     rememberedSkillPaths = [...settings.skillsPaths];
                 const next = cycleSkillMode(settings.skillsMode);
                 handlers.changeSkills(next, []);
-                report(`Skill exposure: ${skillLabel(next).toLowerCase()}.`);
+                reportChange(`Skill exposure: ${skillLabel(next).toLowerCase()}.`);
             }
             else if (selected.kind === "choose") {
                 openSkillPicker(settings.skillsMode === "explicit" ? settings.skillsPaths : rememberedSkillPaths ?? [], settings.skillsMode);
@@ -210,7 +216,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             else {
                 handlers.reset();
                 rememberedSkillPaths = undefined;
-                report("Session settings reset to saved defaults.");
+                reportChange("Session settings reset to saved defaults.");
             }
         }
         catch (cause) {
@@ -269,7 +275,6 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                 requestRender();
                 return;
             }
-            const settings = handlers.get();
             if (editing) {
                 input.handleInput(data);
                 requestRender();
@@ -284,20 +289,21 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                 message = "";
             }
             else if (keys.matches(data, "tui.select.confirm") || data === " ")
-                action(settings, selected, data);
+                action(selected, data);
             else if (Tui.matchesKey(data, "ctrl+s")) {
                 const result = handlers.save();
                 if (result.ok) {
                     rememberedSkillPaths = settings.skillsMode === "explicit" ? [...settings.skillsPaths] : undefined;
+                    reportChange(result.message);
                 }
-                report(result.message, !result.ok);
+                else
+                    report(result.message, true);
             }
             requestRender();
         },
         render(width) {
             if (picker)
                 return picker.render(width);
-            const settings = handlers.get();
             const w = Math.max(1, Math.floor(width));
             const height = Math.max(1, Math.floor(getHeight()));
             const valueColumn = 2 + labelWidth + 2;
@@ -305,17 +311,26 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             let selectedStart = 0;
             let selectedEnd = 0;
             for (const [index, entry] of rows.entries()) {
+                const startsSection = rows[index - 1]?.section !== entry.section;
+                if (startsSection) {
+                    if (index > 0)
+                        body.push("");
+                    body.push(theme.fg("muted", theme.bold(entry.section)));
+                }
                 const active = index === row;
                 const value = settingValue(entry.kind, settings);
                 const stacked = valueColumn + Math.max(Tui.visibleWidth(value), editing?.kind === entry.kind ? 8 : 0) > w;
                 const column = stacked ? Math.min(4, Math.max(0, w - 1)) : valueColumn;
                 const valueText = editing?.kind === entry.kind
                     ? input.render(Math.max(1, w - column))[0] ?? ""
-                    : active ? theme.inverse(value) : theme.fg("muted", value);
+                    : active && entry.kind !== "choose" && entry.kind !== "agents" ? theme.inverse(value) : theme.fg(active ? "accent" : "muted", value);
                 const label = (active ? "> " : "  ") + theme.fg(active ? "accent" : "text", entry.label);
                 if (active)
                     selectedStart = body.length;
-                if (stacked) {
+                if (!value) {
+                    body.push(label);
+                }
+                else if (stacked) {
                     const valueLines = Tui.wrapTextWithAnsi(valueText, Math.max(1, w - column));
                     body.push(label, ...valueLines.map(line => " ".repeat(column) + line));
                 }

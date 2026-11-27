@@ -58,12 +58,16 @@ test("discovery rejects malformed links and sorts valid contributions", () => {
   registry.dispose();
 });
 
-test("native settings list selects package links without opening or changing them itself", async () => {
+test("grouped settings menu selects package links without opening or changing them itself", async () => {
   let page;
   let opened = false;
   const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
   const selected = chooseHarnessSetting(ctx, [{ id: "sandbox", label: "Sandbox", command: "/sandbox", open() { opened = true; } }], "link:sandbox");
-  assert.match(page.render(80).join("\n"), /Sandbox settings\s+Open/);
+  assert.match(page.render(80).join("\n"), /Sandbox settings\s+›/);
+  const narrow = page.render(24);
+  assert.ok(narrow.every(line => visibleWidth(line) <= 24));
+  assert.match(narrow.join("\n"), /Agents & permissions\s+> Sandbox settings\s+›/);
+  assert.match(narrow.join(" "), /to open/);
   assert.match(page.render(80).join("\n"), /You can also run \/sandbox/);
   page.handleInput("\r");
   assert.equal(await selected, "link:sandbox");
@@ -113,7 +117,7 @@ test("the selected setting explains its effect at narrow and wide terminal width
   assert.match(layout, /Tree nests tasks under their\s+agent/);
   assert.doesNotMatch(layout, /Ctrl\+S/);
   page.handleInput("\x1b[B");
-  assert.match(page.render(100).join("\n"), /Subagent settings\s+Open/);
+  assert.match(page.render(100).join("\n"), /Subagent settings\s+›/);
   assert.match(page.render(100).join("\n"), /You can also run \/subagents settings/);
   page.handleInput("\x1b");
   await opening;
@@ -137,6 +141,7 @@ test("keyboard order groups controls with their package pages and keeps third-pa
     "Navigator layout", "Pin work panels", "tool-output", "Tool progress animation",
     "extra-control", "extra-page",
   ];
+  assert.match(page.render(80).join("\n"), /Goals & workflows\n> Auto-start Goals/);
   for (const label of expected) {
     assert.ok(page.render(80).some(line => line.startsWith(`> ${label}  `)), label);
     page.handleInput("\x1b[B");
