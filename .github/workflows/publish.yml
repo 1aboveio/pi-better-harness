@@ -18,40 +18,46 @@ on:
           - pi-better-harness
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: npm-publish-${{ inputs.package }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: publish ${{ inputs.package }}
-    # Same image as CI: ubuntu-26.04 fails the confinement proofs that
-    # `npm run verify` runs, so a release must not be the first to find out.
+  verify:
+    name: verify ${{ matrix.suite }} (${{ matrix.shard }}/3)
+    # Match the CI image used for the Linux confinement tests.
     runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
-    environment: npm-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [scripts, workspaces, server]
+        shard: [1, 2, 3]
+    env:
+      RELEASE_SHARD: ${{ matrix.shard }}/3
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - &checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - &setup-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.1
           registry-url: https://registry.npmjs.org
 
-      - name: Install pinned npm with trusted publishing support
-        run: npm install --global npm@11.19.0
-
-      - name: Show toolchain
+      - &install-npm
+        name: Install pinned npm with trusted publishing support
         run: |
+          npm install --global npm@11.19.0
           node --version
           npm --version
 
-      - name: Install dependencies
+      - &install-dependencies
+        name: Install dependencies
         # The lockfile records registry tarball URLs from registry.npmmirror.com.
         # npm 11 defaults allow-remote=none, so allow committed lockfile URLs
         # during install while publish still targets registry.npmjs.org below.
@@ -72,11 +78,45 @@ jobs:
       - name: Require the Linux Bubblewrap backend
         run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
-      - name: Verify workspace
-        run: npm run verify
+      - name: Check catalog and types
+        if: matrix.suite == 'scripts' && matrix.shard == 3
+        run: |
+          npm run catalog:check
+          npm run typecheck
 
-      - name: Verify transcript in real Pi TUI
-        run: npm run test:tui-e2e
+      # The root glob also runs the three real Pi tests in test:tui-e2e.
+      - name: Root script tests including real Pi TUI
+        if: matrix.suite == 'scripts'
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="$RELEASE_SHARD" scripts/*.test.mjs
+
+      - name: Workspace tests
+        if: matrix.suite == 'workspaces'
+        run: |
+          node scripts/stage-harness-dependencies.mjs
+          node scripts/test-ci-workspaces.mjs --shard "$RELEASE_SHARD"
+
+      - name: Server tests
+        if: matrix.suite == 'server'
+        working-directory: packages/pi-better-server
+        run: |
+          npm run pretest
+          node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$RELEASE_SHARD" test/*.test.ts
+
+  publish:
+    name: publish ${{ inputs.package }}
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: npm-publish
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - *checkout
+      - *setup-node
+      - *install-npm
+      - *install-dependencies
 
       - name: Resolve package
         id: package
