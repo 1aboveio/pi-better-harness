@@ -65,6 +65,7 @@ const AREA_PATTERNS = {
   ],
   windows: [
     "packages/pi-better-server/scripts/private-runtime/**",
+    "packages/pi-better-server/src/runtime/client.ts",
     "packages/pi-better-server/src/startup/artifact.ts",
     "packages/pi-better-server/src/startup/managed-types.ts",
     "scripts/sync-runtime-client.mjs",

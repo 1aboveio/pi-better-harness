@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureRuntime } from "../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs";
 import { decodeServerArtifact } from "../packages/pi-better-server/src/startup/artifact.ts";
 import { digest, NODE_CHECKSUMS, NODE_EXECUTABLE_CHECKSUMS } from "../packages/pi-better-server/scripts/private-runtime/format.ts";
 
@@ -29,6 +30,8 @@ const bytes = Buffer.from(await response.arrayBuffer());
 assert.equal(digest(bytes), NODE_CHECKSUMS[platform]);
 const staging = mkdtempSync(join(tmpdir(), "pi Windows runtime "));
 try {
+  // The artifact can ship before the native installer and service are available.
+  await assert.rejects(ensureRuntime({ agentDir: staging }), /native Windows managed-service installation/);
   const archive = join(staging, "node.zip");
   writeFileSync(archive, bytes);
   execFileSync("tar.exe", ["-xf", archive, `${distribution}/node.exe`], { cwd: staging });
