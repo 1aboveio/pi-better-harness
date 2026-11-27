@@ -21,7 +21,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
-export const AREA_NAMES = ["workspace", "sandbox", "windows", "server", "extensions"];
+export const AREA_NAMES = ["workspace", "sandbox", "windows", "server", "extensions", "resources"];
 
 /** A change here can invalidate any lane's assumptions. */
 const SHARED = [
@@ -88,6 +88,30 @@ const AREA_PATTERNS = {
     "packages/navigator/**",
     "packages/ssh-core/**",
     "packages/pi-better-ssh/**",
+  ],
+  resources: [
+    "packages/pi-better-server/src/**",
+    "packages/pi-better-server/scripts/**",
+    "packages/pi-better-server/test/support/**",
+    "packages/pi-better-server/test/runtime-standalone.test.ts",
+    "packages/pi-better-server/test/runtime-assignment-slow-socket.test.ts",
+    "packages/pi-better-background-tasks/**",
+    "packages/pi-better-subagents/**",
+    "packages/pi-better-goal/**",
+    "packages/pi-better-sandbox/**",
+    "packages/callback-batcher/**",
+    "packages/failure-observations/**",
+    "packages/harness-settings/**",
+    "packages/log-utils/**",
+    "packages/navigator/**",
+    "packages/operation-coordinator/**",
+    "packages/render-scheduler/**",
+    "packages/sandbox-core/**",
+    "packages/sandbox-diagnostics/**",
+    "packages/ssh-core/**",
+    "packages/stall-detector/**",
+    "packages/task-sandbox/**",
+    "scripts/sync-**",
   ],
 };
 

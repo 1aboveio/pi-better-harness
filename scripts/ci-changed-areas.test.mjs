@@ -24,6 +24,7 @@ test("an ordinary package edit selects only the workspace lane", () => {
 
 test("a sandbox edit adds the sandbox lane", () => {
   assert.deepEqual(selected(["packages/pi-better-sandbox/src/index.ts"]).sort(), [
+    "resources",
     "sandbox",
     "workspace",
   ]);
@@ -32,10 +33,29 @@ test("a sandbox edit adds the sandbox lane", () => {
 test("a background-task edit adds sandbox, windows and extensions", () => {
   assert.deepEqual(selected(["packages/pi-better-background-tasks/src/task.ts"]).sort(), [
     "extensions",
+    "resources",
     "sandbox",
     "windows",
     "workspace",
   ]);
+});
+
+test("resource measurements follow their runtime, fixtures and packaging inputs", () => {
+  for (const path of [
+    "packages/pi-better-server/src/runtime/work-client.mjs",
+    "packages/pi-better-server/test/runtime-standalone.test.ts",
+    "packages/pi-better-server/test/support/subagent-offline-model.ts",
+    "packages/pi-better-server/scripts/measure-full-runtime/probe.mjs",
+    "scripts/sync-runtime-client.mjs",
+  ]) assert.equal(selectAreas([path]).resources, true, path);
+  for (const path of [
+    "packages/pi-better-server/test/work-budget.test.ts",
+    "packages/pi-better-model-router/src/index.ts",
+  ]) {
+    const areas = selectAreas([path]);
+    assert.equal(areas.server, true, path);
+    assert.equal(areas.resources, false, path);
+  }
 });
 
 test("the lockfile selects every lane", () => {

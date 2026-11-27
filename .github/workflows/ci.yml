@@ -28,6 +28,7 @@ jobs:
       windows: ${{ steps.areas.outputs.windows }}
       server: ${{ steps.areas.outputs.server }}
       extensions: ${{ steps.areas.outputs.extensions }}
+      resources: ${{ steps.areas.outputs.resources }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,13 +37,11 @@ jobs:
       - name: Select the lanes this change needs
         id: areas
         run: node scripts/ci-changed-areas.mjs
-  # Two groups run as separate jobs so a server change waits for the slower
-  # measurement only, not for both. Each group still gets its own clean VM, which
-  # is what makes a resource measurement meaningful.
+  # Keep timing measurements on separate VMs from other tests.
   shared-read-resources:
     name: shared-read-resources (${{ matrix.os }}, ${{ matrix.group }})
     needs: changes
-    if: needs.changes.outputs.server == 'true'
+    if: needs.changes.outputs.resources == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
