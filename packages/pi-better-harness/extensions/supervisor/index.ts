@@ -1,4 +1,5 @@
-import { StringEnum } from "@earendil-works/pi-ai";
+import * as piAI from "@earendil-works/pi-ai";
+import type { Context, Provider } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,10 @@ import { registerCommitments } from "./commitments.ts";
 import { registerDecisionTool } from "./decisions.ts";
 import { registerSharedFault } from "./shared-fault.ts";
 import { digest, ENTRY, readFingerprint, RepeatedRead, scopeEvidence, type Scenario } from "./evidence.ts";
+
+// Pi 1.6 providers receive a transcript with the system prompt in its first message.
+const providerContext: (context: Context) => Parameters<Provider["streamSimple"]>[1] =
+  Reflect.get(piAI, "normalizeContext") ?? ((context: Context) => context);
 
 const prompts = {
   "commitment-followup": "The owner tried an accepted recovery and recorded an observed failure. Recommend a materially different remedy only when the new evidence supports it. Suppress rewordings of the accepted action, untested guesses and status-only updates.",
@@ -94,10 +99,10 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       if (!provider || !auth || !current()) return;
       const target = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
       const evidenceRefs = ["outcome", "observation", ...scope.steps.map(step => `step:${step.id}`)];
-      const result = await provider.streamSimple(target, {
+      const result = await provider.streamSimple(target, providerContext({
         systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return a single JSON object with advice (string or null), evidence (array of supplied ID strings), expected (string), and steps (array of Todo ID strings). For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
         messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs }), timestamp: Date.now() }],
-      }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
+      }), { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
         reasoning: role.effort && role.effort !== "off" ? role.effort : undefined }).result();
       if (result.stopReason !== "stop" || !current()) return;
       const output = result.content.filter(x => x.type === "text").map(x => x.text).join("");
@@ -172,9 +177,10 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   pi.registerTool({
     name: "supervisor_review", label: "Review Goal",
     description: "Consult Supervisor about scope or a possible progress stall. Shares the proactive review and returns prior advice without another push.",
-    parameters: Type.Object({ scenario: StringEnum(["scope-review", "stall-diagnosis"] as const) }),
+    parameters: Type.Object({ scenario: piAI.StringEnum(["scope-review", "stall-diagnosis"] as const) }),
     async execute(_id, { scenario }, _signal, _update, ctx) {
       const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+      if (scenario !== "scope-review" && scenario !== "stall-diagnosis") return reply("Unknown Supervisor scenario.");
       if (!enabledScenarios().includes(scenario)) return reply("This Supervisor scenario is disabled.");
       const detail = scenario === "scope-review" ? scopeChange : stallEvidence;
       if (!detail) return reply("No repeated-read stall has been observed.");

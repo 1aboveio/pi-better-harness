@@ -233,7 +233,7 @@ function context(cwd: string, options: ContextOptions = {}) {
                 return options.input?.(title);
             },
         },
-    } as unknown as ExtensionCommandContext;
+    } as unknown as ExtensionCommandContext & Parameters<ToolDefinition["execute"]>[4];
     return { ctx, notifications, statuses, confirmations, selections, prompts };
 }
 
@@ -367,7 +367,7 @@ kernelTest("a session with a different cwd re-registers the file tools against t
         { path: "session-cwd.txt", content: "here\n" } as never,
         undefined,
         undefined,
-        {} as ExtensionContext,
+        {} as Parameters<ToolDefinition["execute"]>[4],
     );
     assert.equal(readFileSync(join(root, "session-cwd.txt"), "utf8"), "here\n");
 });
@@ -1091,7 +1091,7 @@ function writeThrough(tool: ToolDefinition, path: string, content: string): Prom
         { path, content } as never,
         undefined,
         undefined,
-        {} as ExtensionContext,
+        {} as Parameters<ToolDefinition["execute"]>[4],
     );
 }
 
@@ -1106,7 +1106,7 @@ function editThrough(
         { path, edits: [{ oldText, newText }] } as never,
         undefined,
         undefined,
-        {} as ExtensionContext,
+        {} as Parameters<ToolDefinition["execute"]>[4],
     );
 }
 

@@ -310,6 +310,20 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
+      - name: Align workspace development dependencies with the Pi 1.6.1 host
+        if: matrix.pi-version == '1.6.1'
+        run: |
+          node --input-type=module <<'NODE'
+          import { globSync, readFileSync, writeFileSync } from "node:fs";
+          for (const path of ["package.json", ...globSync("packages/*/package.json")]) {
+            const manifest = JSON.parse(readFileSync(path, "utf8"));
+            const pins = Object.keys(manifest.devDependencies ?? {}).filter(name => name.startsWith("@earendil-works/pi-"));
+            if (!pins.length) continue;
+            for (const name of pins) manifest.devDependencies[name] = process.env.PI_SDK_VERSION;
+            writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
+          }
+          NODE
+
       - name: Install selected Pi SDK without changing the lockfile
         run: |
           npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ \
@@ -334,7 +348,16 @@ jobs:
           NODE
 
       - name: Typecheck affected extensions and shared modules
+        if: matrix.pi-version != '1.6.1'
         run: npm run typecheck -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
+
+      - name: Typecheck the workspace and exercise Harness on Pi 1.6.1
+        if: matrix.pi-version == '1.6.1'
+        run: |
+          npm run typecheck
+          node --import tsx --import ./scripts/isolate-registry.mjs --test \
+            packages/pi-better-harness/test/{supervisor,session-recap}.test.mjs \
+            packages/pi-better-harness/test/task-context/{dynamic-workflow,work-ledger,work-ledger-session}.test.ts
 
       - name: Verify Recap settings and foreground request isolation in Pi
         if: matrix.pi-version == '1.6.1'

@@ -5,6 +5,7 @@ import { advanceWorkflow, defineWorkflow, DYNAMIC_ENTRY, dynamicParameters, phas
   type Attempt, type CatalogChoice, type DynamicState, type WorkflowRun } from "./dynamic-workflow.js";
 import { WORKFLOW_ASSIGNMENT, type WorkflowAssignmentRequest } from "pi-better-subagents/workflow-assignment.ts";
 import { DELEGATION_MODE_REQUEST } from "pi-better-subagents/delegation.ts";
+import { isRecord } from "./workflow-plan.js";
 import { describeRun } from "./dynamic-workflow-view.js";
 
 const modes = ["off", "on", "adaptive"] as const;
@@ -15,12 +16,19 @@ const execution = "Read get_todo to resume the accepted workflow. Work each read
 function catalogChoice(ctx: ExtensionContext, id: string): CatalogChoice {
   for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
     if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "agents_catalog") continue;
-    const view = entry.message.details?.view;
-    if (view?.id !== id) continue;
-    const exposure = view.skills?.effective;
-    const error = !view.found || !view.definitionValid || !view.catalogLaunchable || view.launchable === false || exposure?.mode === "error"
-      ? exposure?.error ?? view.launchabilityReason ?? "Catalog entry unavailable." : undefined;
-    return { id, skills: exposure && exposure.mode !== "discovery" ? exposure.paths : null, error };
+    const details: unknown = entry.message.details;
+    const view = isRecord(details) ? details.view : undefined;
+    if (!isRecord(view) || view.id !== id) continue;
+    const exposure = isRecord(view.skills) && isRecord(view.skills.effective) ? view.skills.effective : undefined;
+    if (!view.found || !view.definitionValid || !view.catalogLaunchable || view.launchable === false || exposure?.mode === "error") {
+      const reason = exposure?.error ?? view.launchabilityReason;
+      return { id, skills: null, error: typeof reason === "string" ? reason : "Catalog entry unavailable." };
+    }
+    if (!exposure || exposure.mode === "discovery") return { id, skills: null };
+    if (!Array.isArray(exposure.paths) || !exposure.paths.every(path => typeof path === "string")) {
+      return { id, skills: null, error: "Catalog entry has invalid skill paths." };
+    }
+    return { id, skills: exposure.paths };
   }
   return { id, skills: null, error: "Inspect " + id + " with agents_catalog, then retry the step." };
 }

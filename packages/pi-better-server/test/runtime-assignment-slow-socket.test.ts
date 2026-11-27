@@ -6,7 +6,7 @@ import { DaemonClient } from '../src/client.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
-import { DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { DefaultResourceLoader, SettingsManager, wrapRegisteredTool, type ExtensionRunner } from '@earendil-works/pi-coding-agent';
 
 // Load the standalone package at its runtime boundary. Its source is checked
 // under that package's compiler settings, not the Server's strip-only settings.
@@ -85,17 +85,21 @@ test('paused real Unix subscriber repairs exact assignment after backpressure an
     assert.ok(JSON.stringify(snapshot.data).includes(readOutcome(meta)!.eventId));
     const receipt = readOutcome(meta)!.deliveryReceipt;
     assert.ok(manager.getBranch().some((entry: any) => entry.id === receipt!.entryId));
-    let tool = session.extensionRunner.getToolDefinition('subagent_result');
-    let ctx = session.extensionRunner.createContext();
-    const result = await tool.execute('read', { id }, undefined, undefined, ctx);
-    assert.equal(result.isError, undefined);
+    function resultTool(runner: ExtensionRunner) {
+      const tool = runner.getAllRegisteredTools().find(({ definition }) => definition.name === 'subagent_result');
+      assert.ok(tool);
+      return wrapRegisteredTool(tool, runner);
+    }
+    const tool = resultTool(session.extensionRunner);
+    const result = await tool.execute('read', { id });
+    assert.ok(!('isError' in result) || !result.isError);
     assert.ok(readOutcome(meta)?.inspectedAt);
     assert.equal(turns, 1, 'transport reconnect must not repeat delivered model handoff');
     assert.deepEqual(readOutcome(meta)?.deliveryReceipt, receipt);
     const params = { id, outcome_revision: 1, disposition: 'consumed', note: 'Read result' };
-    await tool.execute('consume', params, undefined, undefined, ctx);
+    await tool.execute('consume', params);
     const consumed = readOutcome(meta);
-    await tool.execute('replay', params, undefined, undefined, ctx);
+    await tool.execute('replay', params);
     assert.deepEqual(readOutcome(meta), consumed);
     assert.equal(consumed?.disposition?.kind, 'consumed');
     // A second real hosted recipient receives no first-recipient outcome.
@@ -109,9 +113,10 @@ test('paused real Unix subscriber repairs exact assignment after backpressure an
     assert.equal(JSON.stringify(otherSnapshot).includes(readOutcome(meta)!.eventId), false);
     assert.equal(JSON.stringify(otherEvents).includes(readOutcome(meta)!.eventId), false);
     const otherSession = daemon.registry.get(otherCreated.sessionId!)!.session;
-    const denied = await otherSession.extensionRunner!.getToolDefinition('subagent_result')!.execute('wrong-recipient', { id }, undefined, undefined, otherSession.extensionRunner!.createContext());
+    const otherTool = resultTool(otherSession.extensionRunner!);
+    const denied = await otherTool.execute('wrong-recipient', { id });
     assert.equal(JSON.stringify(denied).includes(readOutcome(meta)!.eventId), false);
-    await assert.rejects(() => otherSession.extensionRunner!.getToolDefinition('subagent_result')!.execute('wrong-recipient-all', { id, all: true, outcome_revision: 1, disposition: 'dismissed', note: 'foreign request' }, undefined, undefined, otherSession.extensionRunner!.createContext()), /different parent/);
+    await assert.rejects(() => otherTool.execute('wrong-recipient-all', { id, all: true, outcome_revision: 1, disposition: 'dismissed', note: 'foreign request' }), /different parent/);
     assert.deepEqual(readOutcome(meta), consumed, 'foreign recipient cannot rewrite disposition');
   } finally {
     Socket.prototype.write = originalWrite;

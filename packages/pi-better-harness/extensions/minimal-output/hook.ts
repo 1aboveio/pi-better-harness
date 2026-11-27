@@ -580,7 +580,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     const seenCompactions = new WeakSet<CompactionComponent>();
     if (compactionPrototype) {
       const originalRender = compactionPrototype.render;
-      const render = function(this: CompactionComponent, width: number): string[] {
+      const render = function(this: CompactionComponent, width: number) {
         if (!seenCompactions.has(this)) { seenCompactions.add(this); compactions.add(new WeakRef(this)); }
         if (!current.enabled || this.expanded) return originalRender.call(this, width);
         const detail = `from ${this.message.tokensBefore.toLocaleString()} tokens`;
@@ -615,7 +615,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       const mouseDescriptor = Object.getOwnPropertyDescriptor(customMessagePrototype, "handleMouse");
       const messages = new Set<WeakRef<CustomMessageComponent>>();
       const seenMessages = new WeakSet<CustomMessageComponent>();
-      const render = function(this: CustomMessageComponent, width: number): string[] {
+      const render = function(this: CustomMessageComponent, width: number) {
         if (!seenMessages.has(this)) { seenMessages.add(this); messages.add(new WeakRef(this)); }
         if (!current.enabled || this._expanded) return originalRender.call(this, width);
         if (width <= 0) return [];

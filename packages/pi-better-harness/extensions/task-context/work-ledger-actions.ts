@@ -4,7 +4,7 @@ import {
   DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import {
-  isWorkLedgerId, openWorkLedgerStore, workLedgerTotals, WORK_ITEM_STATUSES, WORK_LEDGER_STATUSES,
+  assertWorkLedgerStatus, isWorkLedgerId, openWorkLedgerStore, workLedgerTotals, WORK_ITEM_STATUSES, WORK_LEDGER_STATUSES,
   type WorkItemDraft, type WorkItemPatch, type WorkLedger, type WorkLedgerSummary, type WorkLedgerTotals,
 } from "./work-ledger.js";
 
@@ -135,6 +135,8 @@ export function executeLedgerMutation(
 ): LedgerActionResult {
   if (input.goal !== undefined && input.outcome !== undefined) throw new Error("Send ledger.goal once. The outcome field is its legacy alias.");
   const goal = input.goal ?? input.outcome;
+  const status = input.status;
+  if (status !== undefined) assertWorkLedgerStatus(status);
   const store = openWorkLedgerStore({ cwd });
   const associatedLedgerId = session?.associatedLedgerId() ?? null;
   switch (input.action) {
@@ -146,7 +148,7 @@ export function executeLedgerMutation(
       const ledger = store.create({
         outcome: goal,
         ...(input.boundaries === undefined ? {} : { boundaries: input.boundaries }),
-        ...(input.status === undefined ? {} : { status: input.status }),
+        ...(status === undefined ? {} : { status }),
         ...(input.items === undefined ? {} : { items: input.items as WorkItemDraft[] }),
         ...(input.event === undefined ? {} : { event: input.event }),
       });
@@ -167,7 +169,7 @@ export function executeLedgerMutation(
         ...(input.event === undefined ? {} : { event: input.event }),
         ...(goal === undefined ? {} : { outcome: goal }),
         ...(input.boundaries === undefined ? {} : { boundaries: input.boundaries }),
-        ...(input.status === undefined ? {} : { status: input.status }),
+        ...(status === undefined ? {} : { status }),
         ...(input.changes === undefined ? {} : { changes: input.changes as WorkItemPatch[] }),
         ...(input.addItems === undefined ? {} : { addItems: input.addItems as WorkItemDraft[] }),
       });
