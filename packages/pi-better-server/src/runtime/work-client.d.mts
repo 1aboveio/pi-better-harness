@@ -1,5 +1,6 @@
 import type { WorkScope, WorkSnapshot } from "./read-model.ts";
 export class WorkClient {
+  lastSubscriptionTrace?: { id: string; sentAt: number; receivedAt?: number; timedOutAt?: number };
   readonly closed: boolean;
   constructor(socketPath: string | import("node:stream").Duplex, agentDir: string, requiredCapabilities?: string[]);
   snapshot?: WorkSnapshot;

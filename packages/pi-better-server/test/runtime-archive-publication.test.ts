@@ -84,6 +84,10 @@ test("a redundant terminal publication during verification preserves the first v
     observations.length = 0;
     await model.reconcile();
     assert.equal(model.snapshot({ id: meta.id }).status, "degraded");
+    mkdirSync(model.runs, { recursive: true });
+    assert.deepEqual(model.upgradeObligations(), [], "terminal archive churn alone cannot hold an idle daemon");
+    mkdirSync(join(model.runs, "sa_unverified"));
+    assert.throws(() => model.upgradeObligations(), /Unverified run metadata during upgrade: sa_unverified/);
     assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, 4);
     const before = calls;
     for (let i = 0; i < 20; i++) await model.reconcile();

@@ -328,6 +328,14 @@ histories remain in their existing directories. Global runtime registration is
 updated only after verified readiness for the registered default state directory.
 Workspace package synchronization remains a separate approval step below.
 
+For a timed-out Work Navigator subscription, match the `sub-...` ID in the
+client error or `WorkClient.lastSubscriptionTrace` to `subscriptionTraces`
+in `runtime_get_metrics` on the same server instance. The client records
+send and receipt or timeout. The server retains the latest 32 requests with
+receipt, worker start, and successful socket write times in epoch milliseconds.
+A missing stage can indicate the request had not reached it when sampled.
+Older clients do not supply trace IDs.
+
 Older daemons without `safe-upgrade-v1`, unknown owners, incompatible protocols
 and SDK downgrades are deferred. A missing socket or elapsed timeout is not
 permission to replace a live owner. An unverified legacy state directory may need

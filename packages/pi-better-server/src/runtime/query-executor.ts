@@ -11,8 +11,12 @@ import { HostSourceWatches } from "./source-watch.ts";
 const INBOX_DIAGNOSTICS_WAIT_MS = 100;
 
 export interface EncodedRead { json: string }
+export interface SubscriptionTrace {
+  id: string; serverReceivedAt: number; workerStartedAt?: number; replySentAt?: number;
+}
 interface Waiter { connection: number; expiresAt: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
 interface Query {
+  trace?: SubscriptionTrace;
   id: number; key?: string; command: Record<string, unknown>; connection: number;
   enqueued: number; started?: number; progressAt: number; waiters: Set<Waiter>;
 }
@@ -224,7 +228,7 @@ export class WorkQueryExecutor {
     this.streams.set(connection, { socket, paused: false, generation: 0, drain, close });
     socket.on("drain", drain); socket.once("close", close);
     if (this.failure) this.scheduleRecovery();
-    return { handle: (command: Record<string, unknown>) => this.request(connection, command), close };
+    return { handle: (command: Record<string, unknown>, trace?: SubscriptionTrace) => this.request(connection, command, trace), close };
   }
 
   async snapshot(scope: Record<string, unknown>): Promise<any> { return JSON.parse((await this.request(0, {type:"runtime_get_snapshot",scope})).json); }
@@ -280,7 +284,7 @@ export class WorkQueryExecutor {
     return ready;
   }
 
-  private request(connection: number, input: Record<string, unknown>): Promise<EncodedRead> {
+  private request(connection: number, input: Record<string, unknown>, trace?: SubscriptionTrace): Promise<EncodedRead> {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") {
       return this.sampleInbox().then(fresh => ({ json: JSON.stringify({ ...this.metrics(), inboxDiagnosticsFresh: fresh }) }));
@@ -325,7 +329,7 @@ export class WorkQueryExecutor {
         return Promise.reject(new Error("runtime-overloaded: read queue is full; retry later"));
       }
       const id = ++this.counter;
-      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), progressAt: Date.now(), waiters: new Set() };
+      query = { id, key, command, trace, connection: key ? 0 : connection, enqueued: performance.now(), progressAt: Date.now(), waiters: new Set() };
       this.queue.push(query);
       if (key) this.flights.set(key, query);
     }
@@ -350,12 +354,16 @@ export class WorkQueryExecutor {
     const stream = this.streams.get(query.connection);
     if (stream) { stream.generation++; this.workerConnections.add(query.connection); }
     this.worker.postMessage({ type: "query", id: query.id, connection: query.connection,
-      generation: stream?.generation ?? 0, command: query.command });
+      generation: stream?.generation ?? 0, traceSubscription: !!query.trace, command: query.command });
   }
 
   private receive(message: any) {
     if (this.failure) return;
     this.lastResponse = performance.now();
+    if (message.type === "subscription-started") {
+      if (this.active?.trace && this.active.id === message.id) this.active.trace.workerStartedAt = message.at;
+      return;
+    }
     if (message.type === "heartbeat") { this.worker.postMessage({ type: "heartbeat-consumed" }); return; }
     // Replies to cancelled reads carry no fresh observation or metrics authority.
     if (message.type === "reply" && (!this.active || message.id !== this.active.id || !this.active.waiters.size)) {

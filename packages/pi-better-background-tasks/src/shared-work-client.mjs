@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,6 +20,7 @@ function unknownLaunchReceipt(cause) {
 
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {
+    lastSubscriptionTrace;
     socket;
     snapshot;
     pending = new Map();
@@ -72,21 +74,28 @@ export class WorkClient {
     request(type, params = {}) {
         if (this.closed) return Promise.reject(new Error("runtime-unavailable: disconnected; resync required"));
         if (this.pending.size >= 32) return Promise.reject(new Error("runtime-unhealthy: too many in-flight queries"));
-        const id = `work-${++this.sequence}`;
+        const trace = type === "runtime_subscribe" ? { id: `sub-${randomUUID()}`, sentAt: Date.now() } : undefined;
+        if (trace) this.lastSubscriptionTrace = trace;
+        const id = trace?.id ?? `work-${++this.sequence}`;
         return new Promise((resolve, reject) => {
             const rejectPending = type === "runtime_launch_subagent" ? error => reject(unknownLaunchReceipt(error)) : reject;
             const timer = setTimeout(() => {
                 this.pending.delete(id);
-                rejectPending(new Error(`runtime-unhealthy: ${type} timed out`));
+                if (trace) trace.timedOutAt = Date.now();
+                rejectPending(new Error(`runtime-unhealthy: ${type} timed out${trace ? ` (${trace.id})` : ""}`));
             }, 5000);
             this.pending.set(id, { resolve: value => {
+                if (trace) trace.receivedAt = Date.now();
                 // Apply subscription receipts in wire order, including events in the same socket chunk.
                 try {
                     if (type === "runtime_subscribe" && Number.isSafeInteger(params.subscriptionGeneration))
                         this.accept(value, undefined, params.subscriptionGeneration);
                     resolve(value);
                 } catch (error) { reject(error); }
-            }, reject, rejectPending, timer });
+            }, reject: error => {
+                if (trace) trace.receivedAt = Date.now();
+                reject(error);
+            }, rejectPending, timer });
             this.socket.write(JSON.stringify({ id, type, ...params }) + "\n");
         });
     }

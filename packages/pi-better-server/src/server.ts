@@ -25,7 +25,7 @@ import { RuntimeCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
 import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
-import { WorkQueryExecutor } from "./runtime/query-executor.ts";
+import { WorkQueryExecutor, type SubscriptionTrace } from "./runtime/query-executor.ts";
 import { createSubagentLaunch } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -218,6 +218,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let inFlight = 0;
     let requestCounter = 0, connectionCounter = 0;
     const requests = new Map<number, { kind: string; id: number; connection: number; operation?: { kind: string; id: string }; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
+    const subscriptionTraces: SubscriptionTrace[] = [];
     options.rpcEvidence?.bind(() => ({ lanes: controlStore.budget.metrics().lanes,
       read: workModel?.metrics().executor, observation: workModel?.observation().status }));
     let draining = false;
@@ -255,6 +256,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
         const id = typeof command.id === "string" ? command.id : undefined;
         const type = typeof command.type === "string" ? command.type : "";
+        const trace: SubscriptionTrace | undefined = greeted && type === "runtime_subscribe" && id && /^sub-[a-f0-9-]{36}$/.test(id)
+          ? { id, serverReceivedAt: Date.now() } : undefined;
+        if (trace) {
+          subscriptionTraces.push(trace);
+          if (subscriptionTraces.length > 32) subscriptionTraces.shift();
+        }
         const reply = (message: Record<string, unknown>): void => send({ ...(id !== undefined ? { id } : {}), type: "response", command: type, success: true, ...message } as ServerMessage);
         let releaseSessionOperation: (() => void) | undefined;
         if (draining) {
@@ -415,16 +422,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             runtimeInFlight++;
             try {
               workQueries ??= work().connect(socket);
-              const data = await workQueries.handle(command);
+              const data = await workQueries.handle(command, trace);
               if (type === "runtime_get_metrics") {
-                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()),
+                return reply({ data: { ...JSON.parse(data.json), subscriptionTraces, mutationSqlite: mutationStoreMetrics(getAgentDir()),
                   workBudget: controlStore.budget.metrics(), resultSupervision: resultSupervision?.metrics,
                   subagentLifecycle: launches?.status().lifecycle } });
               }
               if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
               // Snapshot JSON is encoded in the worker; only the small envelope runs here.
               const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
-              if (!socket.destroyed) socket.write(envelope.slice(0, -1) + ',"data":' + data.json + "}\n");
+              if (!socket.destroyed) socket.write(envelope.slice(0, -1) + ',"data":' + data.json + "}\n",
+                trace ? error => { if (!error) trace.replySentAt = Date.now(); } : undefined);
               return;
             } finally {
               runtimeInFlight--;
