@@ -43,7 +43,9 @@ for (const mode of ["regular", "fullscreen"]) {
     mkdirSync(agentDir);
     writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ tuiMode: mode, quietStartup: false, checkForUpdates: false }));
     const command = `cd ${quote(root)} && exec env PI_CODING_AGENT_DIR=${quote(agentDir)} PI12_BROWSE_FIXTURE_ROOT=${quote(root)} PI_OFFLINE=1 ${quote(cli!)} --no-extensions --no-skills --no-context-files -e ${quote(stagedFixture)} --session-dir ${quote(join(root, "sessions"))}`;
-    tmux("new-session", "-d", "-s", "proof", "-x", "100", "-y", "32");
+    // Offline tool and model warnings vary by host. Keep the startup help visible behind the seeded transcript.
+    const localHeight = 52;
+    tmux("new-session", "-d", "-s", "proof", "-x", "100", "-y", String(localHeight));
     tmux("set-option", "-t", "proof", "remain-on-exit", "on");
     tmux("send-keys", "-t", "proof", "-l", command);
     tmux("send-keys", "-t", "proof", "Enter");
@@ -101,6 +103,7 @@ for (const mode of ["regular", "fullscreen"]) {
       cleanBrowser();
       await resize(100, 32);
       cleanBrowser();
+      await resize(100, localHeight);
       tmux("send-keys", "-t", "proof", "Escape");
       const report = join(root, `${failure ? "failure" : "cancel"}.json`);
       await wait("restored local view and executor", () => existsSync(report) && isLocal());

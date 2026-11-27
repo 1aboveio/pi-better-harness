@@ -93,7 +93,7 @@ export function intentBashDefinition(cwd: string, operations: BashOperations) {
     return {
         ...base,
         parameters,
-        async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext) {
+        async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: Parameters<typeof base.execute>[4]) {
             const { intent, error } = readCommandIntent(params);
             if (error) throw new Error(`Invalid command intent: ${error}. The command was not run.`);
             if (intent.attemptId) {

@@ -629,7 +629,7 @@ function normalizeEvent(value: string | undefined, fallback: string): string {
   return requiredText(value, "event", MAX_EVENT_CHARS);
 }
 
-function assertWorkLedgerStatus(value: unknown): asserts value is WorkLedgerStatus {
+export function assertWorkLedgerStatus(value: unknown): asserts value is WorkLedgerStatus {
   if (!WORK_LEDGER_STATUSES.includes(value as WorkLedgerStatus)) {
     throw new Error(`Invalid work ledger status ${JSON.stringify(value)}.`);
   }

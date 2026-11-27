@@ -1,4 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
+import { providerContext } from "../provider-context.ts";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -94,10 +95,10 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       if (!provider || !auth || !current()) return;
       const target = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
       const evidenceRefs = ["outcome", "observation", ...scope.steps.map(step => `step:${step.id}`)];
-      const result = await provider.streamSimple(target, {
+      const result = await provider.streamSimple(target, providerContext({
         systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return a single JSON object with advice (string or null), evidence (array of supplied ID strings), expected (string), and steps (array of Todo ID strings). For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
         messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs }), timestamp: Date.now() }],
-      }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
+      }), { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
         reasoning: role.effort && role.effort !== "off" ? role.effort : undefined }).result();
       if (result.stopReason !== "stop" || !current()) return;
       const output = result.content.filter(x => x.type === "text").map(x => x.text).join("");
@@ -175,6 +176,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     parameters: Type.Object({ scenario: StringEnum(["scope-review", "stall-diagnosis"] as const) }),
     async execute(_id, { scenario }, _signal, _update, ctx) {
       const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+      if (scenario !== "scope-review" && scenario !== "stall-diagnosis") return reply("Unknown Supervisor scenario.");
       if (!enabledScenarios().includes(scenario)) return reply("This Supervisor scenario is disabled.");
       const detail = scenario === "scope-review" ? scopeChange : stallEvidence;
       if (!detail) return reply("No repeated-read stall has been observed.");

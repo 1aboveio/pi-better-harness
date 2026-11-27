@@ -7,11 +7,11 @@ import { hostedSdkCalls, MaintenanceBusyError } from "../src/maintenance.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { gate, makeEnv, waitFor } from "./helpers.ts";
 
-// Run with maintenance.test.ts against SDK 0.82.1 and the isolated native 1.2.0.
+// Run with maintenance.test.ts against the workspace SDK and the isolated native Pi versions in CI.
 // The latter uses Node's type stripping (no tsx inherited declaration-path aliases).
 // Regression evidence: without full refresh tracking, all four cancel/replace
 // cases below accept idle while their decision/provider promise is still held.
-const sdk12 = /^1\.2\./.test(VERSION);
+const sdkWithCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1";
 const busy = (error: unknown) => error instanceof MaintenanceBusyError && error.reason === "work";
 function deferred() {
   let resolve!: () => void;
@@ -81,7 +81,7 @@ test(`SDK ${VERSION}: originating prompt owns settlement after public idle`, asy
   assert.equal(await f.idle(), "idle");
 });
 
-test("SDK 1.2: originating prompt owns deferred settled actions through their preflight", { skip: !sdk12 }, async t => {
+test(`SDK ${VERSION}: originating prompt owns deferred settled actions through their preflight`, { skip: !sdkWithCacheWarmer }, async t => {
   const entered = deferred(), release = deferred();
   t.after(release.resolve);
   let queue = false;
@@ -111,7 +111,7 @@ test("SDK 1.2: originating prompt owns deferred settled actions through their pr
 });
 
 for (const entry of ["prompt", "continue", "definition", "executable", "nested"] as const) {
-  test(`SDK ${VERSION}: direct ${entry} stays counted and its retained handle is fenced`, { skip: entry === "nested" && !sdk12 }, async t => {
+  test(`SDK ${VERSION}: direct ${entry} stays counted and its retained handle is fenced`, { skip: entry === "nested" && !sdkWithCacheWarmer }, async t => {
     let nested: (() => Promise<unknown>) | undefined;
     const f = await setup(t, pi => pi.registerTool({
       name: "capture_nested", label: "Capture", description: "Capture the SDK nested tool context",
@@ -155,7 +155,7 @@ async function warming(t: TestContext, phase: "provider" | "decision") {
   t.after(release.resolve);
   const f = await setup(t, undefined, "idle");
   const warmer = (f.sdk as any)._cacheWarmer;
-  assert.ok(warmer, "SDK 1.2 factory must supply its native CacheWarmer");
+  assert.ok(warmer, "The SDK factory must supply its native CacheWarmer");
   const settingsBefore = readFileSync(join(f.env.agentDir, "settings.json"), "utf8");
   let providerCalls = 0;
   let signal!: AbortSignal;
@@ -191,7 +191,7 @@ async function warming(t: TestContext, phase: "provider" | "decision") {
 }
 
 for (const [phase, drop] of [["provider", "cancel"], ["provider", "replace"], ["decision", "cancel"], ["decision", "replace"]] as const) {
-  test(`SDK 1.2: native warm ${phase} promise remains busy after inactive status and ${drop}`, { skip: !sdk12 }, async t => {
+  test(`SDK ${VERSION}: native warm ${phase} promise remains busy after inactive status and ${drop}`, { skip: !sdkWithCacheWarmer }, async t => {
     const f = await warming(t, phase);
     assert.equal((f.sdk as any).cacheWarmingStatus.state, "scheduled");
     await assert.rejects(f.idle(), busy);
@@ -232,7 +232,7 @@ for (const [phase, drop] of [["provider", "cancel"], ["provider", "replace"], ["
 }
 
 for (const method of ["start", "schedule", "refresh"] as const) {
-  test(`SDK 1.2: an unguarded replacement ${method} defers upgrade`, { skip: !sdk12 }, async t => {
+  test(`SDK ${VERSION}: an unguarded replacement ${method} defers upgrade`, { skip: !sdkWithCacheWarmer }, async t => {
     const f = await setup(t);
     const warmer = (f.sdk as any)._cacheWarmer;
     const original = warmer[method];

@@ -208,6 +208,15 @@ export function stopRun(id: string, deps: StopDeps = {}): StopOutcome {
         // Supervised path: same process-group kill + killed write as before.
         // Prefer recorded pgid so running and orphaned share one target rule.
         terminateRelatedWork(meta);
+        const { pid, pidStartTime } = meta;
+        if (meta.management && Number.isSafeInteger(pid) && pid > 0 && pidStartTime) {
+            // Pi 1.6 waits for providers to finish on SIGTERM. A second SIGTERM
+            // exits during disposal. Only signal the same surviving CLI leader.
+            setTimeout(() => {
+                if (!realProcessProbe.pidExists(pid) || realProcessProbe.startToken(pid) !== pidStartTime) return;
+                try { process.kill(pid, "SIGTERM"); } catch { /* the leader exited */ }
+            }, 2_000).unref();
+        }
         return recordStopped(meta, now);
     }
 
