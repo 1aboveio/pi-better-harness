@@ -280,6 +280,16 @@ test("cleanup protects a parked conversation and its workspace with a stale meta
     assert.equal(parkedWaits().filter((entry) => entry.runId === fixture.id).length, 1);
 });
 
+test("cleanup retains a mirrored pending park when its sidecar cannot be verified", () => {
+    const fixture = parkedRunFixture("sa_park_corrupt");
+    finalizeRun(fixture.id, 0);
+    writeFileSync(registry.parkRecordPath(fixture.id), "{truncated");
+    runDailyCleanupOnce({ now: Date.now() + 90 * 86400000, terminalRunRetentionMs: 1, sessionRetentionMs: 1 });
+    assert.equal(existsSync(fixture.sessionFile), true);
+    assert.equal(registry.readMeta(fixture.id)?.park.phase, "waiting");
+    assert.equal(registry.readParkRecord(fixture.id), undefined);
+});
+
 test("a consumed or cancelled park is no longer a resume candidate", () => {
     const fixture = parkedRunFixture("sa_park_6");
     registry.updateParkRecord(fixture.id, { phase: "consumed" });

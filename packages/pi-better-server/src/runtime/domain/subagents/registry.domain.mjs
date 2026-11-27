@@ -165,11 +165,11 @@ export function isPendingPark(record) {
  * Runs whose park disposition can still resume. Used by cleanup protection and
  * by resume reconciliation; a consumed or cancelled park is not included.
  */
-export function listPendingParkedRuns(metas = listMetas()) {
-    return listParkRecordCandidates(metas, isPendingPark);
+export function listPendingParkedRuns(metas = listMetas(), purpose) {
+    return listParkRecordCandidates(metas, isPendingPark, purpose);
 }
 /** Read live sidecars before consulting the listed disposition of a reclaimed run. */
-export function listParkRecordCandidates(metas = listMetas(), include) {
+export function listParkRecordCandidates(metas = listMetas(), include, purpose) {
     const runs = join(baseDir(), "runs");
     let volatileIds;
     try {
@@ -185,7 +185,7 @@ export function listParkRecordCandidates(metas = listMetas(), include) {
         if (!volatileIds || volatileIds.has(meta.id)) {
             if (!record && !existsSync(join(runs, meta.id, "park.json")))
                 continue;
-            record = readParkRecord(meta.id, meta);
+            record = readParkRecord(meta.id, meta) ?? (purpose === "cleanup" ? meta.park : undefined);
         }
         if (record && (!include || include(record)))
             parked.push({ ...meta, park: record });

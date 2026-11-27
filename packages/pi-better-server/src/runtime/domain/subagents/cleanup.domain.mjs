@@ -217,7 +217,7 @@ function planCleanupOccupancy(metas, protect) {
     // owned workspace must survive until the wait is consumed or cancelled,
     // otherwise the automatic continuation would reopen nothing. The park
     // disposition is the evidence, so an unprotected park cannot be swept.
-    for (const parked of listPendingParkedRuns(metas)) {
+    for (const parked of listPendingParkedRuns(metas, "cleanup")) {
         runIds.add(parked.id);
         paths.push(...ownedResources(parked));
     }
