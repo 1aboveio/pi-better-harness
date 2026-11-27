@@ -174,7 +174,13 @@ async function connectObservation(current: number) {
             reconnectLater(current);
         } else void collect(candidate, current).catch(error => { if (current === generation) degraded(error); });
     });
-    await candidate.subscribe({ ...saved.origin, limit: 200 });
+    try {
+        await candidate.subscribe({ ...saved.origin, limit: 200 });
+    } catch (error) {
+        if (client === candidate) client = undefined;
+        candidate.close();
+        throw error;
+    }
     if (candidate.snapshot?.status === "rebuilding") await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { stop(); reject(new Error("Runtime scope is still rebuilding; retry the observation.")); }, 5000);
         const stop = candidate.onChange(value => {

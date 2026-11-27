@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - The bundled runtime recovers when a task archive changes during snapshot verification, even if the file watcher reports only the live task record.
+- The subagent task view reconnects if its initial subscription times out.
 
 ## [pi-better-harness@0.59.1] - 2026-11-27
 
