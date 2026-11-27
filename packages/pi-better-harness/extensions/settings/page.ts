@@ -24,7 +24,7 @@ const groups = [
   { title: "Background work", ids: ["setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID] },
   { title: "Work display", ids: ["setting:navigator-view", "setting:navigator-sticky", "setting:outcome-todo-display", "setting:tool-output", "setting:tool-animation"] },
   { title: "Supervision", ids: ["setting:supervisor-mode", "supervisor:scenarios"] },
-  { title: "Recaps & instructions", ids: ["setting:session-recap", "link:recap-prompt", "instructions:toggle", "instructions:edit"] },
+  { title: "Recaps & instructions", ids: ["setting:native-compaction", "setting:session-recap", "link:recap-prompt", "instructions:toggle", "instructions:edit"] },
 ];
 
 function groupSettings(items: MenuItem[]): MenuSection[] {
