@@ -1036,6 +1036,8 @@ export class WorkReadModel {
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             sourceConflict = true;
             this.dirty = true;
+            // Verification includes related files outside the current watcher batch.
+            if (!this.hints.has(path)) this.hints.set(path, Date.now());
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
             if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>

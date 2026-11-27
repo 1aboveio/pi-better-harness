@@ -29,6 +29,39 @@ function frameCollector(model: WorkReadModel, frames: SnapshotFrame[]) {
 
 type SnapshotFrame = { snapshot: WorkSnapshot; previousSeq: number };
 
+test("ending an assignment clears its wait from the parent's cached terminal task", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-terminal-wait-"));
+  const directory = join(root, "supervisor");
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "terminal-wait", { baseDir: join(root, "raw"), durableDir: join(root, "archive"),
+    supervisorDirectory: directory, intervalMs: 60000 });
+  const query = frameCollector(model, []);
+  const recipient = { kind: "parent-session", workspace: root, sessionId: "parent" };
+  const owner = { kind: "worker-conversation", workspace: root, sessionId: "worker" };
+  const assignmentId = "assignment", attemptId = "attempt", id = taskId(1);
+  const scope = { background: true, cwd: root, sessionId: recipient.sessionId, id };
+  const get = () => (query.handle({ type: "runtime_get_snapshot", scope }) as WorkSnapshot).rows[0]!.meta;
+  try {
+    store.registerAssignment({ assignmentId, attemptId, owner, recipient });
+    store.registerOperation({ operationId: id, taskId: id, launchToken: id, owner, observer, assignmentAttemptId: attemptId });
+    mkdirSync(join(directory, "observed"), { recursive: true });
+    writeFileSync(join(directory, "observed", id + ".json"), JSON.stringify({ workerAttemptId: attemptId }));
+    const { wait } = store.registerWait({ owner, origin: { assignmentRef: assignmentId, attemptId },
+      dependencies: [{ operationId: id }], continuationNote: "Interpret result" });
+    store.recordTerminalOutcome({ operationId: id, eventId: "done", owner, outcome: "succeeded",
+      evidence: [{ kind: "terminal-record", ref: "result.json" }] });
+    await model.reconcile();
+    const before = get();
+    assert.equal(before.terminal, true);
+    assert.equal(before.waits[0].waitId, wait.waitId);
+    store.recordAssignmentOutcome({ assignmentId, owner, recipient, revision: 1, outcome: "failed",
+      reason: "Assignment ended", processUncertain: false, evidence: [], waits: [wait] });
+    assert.deepEqual(get().waits, []);
+  } finally {
+    query.close(); await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an exact read sees a repaired dismissal before its watcher runs", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-repaired-dismissal-"));
   const directory = join(root, "supervisor");
