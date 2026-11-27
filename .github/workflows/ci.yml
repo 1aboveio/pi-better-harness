@@ -613,7 +613,6 @@ jobs:
       - name: Server test shard
         working-directory: packages/pi-better-server
         env:
-          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
           TEST_SHARD: ${{ matrix.shard }}
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/6" test/*.test.ts
 
@@ -692,8 +691,6 @@ jobs:
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
       - name: Prove lifecycle, cancellation and crash recovery
         working-directory: packages/pi-better-server
-        env:
-          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
         run: |
           node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=3 \
             test/runtime-lifecycle.test.ts test/daemon-owner.test.ts \
