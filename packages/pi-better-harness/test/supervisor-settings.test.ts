@@ -15,6 +15,7 @@ test("the Supervisor switch and scenario picker are independent and preserve con
   try {
     type Page = { render(width: number): string[]; handleInput(key: string): void };
     let page!: Page;
+    let pagesOpened = 0;
     const theme = { fg: (_: string, text: string) => text, bold: (text: string) => text, inverse: (text: string) => text };
     const screen = () => page.render(98).join("\n");
     const focus = (label: string) => {
@@ -34,7 +35,7 @@ test("the Supervisor switch and scenario picker are independent and preserve con
       handler = command.handler;
     } } as never);
     const command = handler("", { mode: "tui", sessionManager: { getBranch: () => [] }, ui: {
-      notify: assert.fail, custom: (build: Function) => new Promise(resolve => { page = build({}, theme, {}, resolve); }),
+      notify: assert.fail, custom: (build: Function) => new Promise(resolve => { pagesOpened++; page = build({}, theme, {}, resolve); }),
     } });
     focus("Supervisor scenarios");
     assert.match(screen(), /Supervisor mode\s+Off/);
@@ -50,12 +51,14 @@ test("the Supervisor switch and scenario picker are independent and preserve con
     await press("\x1b");
     assert.match(screen(), /> Supervisor scenarios\s+›/);
     focus("Supervisor mode");
+    const beforeToggle = pagesOpened;
     await press(" ");
     assert.match(screen(), /> Supervisor mode\s+On/);
     assert.deepEqual(enabledScenarios(), ["other", "stall-diagnosis"]);
     await press("\r");
     assert.match(screen(), /> Supervisor mode\s+Off/);
     assert.deepEqual(enabledScenarios(), []);
+    assert.equal(pagesOpened, beforeToggle, "toggling the switch updates its own row in place");
     assert.ok(readSupervisorSettings().revision);
     assert.deepEqual(readSupervisorSettings().scenarios, ["other", "stall-diagnosis"]);
     await press("\x1b");

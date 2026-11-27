@@ -85,7 +85,7 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     if (openAgents) handlers.openAgents = () => { agents++; };
     const page = createSubagentSettingsPage(theme, handlers, () => {}, () => { closed++; }, height);
     page.focused = true;
-    return { page, reads: () => reads, settings: () => current, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
+    return { page, reads: () => reads, settings: () => current, changeMode: handlers.changeMode, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
 }
 
 const LABELS = [
@@ -552,7 +552,17 @@ test("resizing and navigating the grouped menu reuse the settings snapshot", () 
     }
     assert.equal(h.reads(), 1);
     h.page.handleInput(" ");
-    assert.equal(h.reads(), 2);
+    assert.equal(h.reads(), 3, "activation reads the effective value, then refreshes after saving");
+    assert.match(selectedText(h.page), /coordinator/);
+});
+
+test("external changes are visible after invalidation and are read before an edit", () => {
+    const h = harness();
+    h.changeMode("manual");
+    h.page.invalidate();
+    assert.match(selectedText(h.page), /manual/);
+    h.changeMode("adaptive");
+    h.page.handleInput(" ");
     assert.match(selectedText(h.page), /coordinator/);
 });
 

@@ -12,6 +12,15 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   const registry = createSettingsRegistry(pi);
   const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"],
     get: getNavigatorView, change: (value: string) => setNavigatorView(value) };
+  const supervisorMode = {
+    id: "supervisor-mode", label: "Supervisor mode", values: ["Off", "On"],
+    description: "Run the selected scenarios for sessions sharing this agent directory. Turning the mode off keeps your selections.",
+    get() {
+      try { return readSupervisorSettings().enabled ? "On" : "Off"; }
+      catch { return "Unavailable"; }
+    },
+    change(value: string) { setSupervisorEnabled(value === "On"); },
+  };
   pi.on("session_start", () => { try { loadNavigatorView(); } catch { /* settings command reports read errors */ } });
   pi.on("session_start", () => registry.refresh());
   pi.on("session_shutdown", () => registry.dispose());
@@ -40,19 +49,12 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
         try { prompt = currentInstructions(agentDir); }
         catch (error) { readError = error instanceof Error ? error : new Error(String(error)); }
         const state = readError ? "Unavailable" : prompt === undefined ? "Off" : "On";
-        let supervisor: ReturnType<typeof readSupervisorSettings> | undefined;
-        let supervisorError: unknown;
-        try { supervisor = readSupervisorSettings(); }
-        catch (error) { supervisorError = error; }
         try {
           selected = await chooseHarnessSetting(ctx, links, selected, {
             get: readSettings,
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
-          }, registry.controls(), view, [
-            { id: "supervisor:toggle", label: "Supervisor mode", kind: "toggle",
-              value: supervisor ? (supervisor.enabled ? "On" : "Off") : "Unavailable",
-              description: "Run the selected scenarios for sessions sharing this agent directory. Turning the mode off keeps your selections." },
+          }, [...registry.controls(), supervisorMode], view, [
             { id: "supervisor:scenarios", label: "Supervisor scenarios", kind: "page",
               description: "Choose which scenarios run when Supervisor mode is on." },
             { id: "instructions:toggle", label: "Harness instructions", kind: "toggle", value: state,
@@ -65,12 +67,8 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
           return;
         }
         if (!selected) return;
-        if (selected.startsWith("supervisor:")) {
-          try {
-            if (!supervisor) throw supervisorError;
-            if (selected === "supervisor:toggle") setSupervisorEnabled(!supervisor.enabled);
-            else await openSupervisorScenarios(ctx);
-          }
+        if (selected === "supervisor:scenarios") {
+          try { await openSupervisorScenarios(ctx); }
           catch (error) { ctx.ui.notify(`Supervisor mode: ${error instanceof Error ? error.message : String(error)}`, "error"); }
           continue;
         }

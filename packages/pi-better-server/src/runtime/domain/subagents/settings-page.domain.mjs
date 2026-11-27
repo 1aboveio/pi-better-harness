@@ -172,6 +172,8 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
     }
     function action(selected, key) {
         try {
+            // Defaults may have changed in a second Pi session since this page opened.
+            settings = handlers.get();
             if (selected.kind === "workspace") {
                 handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
                 reportChange("Session workspace updated.");
@@ -268,7 +270,11 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             if (picker)
                 picker.focused = value;
         },
-        invalidate() { input.invalidate(); picker?.invalidate(); },
+        invalidate() {
+            settings = handlers.get();
+            input.invalidate();
+            picker?.invalidate();
+        },
         handleInput(data) {
             if (picker) {
                 picker.handleInput(data);
