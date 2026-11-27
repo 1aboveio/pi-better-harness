@@ -22,6 +22,19 @@ async function ready(client: WorkClient) {
   });
 }
 
+async function postAndWaitForWorker(worker: Worker, command: object, receipt: string) {
+  const messages = on(worker, "message", { close: ["exit"], signal: AbortSignal.timeout(5000) });
+  try {
+    worker.postMessage(command);
+    for await (const [message] of messages) {
+      if (message.type === receipt) return;
+    }
+    throw new Error(`Query fixture worker exited before ${receipt}`);
+  } finally {
+    await messages.return?.();
+  }
+}
+
 test("query fixture cancellation closes live and already-ended resources without retaining the process", { timeout: 20000 }, () => {
   // The host supports Node 22; this no-isolation control uses the already
   // provisioned private Node 24, as does the managed mutation-store test.
@@ -596,9 +609,8 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     await f.waitForSourceReady();
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
-    const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
     f.armWatchdog();
-    f.worker.postMessage({ type: "wedge" }); await wedged;
+    await postAndWaitForWorker(f.worker, { type: "wedge" }, "wedged");
     const began = performance.now();
     await assert.rejects(a.get({ limit: 1 }), /deadline exceeded/);
     const control = performance.now(); assert.equal((await b.request("ping")).ok, true);
@@ -632,21 +644,17 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
-test("system sleep gives the worker time to resume before the watchdog fires", async () => {
-  const f = await fixture({ watchdogMs: 800, workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+test("system sleep gives the worker time to resume before the watchdog fires", { timeout: 10000 }, async () => {
+  const f = await fixture({ watchdogMs: 800, startupWatchdogMs: 4000,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     await f.bootstrapped;
+    await f.waitForSourceReady();
     const client = await f.client();
     await ready(client);
     const gate = new Int32Array(new SharedArrayBuffer(4));
-    const sleeping = new Promise<void>(resolve => {
-      const listener = (message: any) => {
-        if (message.type === "sleeping") { f.worker.off("message", listener); resolve(); }
-      };
-      f.worker.on("message", listener);
-    });
-    f.worker.postMessage({ type: "sleep", gate });
-    await sleeping;
+    f.armWatchdog();
+    await postAndWaitForWorker(f.worker, { type: "sleep", gate }, "sleeping");
     Atomics.wait(gate, 0, 0, 1100);
     // The parent resumes first, while the worker heartbeat is still stale.
     await new Promise(resolve => setTimeout(resolve, 250));
@@ -657,15 +665,16 @@ test("system sleep gives the worker time to resume before the watchdog fires", a
   } finally { await f.close(); }
 });
 
-test("repeated parent stalls grant only one grace period to the same wedged worker", async () => {
+test("repeated parent stalls grant only one grace period to the same wedged worker", { timeout: 10000 }, async () => {
   const reports: string[] = [];
-  const f = await fixture({ watchdogMs: 800, workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url),
+  const f = await fixture({ watchdogMs: 800, startupWatchdogMs: 4000,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url),
     logWatchdog: line => reports.push(line) });
   try {
     await f.bootstrapped;
-    const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
-    f.worker.postMessage({ type: "wedge" });
-    await wedged;
+    await f.waitForSourceReady();
+    f.armWatchdog();
+    await postAndWaitForWorker(f.worker, { type: "wedge" }, "wedged");
     const gate = new Int32Array(new SharedArrayBuffer(4));
     const stall = async () => {
       Atomics.wait(gate, 0, 0, 1050);
@@ -1349,7 +1358,7 @@ test("diagnostic observation uses pushed state without initiating another invent
   } finally { await f.close(); }
 });
 
-test('Subagents and Background share one coordinator read connection in the query worker', async t => {
+test('Subagents and Background share one coordinator read connection in the query worker', { timeout: 10000 }, async t => {
   const f = await fixture();
   const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
   const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') }); store.close();
