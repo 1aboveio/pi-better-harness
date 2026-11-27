@@ -16,6 +16,10 @@ on:
           - pi-better-server
           - pi-better-model-router
           - pi-better-harness
+      reviewed_harness_0590:
+        description: "Build Harness 0.59.0 from the merged source of PR #923"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -34,9 +38,23 @@ jobs:
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
     environment: npm-publish
+    env:
+      SOURCE_SHA: ${{ inputs.reviewed_harness_0590 && 'ebe9b59136d4a86f16ab2fefe9d32ad9493f3a6f' || github.sha }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Check reviewed Harness release
+        if: inputs.reviewed_harness_0590
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          test "$PACKAGE" = pi-better-harness
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(node -p "require('./packages/pi-better-harness/package.json').version")" = 0.59.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -290,6 +308,15 @@ jobs:
               ;;
           esac
 
+      - name: Check components of the reviewed Harness release
+        if: inputs.reviewed_harness_0590
+        run: |
+          set -euo pipefail
+          for name in pi-better-background-tasks pi-better-subagents pi-better-server; do
+            version=$(node -p 'require(process.argv[1]).version' "./packages/$name/package.json")
+            node scripts/npm-version-visible.mjs "$name" "$version" --wait-seconds 300
+          done
+
       - name: Publish package
         env:
           PACKAGE: ${{ steps.package.outputs.name }}
@@ -342,6 +369,16 @@ jobs:
             if (!matches) throw new Error("published package provenance does not match " + expected);
           '
 
+      - name: Verify the published Harness source
+        if: inputs.reviewed_harness_0590
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 6 --retry-all-errors --max-time 15 \
+            https://registry.npmjs.org/pi-better-harness/0.59.0 > "$RUNNER_TEMP/harness-version.json"
+          node -e 'const { gitHead } = require(process.argv[1]);
+            if (gitHead !== process.env.SOURCE_SHA) throw new Error("Unexpected npm gitHead: " + gitHead);' \
+            "$RUNNER_TEMP/harness-version.json"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -358,15 +395,15 @@ jobs:
             0)
               git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
               TAG_SHA="$(git rev-list -n 1 "$TAG")"
-              if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
-                echo "$TAG already points to $TAG_SHA, expected $GITHUB_SHA." >&2
+              if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
+                echo "$TAG already points to $TAG_SHA, expected $SOURCE_SHA." >&2
                 exit 1
               fi
               ;;
             2)
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git tag -a "$TAG" "$GITHUB_SHA" -m "Release $TAG"
+              git tag -a "$TAG" "$SOURCE_SHA" -m "Release $TAG"
               git push origin "refs/tags/${TAG}"
               ;;
             *)
