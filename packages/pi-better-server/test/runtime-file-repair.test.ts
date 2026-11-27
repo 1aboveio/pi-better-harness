@@ -736,6 +736,13 @@ test("real daemon publishes task appearance, atomic terminal replacement, deleti
   try {
     await Promise.all(clients.map(client => client.subscribe({ cwd: f.root, sessionId: "parent", limit: 100 })));
     await wait(() => clients.every(client => client.snapshot?.status === "ready"));
+    const { subscriptionTraces } = await clients[0]!.request("runtime_get_metrics");
+    for (const client of clients) {
+      const local = client.lastSubscriptionTrace!;
+      const remote = subscriptionTraces.find((record: any) => record.id === local.id);
+      assert.ok(local.sentAt <= remote.serverReceivedAt && remote.serverReceivedAt <= remote.workerStartedAt);
+      assert.ok(remote.replySentAt >= remote.workerStartedAt && local.receivedAt! >= remote.workerStartedAt);
+    }
     f.put("sa_new"); await wait(() => clients.every(client => client.snapshot?.rows.some((row: any) => row.meta.id === "sa_new")));
     const meta = f.put("sa_new", { status: "completed", endedAt: Date.now() });
     writeFileSync(join(f.runs, "sa_new", "replacement"), JSON.stringify({ ...meta, name: "replaced" }));

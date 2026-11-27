@@ -190,6 +190,7 @@ parentPort.on("message", async message => {
     return;
   }
   if (message.type !== "query") return;
+  if (message.traceSubscription) parentPort.postMessage({ type: "subscription-started", id: message.id, at: Date.now() });
   const request = { connection: message.connection, cancelled: false };
   requests.set(message.id, request);
   const release = budget.enter("query");

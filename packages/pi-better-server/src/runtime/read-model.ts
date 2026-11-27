@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watchSource, type SourceWatch, type SourceWatcher as FSWatcher } from "./source-watch.ts";
 import { basename, dirname, relative, join, resolve, sep } from "node:path";
-import { realpathSync, statSync, mkdirSync } from "node:fs";
+import { realpathSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { setImmediate as yieldTurn } from "node:timers/promises";
@@ -39,6 +39,7 @@ export interface WorkSnapshot {
 }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const safeId = /^[A-Za-z0-9_-]+$/;
+const archiveConflict = new Error("Source changed during observation (terminal archive); retrying.");
 
 function healthWithThresholds(health: any, config: any, meta: any) {
   if (!health) return undefined;
@@ -381,11 +382,34 @@ export class WorkReadModel {
     ];
   }
   upgradeObligations() {
-    if (this.state !== "ready") throw new Error(`Runtime observation ${this.state}: ${this.reason}`);
-    return [...this.livenessReasons(), ...this.reader.upgradeObligations(),
+    const historyOnly = this.state === "degraded" && this.imported && this.reason === String(archiveConflict)
+      && this.sourceErrors.size > 0 && [...this.sourceErrors.values()].every(reason => reason === String(archiveConflict));
+    if (historyOnly) this.verifyPublishedWriters();
+    else if (this.state !== "ready") throw new Error(`Runtime observation ${this.state}: ${this.reason}`);
+    const live = this.livenessReasons();
+    if (this.background.status !== "ready") throw new Error(`Background writer coverage: ${this.background.reason ?? this.background.status}`);
+    return [...live, ...this.reader.upgradeObligations(),
       ...[...this.projected.values()].filter(row => ["running", "orphaned"].includes(row.meta.status)
         && !processMatchesStart(row.meta.pid, row.meta.pidStartTime))
         .map(row => ({ kind: "unresolved-writer", id: row.meta.id }))];
+  }
+  /** Only the upgrade worker pays for independent coverage of every live run. */
+  private verifyPublishedWriters() {
+    if (!this.observationInitialized || this.assignmentFault || this.reader.revision() !== this.coordinator)
+      throw new Error("Coordinator writer coverage changed during archive repair");
+    const signature = (path: string) => {
+      const s = statSync(path, { bigint: true });
+      return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+    };
+    const directory = signature(this.runs);
+    const known = new Set([...this.files.keys()].filter(path => path.startsWith(this.runs + sep)));
+    for (const id of readdirSync(this.runs).filter(name => safeId.test(name))) {
+      const path = join(this.runs, id, "meta.json");
+      if (!known.delete(path) || this.files.get(path)?.signature !== signature(path))
+        throw new Error(`Unverified run metadata during upgrade: ${id}`);
+    }
+    if (known.size) throw new Error(`Missing run metadata during upgrade: ${basename(dirname(known.values().next().value!))}`);
+    if (signature(this.runs) !== directory) throw new Error("Run directory changed during upgrade");
   }
   async ensureId(id: string): Promise<boolean> {
 
@@ -1038,6 +1062,10 @@ export class WorkReadModel {
             this.dirty = true;
             // Verification includes related files outside the current watcher batch.
             if (!this.hints.has(path)) this.hints.set(path, Date.now());
+            const verifiedArchiveRace = path.startsWith(this.archives + sep) && !globallyUnverified && !failedPaths.size
+              && (this.state === "ready" || this.reason === String(archiveConflict))
+              && [...this.sourceErrors.values()].every(reason => reason === String(archiveConflict));
+            if (verifiedArchiveRace) throw archiveConflict;
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
             if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
