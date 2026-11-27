@@ -223,7 +223,7 @@ jobs:
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.shard }}/3)
+    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/3)
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -231,6 +231,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        pi-version: ["1.2.0", "1.6.1"]
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
@@ -257,13 +258,13 @@ jobs:
           npm install --global @openai/codex@0.159.2
           test "$(codex --version)" = "codex-cli 0.159.2"
 
-      - name: pi-better-server suite on supported native Pi 1.2
+      - name: pi-better-server suite on Pi ${{ matrix.pi-version }}
         env:
           TEST_SHARD: ${{ matrix.shard }}/3
-        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
+          PI_SDK_VERSION: ${{ matrix.pi-version }}
+        run: bash packages/pi-better-server/scripts/test-on-pi.sh "$PI_SDK_VERSION" "$RUNNER_TEMP/pi-compat"
 
-  # Exercise the affected extensions against the minimum and current Pi 1.x
-  # SDKs without taking over the server lane's supported Pi 1.2 proof.
+  # Verify extensions against each supported Pi 1.x baseline.
   pi-1x-compat-extensions:
     name: pi-1x-compat-extensions (${{ matrix.pi-version }})
     needs: changes
@@ -275,7 +276,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi-version: ["1.0.0", "1.3.0"]
+        pi-version: ["1.0.0", "1.3.0", "1.6.1"]
     env:
       PI_SDK_VERSION: ${{ matrix.pi-version }}
     steps:
@@ -336,8 +337,12 @@ jobs:
         run: npm run typecheck -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
       - name: Verify Recap settings and foreground request isolation in Pi
-        if: matrix.pi-version == '1.3.0'
+        if: matrix.pi-version == '1.6.1'
         run: PI_RECAP_TEST_CLI="$PWD/node_modules/.bin/pi" node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/session-recap.tui.e2e.test.mjs
+
+      - name: Verify native remote browsing and attachment on Pi 1.6.1
+        if: matrix.pi-version == '1.6.1'
+        run: PI12_NATIVE_CLI="$PWD/node_modules/.bin/pi" node --import tsx --test packages/pi-better-server/test/pi-1.2-bridge.native.test.ts
 
       - name: Test background lifecycle, navigator, and SSH compatibility
         env:

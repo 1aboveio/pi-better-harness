@@ -24,6 +24,7 @@ type GuardState = { managers: WeakMap<object, Admission>; installed: WeakSet<obj
 const key = Symbol.for("pi-better-server.maintenance.sdk-guards.v1");
 const globals = globalThis as typeof globalThis & { [key]?: GuardState };
 const guards = globals[key] ??= { managers: new WeakMap(), installed: new WeakSet(), supported: new WeakSet(), tools: new WeakSet() };
+const hasGuardedCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1";
 const warmers = guards.warmers ??= new WeakMap<object, WarmGuard>();
 const closedError = () => new Error("Session runtime is closed; close and reopen the session. History is preserved.");
 
@@ -65,7 +66,7 @@ function wrap(proto: object, name: string, invoke: (original: Method, receiver: 
  */
 function guardCacheWarmer(session: AgentSession, state: Admission): void {
   const warmer = (session as unknown as { _cacheWarmer?: object })._cacheWarmer;
-  if (!/^1\.2\./.test(VERSION)) return;
+  if (!hasGuardedCacheWarmer) return;
   if (!warmer) { state.persistenceSafe = false; return; }
   if (warmers.has(warmer)) return;
   const runtime = warmer as Record<string, any>;
@@ -95,7 +96,7 @@ function guardCacheWarmer(session: AgentSession, state: Admission): void {
 }
 
 function cacheWarmingState(session: AgentSession): "unsupported" | "busy" | "idle" {
-  if (!/^1\.2\./.test(VERSION)) return "idle";
+  if (!hasGuardedCacheWarmer) return "idle";
   const warmer = (session as unknown as { _cacheWarmer?: Record<string, any> })._cacheWarmer;
   const guard = warmer && warmers.get(warmer);
   if (!warmer || !guard || guard.state !== guards.managers.get(session.sessionManager) ||
@@ -134,7 +135,7 @@ function installSdkGuards(): void {
   if (!guards.installed.has(proto)) {
     // Only the verified prototype ABI can support an upgrade claim. Missing optional
     // methods (nested tools in 0.82) are harmless; missing required guards are not.
-    const required = ["prompt", "steer", "followUp", "sendUserMessage", "executeBash", "compact", "navigateTree", "setModel", "cycleModel", "sendCustomMessage", "reload", "_refreshToolRegistry", ...(/^1\.2\./.test(VERSION) ? ["_executeNestedToolCall", "setCacheWarmingMode"] : [])];
+    const required = ["prompt", "steer", "followUp", "sendUserMessage", "executeBash", "compact", "navigateTree", "setModel", "cycleModel", "sendCustomMessage", "reload", "_refreshToolRegistry", ...(hasGuardedCacheWarmer ? ["_executeNestedToolCall", "setCacheWarmingMode"] : [])];
     const supported = required.every(name => {
       const descriptor = Object.getOwnPropertyDescriptor(proto, name);
       return descriptor?.configurable && typeof descriptor.value === "function";
@@ -251,7 +252,7 @@ export class HostMaintenance {
     const sessionProto = AgentSession.prototype as unknown as Record<string, unknown>;
     guards.managers.set(manager, {
       gate: this, manager, closed: false, calls: 0, reloadEntry: false,
-      persistenceSafe: /^(0\.82|1\.2)\./.test(VERSION) && guards.supported.has(AgentSession.prototype) && guards.supported.has(SessionManager.prototype) &&
+      persistenceSafe: (/^0\.82\./.test(VERSION) || hasGuardedCacheWarmer) && guards.supported.has(AgentSession.prototype) && guards.supported.has(SessionManager.prototype) &&
         ["_persist", "_rewriteFile"].every(name => typeof proto[name] === "function" && !Object.hasOwn(manager, name)) &&
         ["_buildRuntime", "_refreshToolRegistry", "prompt", "compact", "executeBash"].every(name => typeof sessionProto[name] === "function"),
     });

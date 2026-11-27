@@ -16,7 +16,6 @@ set -euo pipefail
 
 PREFIX="${1:-${PI_SERVER_PREFIX:-$HOME/.pi-better-server}}"
 NODE_VERSION="${NODE_VERSION:-24.14.1}"
-PI_VERSION="${PI_VERSION:-0.82.1}"
 HARNESS_VERSION="${HARNESS_VERSION:-0.31.0}"
 MINIMAL_TOOLS_VERSION="${MINIMAL_TOOLS_VERSION:-2.1.4}"
 ASK_USER_QUESTION_VERSION="${ASK_USER_QUESTION_VERSION:-2.13.9}"
@@ -48,6 +47,9 @@ export PATH="$NODE_HOME/bin:$PATH"
 export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 export PI_SERVER_DIR="${PI_SERVER_DIR:-$PI_CODING_AGENT_DIR/server}"
 
+# Use the same default SDK as the managed artifact. An explicitly selected host can use a different Pi.
+PI_VERSION="${PI_VERSION:-$(node -p "require(process.argv[1]).dependencies['@earendil-works/pi-coding-agent']" "$PKG_DIR/scripts/private-runtime/package.json")}"
+
 # Pi itself, pinned. The package.json keeps `npm` from treating $PREFIX as part of another project.
 if [ ! -f "$PREFIX/package.json" ]; then
   printf '{ "name": "pi-better-server-host", "private": true }\n' > "$PREFIX/package.json"
@@ -66,8 +68,11 @@ done
 # The server stays outside node_modules: Node refuses to run .ts files from there.
 rm -rf "$PREFIX/server"
 mkdir -p "$PREFIX/server"
+mkdir -p "$PREFIX/server/scripts"
 cp -R "$PKG_DIR/src" "$PREFIX/server/src"
-printf '{ "type": "module" }\n' > "$PREFIX/server/package.json"
+cp -R "$PKG_DIR/scripts/private-runtime" "$PREFIX/server/scripts/private-runtime"
+cp "$PKG_DIR/package.json" "$PREFIX/server/package.json"
+(cd "$PREFIX/server" && npm install --omit=dev --legacy-peer-deps --ignore-scripts --no-package-lock --no-audit --no-fund)
 rev="$(git -C "$PKG_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 printf 'node %s\npi %s\npi-better-harness %s\nharness-rev %s\n' "$NODE_VERSION" "$PI_VERSION" "$HARNESS_VERSION" "$rev" > "$PREFIX/VERSIONS"
 printf 'pi-codex-minimal-tools %s\nrpiv-ask-user-question %s\nrpiv-web-tools %s\n' "$MINIMAL_TOOLS_VERSION" "$ASK_USER_QUESTION_VERSION" "$WEB_TOOLS_VERSION" >> "$PREFIX/VERSIONS"

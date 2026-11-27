@@ -6,6 +6,7 @@ import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import { gunzipSync } from "node:zlib";
+import privateRuntime from "../scripts/private-runtime/package.json" with { type: "json" };
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { validatePayload, type ArtifactPayload } from "../scripts/private-runtime/format.ts";
 import { ownPackageDir } from "../src/startup/artifact.ts";
@@ -178,7 +179,7 @@ async function existingDaemon(t: TestContext, serverDir: string, announced = hel
 // This is the suite deadline, not an individual remote operation timeout.
 describe("managed remote connect", { concurrency: false, timeout: 120_000 }, () => {
   for (const mode of ["disabled", "older CLI default"] as const) {
-    it(`preserves registered startup when managed installation is ${mode}`, { skip: mode === "older CLI default" && PI_VERSION === "1.2.0" }, async t => {
+    it(`preserves registered startup when managed installation is ${mode}`, { skip: mode === "older CLI default" && PI_VERSION === privateRuntime.dependencies["@earendil-works/pi-coding-agent"] }, async t => {
       const f = await fixture(t, true);
       writeFileSync(f.runtime.launcher, `#!/bin/sh\nif [ "$1" = runtime ]; then printf %s ${shellQuote(JSON.stringify(f.runtime))}; else printf %s ${shellQuote(JSON.stringify(readiness(f.runtime.defaultServerDir)))}; fi\n`, { mode: 0o700 });
       const target = await resolveTarget({ ...f.options, managedRuntime: mode === "disabled" ? false : undefined });
@@ -195,7 +196,8 @@ describe("managed remote connect", { concurrency: false, timeout: 120_000 }, () 
       const f = await fixture(t, registered);
       const stages: string[] = [], upgrades: string[] = [];
       const controller = new AbortController();
-      const target = await resolveTarget({ ...f.options, signal: controller.signal, onProgress: stage => stages.push(stage), onUpgradeProgress: stage => upgrades.push(stage) });
+      const managedRuntime = registered && PI_VERSION === privateRuntime.dependencies["@earendil-works/pi-coding-agent"] ? undefined : true;
+      const target = await resolveTarget({ ...f.options, managedRuntime, signal: controller.signal, onProgress: stage => stages.push(stage), onUpgradeProgress: stage => upgrades.push(stage) });
       const agentDir = registered ? f.runtime.agentDir : join(f.root, ".pi/agent");
       const serverDir = registered ? f.runtime.defaultServerDir : join(agentDir, "server");
       assert.equal(target.serverDir, serverDir);

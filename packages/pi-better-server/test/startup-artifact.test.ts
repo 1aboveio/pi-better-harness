@@ -17,6 +17,23 @@ test("Pi supplies the extension's TypeBox while the private runtime installs its
   assert.equal(lock.packages["node_modules/typebox"].version, runtime.dependencies.typebox);
 });
 
+test("the managed artifact locks one version across all Pi SDK packages", () => {
+  const root = join(ownPackageDir, "scripts/private-runtime");
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  const pin = manifest.dependencies["@earendil-works/pi-coding-agent"];
+  assert.match(pin, /^\d+\.\d+\.\d+$/);
+  for (const [name, version] of Object.entries({ ...manifest.dependencies, ...manifest.overrides })) {
+    if (!name.startsWith("@earendil-works/pi-")) continue;
+    assert.equal(version, pin, name);
+    assert.equal(lock.packages[`node_modules/${name}`].version, pin, name);
+  }
+  for (const [path, pkg] of Object.entries(lock.packages)) {
+    if (/(?:^|\/)node_modules\/@earendil-works\/pi-[^/]+$/.test(path)) assert.equal((pkg as { version: string }).version, pin, path);
+  }
+  assert.equal(createServerArtifact({ platform: "linux-x64" }).build.piSdkVersion, pin);
+});
+
 function fixture(t: any) {
   const root = mkdtempSync(join(tmpdir(), "pi-artifact-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
