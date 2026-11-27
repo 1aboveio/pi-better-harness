@@ -188,6 +188,10 @@ jobs:
         id: install
         run: npm ci
 
+      - name: Verify the packaged Windows runtime and execute its pinned Node
+        if: env.AFFECTED == 'true'
+        run: node --import tsx scripts/verify-windows-managed-artifact.mjs
+
       # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
       - name: Prepare SSH fixtures and report native OpenSSH
         if: env.AFFECTED == 'true'

@@ -3,11 +3,12 @@ import ts from "typescript";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServerArtifact } from "../packages/pi-better-server/src/startup/artifact.ts";
+import { NODE_CHECKSUMS } from "../packages/pi-better-server/scripts/private-runtime/format.ts";
 import "./sync-runtime-domain.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = join(root, "packages/pi-better-server");
-const artifacts = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].map(platform => createServerArtifact({ platform }));
+const artifacts = Object.keys(NODE_CHECKSUMS).map(platform => createServerArtifact({ platform }));
 for (const name of ["pi-better-subagents", "pi-better-background-tasks"]) {
   const target = join(root, "packages", name, "runtime-client");
   rmSync(target, { recursive: true, force: true });
