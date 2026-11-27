@@ -25,6 +25,7 @@ import { currentProcessStartToken } from "./process-identity.js";
 import { FOREGROUND_SANDBOX_POLICY_CHANNEL, FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL } from "./sandbox.js";
 
 type JsonSchema = {
+  anyOf?: JsonSchema[];
   description?: string;
   properties?: Record<string, JsonSchema>;
   required?: string[];
@@ -155,6 +156,20 @@ describe("manager-domain SDK integration and native server acceptance", () => {
       expect(guidelines.some((line) => line.includes("coordinator ledger"))).toBe(true);
       expect(guidelines.some((line) => line.includes("continue unblocked foreground work without polling"))).toBe(true);
       expect(guidelines.some((line) => line.includes("terminal, inspected, and integrated"))).toBe(true);
+    }
+  });
+
+  it.each(["bg_task_watch", "bg_task"])("%s exposes watch paths without a nested regex that blocks grammar conversion (#912)", async (name) => {
+    const harness = await createHarness();
+    const fields = harness.tools.get(name)?.parameters?.properties;
+    for (const field of ["success_when", "failure_when"]) {
+      const variants = fields?.[field]?.anyOf ?? [];
+      const paths = variants.map(variant => variant.properties?.path).filter(Boolean);
+      expect(paths).toHaveLength(2); // json_path_equals and json_path_exists
+      for (const path of paths) {
+        expect(path).toMatchObject({ type: "string" });
+        expect(path).not.toHaveProperty("pattern");
+      }
     }
   });
 

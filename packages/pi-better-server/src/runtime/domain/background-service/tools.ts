@@ -37,8 +37,8 @@ export { formatLaunch } from "./output.js";
 
 type ToolRuntime = Pick<BackgroundTaskRuntime, "awaitFirstWatchCheck" | "resumeRunningTask" | "spawnTask" | "startWatchTask" | "stopTask">;
 
+// Watch admission validates the path. Basalt rejects a nested root-prefix regex during grammar conversion.
 const JsonPathSchema = Type.String({
-  pattern: "^\\$",
   description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
 });
 
