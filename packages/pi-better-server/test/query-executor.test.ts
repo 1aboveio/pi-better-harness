@@ -583,7 +583,7 @@ test("responsive fixture imports outlive the wedge watchdog without source readi
 });
 
 test("watchdog recovers a genuinely wedged worker while socket control stays responsive", { timeout: 10000 }, async t => {
-  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200,
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, startupWatchdogMs: 4000,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     // The 400 ms read deadline tests the wedge, not cold worker imports.
@@ -597,6 +597,7 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
+    f.armWatchdog();
     f.worker.postMessage({ type: "wedge" }); await wedged;
     const began = performance.now();
     await assert.rejects(a.get({ limit: 1 }), /deadline exceeded/);

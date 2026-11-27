@@ -53,6 +53,7 @@ const AREA_PATTERNS = {
     "packages/pi-better-server/test/support/subagent-offline-model.ts",
     "packages/pi-better-server/test/support/subagent-launch-sdk.mjs",
     "packages/pi-better-server/test/support/native-message-framing.mjs",
+    "packages/pi-better-server/test/runtime-subagent-park*.ts",
     "packages/pi-better-server/src/runtime/domain/subagents/**",
     "packages/pi-better-server/src/runtime/domain/sandbox-policy/**",
     "scripts/require-sandbox-backend.mjs",
