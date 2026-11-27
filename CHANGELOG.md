@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.59.2] - 2026-11-28
+
+### Fixed
+
+- The bundled runtime recovers when a task archive changes during snapshot verification, even if the file watcher reports only the live task record.
+
 ## [pi-better-harness@0.59.1] - 2026-11-27
 
 ### Fixed
@@ -33,6 +39,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - The managed runtime reports an unknown launch outcome if the connection drops before a subagent receipt arrives. It also picks up the Background Tasks cleanup fix for Windows.
+- Snapshot retries reread the file that changed during verification, allowing the task view to recover after writes stop.
 
 ## [pi-better-harness@0.59.0] - 2026-11-27
 
