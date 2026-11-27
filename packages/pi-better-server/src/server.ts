@@ -638,7 +638,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   // HostedSession idleness does not cover detached accepted work.
                   // Unknown observation fails closed for an irreversible activation.
                   upgradeBlockers = await work().upgradeObligations();
-                  if (cleanupBlocksShutdown()) upgradeBlockers.push({ kind: "assignment-cleanup", id: resultSupervision?.hostId });
+                  if (cleanupBlocksShutdown() || hasQueuedCleanup()) upgradeBlockers.push({ kind: "assignment-cleanup", id: resultSupervision?.hostId });
                   if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
                   if (launches?.cleaningRegistry) throw new Error("Waiting for subagent registry cleanup");
                   if (inFlight > 0 || resultSupervision?.busy || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");

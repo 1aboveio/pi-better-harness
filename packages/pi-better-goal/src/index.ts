@@ -44,7 +44,7 @@ import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, restoredWorkflowMatches, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
-import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
+import { boundPlanEntry, WORKFLOW_PLAN_ENTRY, completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import { canStartGoalFromOutcome, GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
@@ -398,8 +398,9 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
   };
-  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>, resumePlan = false): void => {
-    pi.appendEntry(WORKFLOW_ENTRY_TYPE, { ...workflowEntry(owner), ...(resumePlan && { resumePlan }) });
+  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>, plan?: ReturnType<typeof boundPlanEntry>): void => {
+    pi.appendEntry(WORKFLOW_ENTRY_TYPE, workflowEntry(owner));
+    if (plan) pi.appendEntry(WORKFLOW_PLAN_ENTRY, plan);
     pi.events.emit("pi-better-workflow:changed", owner);
   };
 
@@ -529,13 +530,9 @@ export default function (pi: ExtensionAPI): void {
       ? workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath)
       : null;
 
-  /**
-   * The session's workflow owner when an active goal is bound to it through its skill command, else
-   * null. Only these goals are gated by the workflow's scheduler.
-   */
-  const boundWorkflow = (goal: GoalSnapshot, ctx: ExtensionContext, includePaused = false): NonNullable<ReturnType<typeof currentWorkflowOwner>> | null => {
+  const boundWorkflow = (goal: GoalSnapshot, ctx: ExtensionContext): NonNullable<ReturnType<typeof currentWorkflowOwner>> | null => {
     const owner = getWorkflow(ctx);
-    if (!owner || goal.command?.source !== "skill" || (goal.status !== "active" && !(includePaused && goal.status === "paused"))) return null;
+    if (!owner || goal.command?.source !== "skill") return null;
     try {
       const bound = goalWorkflowOwner(goal);
       if (goal.workflowBinding !== undefined &&
@@ -1059,8 +1056,8 @@ export default function (pi: ExtensionAPI): void {
       const binding = previous ? restoredOwner : owner;
       goal.workflowBinding = binding ? { name: binding.name, path: binding.path } : null;
     }
-    const restore = restoredOwner && (restoredOwner.name !== owner?.name || restoredOwner.path !== owner?.path);
-    return { goal, restore: restore ? restoredOwner : null };
+    const plan = restoredOwner && previous ? boundPlanEntry(ctx.sessionManager.getBranch(), restoredOwner, previous.goalId) : undefined;
+    return { goal, restore: restoredOwner, plan };
   };
 
   const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
@@ -1075,8 +1072,8 @@ export default function (pi: ExtensionAPI): void {
     if (!canStartGoalFromOutcome(event.outcome, reopenedGoal)) return;
     const prepared = prepareSavedGoal(ctx, event.outcome.objective.trim(), reopenedGoal);
     if (typeof prepared === "string") return;
+    if (prepared.restore) recordWorkflow(prepared.restore, prepared.plan);
     setGoal(prepared.goal, ctx, "runtime", "bind");
-    if (prepared.restore) recordWorkflow(prepared.restore, true);
     resetContinuationState(prepared.goal);
   });
 
@@ -1123,8 +1120,8 @@ export default function (pi: ExtensionAPI): void {
       const prepared = prepareSavedGoal(ctx, savedGoal.objective, previous, handoffOwner);
       if (typeof prepared === "string") { warn(prepared); return; }
       const { goal } = prepared;
+      if (prepared.restore) recordWorkflow(prepared.restore, prepared.plan);
       setGoal(action === "pause" ? goalWithStatus(goal, "paused") : goal, ctx, "command", "adopt");
-      if (prepared.restore) recordWorkflow(prepared.restore, true);
       if (action === "resume") queueGoalContinuation(goal, ctx);
     } else if (action === "resume") {
       if (!current) { warn("No saved Goal or unfinished Todo to resume."); return; }
@@ -1245,7 +1242,7 @@ export default function (pi: ExtensionAPI): void {
           notifyGoal(ctx, "No goal is set.", "warning");
           return;
         }
-        const releaseOwner = boundWorkflow(current, ctx, true);
+        const releaseOwner = current.status !== "complete" ? boundWorkflow(current, ctx) : null;
         setGoal(goalWithStatus(current, "complete"), ctx, "command");
         if (releaseOwner) recordWorkflow(null);
         notifyGoal(ctx, "Goal marked complete.");
@@ -1320,7 +1317,8 @@ export default function (pi: ExtensionAPI): void {
           details: { ok: true, goal: current },
         };
       }
-      const gated = boundWorkflow(current, ctx);
+      const releaseOwner = boundWorkflow(current, ctx);
+      const gated = current.status === "active" ? releaseOwner : null;
       const verdict = gated ? await completionGate(ctx.sessionManager.getBranch(), gated) : null;
       if (verdict && !verdict.allow) {
         return {
@@ -1333,10 +1331,10 @@ export default function (pi: ExtensionAPI): void {
         return { content: [{ type: "text", text: "Goal changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
       }
       const activeOwner = boundWorkflow(latest, ctx);
-      if (gated?.name !== activeOwner?.name || gated?.path !== activeOwner?.path) {
+      if (releaseOwner?.name !== activeOwner?.name || releaseOwner?.path !== activeOwner?.path) {
         return { content: [{ type: "text", text: "Workflow changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
       }
-      const audit = requestTaskContext(pi, { action: "audit", workflowOwnsPlan: !!gated }, current);
+      const audit = requestTaskContext(pi, "audit", current);
       if (audit.enabled && !audit.auditHandled) {
         return { content: [{ type: "text", text: "Harness did not confirm the Todo audit. Update Harness before completing this Goal." }],
           details: { ok: false, goal: current } };
@@ -1355,7 +1353,7 @@ export default function (pi: ExtensionAPI): void {
       }
       const goal = goalWithStatus(latest, "complete");
       setGoal(goal, ctx, "tool");
-      if (gated) recordWorkflow(null);
+      if (releaseOwner) recordWorkflow(null);
       const warning = verdict?.allow ? verdict.warning : undefined;
       return {
         content: [{ type: "text", text: warning ? `Goal marked complete. ${warning}` : "Goal marked complete." }],
@@ -1439,7 +1437,7 @@ export default function (pi: ExtensionAPI): void {
       const owner = getWorkflow(ctx);
       if (!owner) return { content: [{ type: "text", text: "No workflow owns this session." }], details: { released: false } };
       const goal = getGoal(ctx);
-      const gated = goal ? boundWorkflow(goal, ctx) : null;
+      const gated = goal?.status === "active" ? boundWorkflow(goal, ctx) : null;
       const verdict = gated ? await pauseGate(ctx.sessionManager.getBranch(), gated) : null;
       if (verdict && !verdict.allow) {
         return { content: [{ type: "text", text: verdict.message }], details: { released: false, goalPaused: false } };

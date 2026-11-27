@@ -222,12 +222,53 @@ test("automatic Goals retain the workflow's completion gates on creation and reo
   assert.equal(h.goal()?.command, undefined, "a new task with the same objective has its own binding");
 });
 
+for (const via of ["command", "tool"] as const) test("completing a paused Goal releases its owner via " + via, async t => {
+  const h = await fixture(t, { workflow: "available" });
+  await h.update({ outcome: accepted });
+  const owner = currentWorkflowOwner(h.entries)!;
+  await h.command("pause");
+  assert.equal(h.goal()?.status, "paused");
+  if (via === "command") await h.command("complete");
+  else assert.equal((await h.complete([{ criterion: accepted.doneWhen[0]!, result: "Verified" }])).details.ok, true);
+  assert.equal(h.goal()?.status, "complete");
+  assert.equal(currentWorkflowOwner(h.entries), null);
+  h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(owner) });
+  await h.command("complete");
+  assert.deepEqual(currentWorkflowOwner(h.entries), owner, "repeating completion preserves the subsequent workflow");
+});
+
+test("a finished workflow keeps the adopted Outcome's checklist until its steps are verified", async t => {
+  const h = await fixture(t, { workflow: "available", autoStart: false });
+  const objective = "/skill:rush-issues verify checkout";
+  h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(null) });
+  const step = { step: "Verify receipts", status: "pending" };
+  await h.update({ outcome: { ...accepted, objective }, todo: [step] });
+  await h.command(objective);
+  mkdirSync(join(h.ctx.cwd, "scripts"));
+  writeFileSync(join(h.ctx.cwd, "scripts", "next-actions.mjs"), 'console.log(JSON.stringify({due:[{action:"finish"}]}))');
+  const plan = { owner: "rush-issues", runId: "checkout", path: join(h.ctx.cwd, "task-plan.json") };
+  h.entries.push({ type: "custom", customType: WORKFLOW_PLAN_ENTRY, data: { version: 1, kind: "set", ...plan } });
+  const evidence = [{ criterion: accepted.doneWhen[0]!, result: "Checkout passed" }];
+  const blocked = await h.complete(evidence);
+  assert.deepEqual(blocked.details.openSteps, [step.step]);
+  assert.equal(h.goal()?.status, "active");
+  assert.equal((await h.getTodo()).inheritedTodo.steps[0].step, step.step);
+  await assert.rejects(h.update({ todo: [] }), /owns the task plan/);
+  await h.update({ todo: [{ ...step, status: "completed" }] });
+  assert.deepEqual(workflowBinding(h.entries), plan);
+  assert.equal((await h.complete(evidence)).details.ok, true);
+});
+
 for (const legacy of [true, false]) test(`reopening restores the original coordinator after a different coordinator owned the session (legacy: ${legacy})`, async t => {
   const h = await fixture(t, { workflow: "available" });
   await h.update({ outcome: accepted });
   const original = h.goal()!;
+  const plan = { owner: "rush-issues", path: join(h.ctx.cwd, "original", "task-plan.json"), runId: "original" };
+  h.entries.push({ type: "custom", customType: WORKFLOW_PLAN_ENTRY, data: { version: 1, kind: "set", ...plan } });
   const other = { ...currentWorkflowOwner(h.entries)!, name: "another-coordinator", path: join(h.ctx.cwd, "other.md") };
   h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(other) });
+  h.entries.push({ type: "custom", customType: WORKFLOW_PLAN_ENTRY,
+    data: { version: 1, kind: "set", owner: other.name, path: join(h.ctx.cwd, "other.json"), runId: "other" } });
   await h.command("complete");
   if (legacy) {
     for (const entry of h.entries) if (entry.data?.goal) delete entry.data.goal.workflowBinding;
@@ -236,10 +277,17 @@ for (const legacy of [true, false]) test(`reopening restores the original coordi
   await h.update({ outcome: { ...accepted, status: "active" } });
   assert.equal(h.goal()?.status, "active");
   assert.deepEqual(h.goal()?.command, original.command);
+  assert.deepEqual(workflowBinding(h.entries), plan);
+  assert.equal(boundPlanPath(h.entries, currentWorkflowOwner(h.entries)!), plan.path);
   assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
   await h.command("complete");
+  const sameSkill = { name: plan.owner, path: original.command!.path, role: "coordinator", planOwner: "workflow" } as const;
+  h.entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry(sameSkill) });
+  h.entries.push({ type: "custom", customType: WORKFLOW_PLAN_ENTRY,
+    data: { version: 1, kind: "set", owner: plan.owner, path: join(h.ctx.cwd, "new-run.json"), runId: "different-run" } });
   await h.update({ outcome: { ...accepted, status: "active" } });
   assert.deepEqual(h.goal()?.workflowBinding, original.workflowBinding);
+  assert.deepEqual(workflowBinding(h.entries), plan);
   assert.equal(h.goal()?.status, "active");
 });
 

@@ -44,10 +44,12 @@ test('stable revision retains recovery progress across the actual alternating fo
   const root = mkdtempSync(join(parent, 'recovery-views-'));
   const store = openStore({ path: join(root, 'operations.sqlite') });
   t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
-  const register = (index: number) => store.registerOperation({ operationId: `trace-operation-${index}`, taskId: `trace-task-${index}`, launchToken: `trace-token-${index}`,
-    owner: { kind: 'parent-session', sessionId: '4edc1498-cbc9-481b-831a-ca3da05c99c1', workspace: '/fixture' }, observer: { kind: 'fixture', version: '1' } });
+  const owner = { kind: 'parent-session', sessionId: '4edc1498-cbc9-481b-831a-ca3da05c99c1', workspace: '/fixture' };
+  const register = (index: number, scope = owner) => store.registerOperation({ operationId: `trace-operation-${index}`, taskId: `trace-task-${index}`, launchToken: `trace-token-${index}`,
+    owner: scope, observer: { kind: 'local-supervisor', version: '1' } });
   for (let index = 0; index < 4; index++) register(index);
-  assert.equal(store.getChangeRevision(), 4);
+  const initialRevision = store.parentRecoveryRevision(owner);
+  assert.ok(initialRevision > 0);
   host.store = store;
   let reads = 0;
   const read = store.listPendingParentCallbacks.bind(store);
@@ -57,20 +59,24 @@ test('stable revision retains recovery progress across the actual alternating fo
     host.noteParentContext(view, { recover: false });
     assert.equal(host.hasPendingParentCallbackRecovery(), true, 'new exact view must recover');
     host.reconcileOwnerChanges();
-    assert.equal(host.lastChangeRevision, 4);
+    assert.equal(host.lastChangeRevision, initialRevision);
   }
   const warmReads = reads;
+  register(5, { ...owner, sessionId: 'unrelated' });
+  assert.equal(store.parentRecoveryRevision(owner), initialRevision);
   let repeated = 0;
   for (let round = 0; round < 3; round++) for (const view of views) {
     host.noteParentContext(view, { recover: false });
     if (host.hasPendingParentCallbackRecovery()) { repeated++; host.reconcileOwnerChanges(); }
   }
-  assert.equal(repeated, 0, 'warmed alternate views at coordinator revision 4 must not restart recovery');
+  assert.equal(repeated, 0, 'warmed alternate views at the same parent revision must not restart recovery');
   assert.equal(reads, warmReads, 'unchanged views do not query the pending-callback index again');
   register(4);
+  const changedRevision = store.parentRecoveryRevision(owner);
+  assert.ok(changedRevision > initialRevision);
   for (const view of views) {
     host.noteParentContext(view, { recover: false }); host.reconcileOwnerChanges();
-    assert.equal(host.lastChangeRevision, 5, 'new coordinator revision still refreshes each exact view');
+    assert.equal(host.lastChangeRevision, changedRevision, 'new parent revision still refreshes each exact view');
   }
   assert.equal(reads - warmReads, views.length);
 });

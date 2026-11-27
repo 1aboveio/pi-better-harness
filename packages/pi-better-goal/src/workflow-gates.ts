@@ -4,10 +4,11 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { EXTENSION_NAME } from "./types.js";
 import { ISSUE_WORKFLOW_SKILLS, type WorkflowOwner } from "./workflow.js";
 
 /** Branch entry the plan extension writes when it binds a workflow-owned task plan. */
-const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
+export const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
 const WORKFLOW_ENTRY = "pi-better-workflow";
 export const SCHEDULER_TIMEOUT_MS = 20_000;
 // Live tree queries allow three 60-second attempts plus follow-ups; cached probes stay cheap.
@@ -68,19 +69,39 @@ export function findScheduler(owner: WorkflowOwner): string | undefined {
  * The task-plan.json the session bound for `owner`, or undefined before a plan is bound.
  * Invoking a workflow skill again starts a new run, so a later owner entry drops the old binding.
  */
-export function boundPlanPath(entries: Iterable<EntryLike>, owner: WorkflowOwner): string | undefined {
-  let path: string | undefined;
+export function boundPlanEntry(entries: Iterable<EntryLike>, owner: WorkflowOwner, goalId?: string) {
+  let plan: { version: 1; kind: "set"; owner: string; path: string; runId?: string } | undefined;
+  let ownsRun = false;
+  let foundGoal = false;
   for (const entry of entries) {
-    if (entry.type !== "custom") continue;
+    if (entry.type !== "custom" || !isRecord(entry.data)) continue;
     const data = entry.data;
-    if (entry.customType === WORKFLOW_ENTRY && isRecord(data) && data.version === 1 && data.kind === "set") {
-      if (data.resumePlan !== true || !isRecord(data.owner) || data.owner.name !== owner.name) path = undefined;
+    if (goalId && entry.customType === EXTENSION_NAME && data.kind === "set" && isRecord(data.goal)) {
+      if (foundGoal && (data.goal.goalId !== goalId || data.goal.status === "complete")) break;
+      if (data.goal.goalId === goalId) foundGoal = true;
     }
-    if (entry.customType !== WORKFLOW_PLAN_ENTRY || !isRecord(data) || data.version !== 1) continue;
-    if (data.kind === "clear") path = undefined;
-    else if (data.kind === "set" && data.owner === owner.name && typeof data.path === "string") path = data.path;
+    if (data.version !== 1) continue;
+    if (entry.customType === WORKFLOW_ENTRY) {
+      // A later invocation, even of the same skill, starts a different run.
+      if (foundGoal && ownsRun && (data.kind === "set" || data.kind === "clear")) break;
+      if (data.kind === "clear") ownsRun = false;
+      if (data.kind === "set") {
+        ownsRun = isRecord(data.owner) && data.owner.name === owner.name && data.owner.path === owner.path;
+        if (data.resumePlan !== true || !ownsRun) plan = undefined;
+      }
+    }
+    if (entry.customType !== WORKFLOW_PLAN_ENTRY) continue;
+    if (data.kind === "clear") plan = undefined;
+    else if (data.kind === "set" && data.owner === owner.name && typeof data.path === "string") {
+      plan = { version: 1, kind: "set", owner: owner.name, path: data.path,
+        ...(typeof data.runId === "string" && { runId: data.runId }) };
+    }
   }
-  return path;
+  return !goalId || (foundGoal && ownsRun) ? plan : undefined;
+}
+
+export function boundPlanPath(entries: Iterable<EntryLike>, owner: WorkflowOwner): string | undefined {
+  return boundPlanEntry(entries, owner)?.path;
 }
 
 function parseSchedulerOutput(stdout: string): SchedulerRun {
