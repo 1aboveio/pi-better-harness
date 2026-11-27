@@ -1,5 +1,5 @@
-import * as piAI from "@earendil-works/pi-ai";
-import type { Context, Provider } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { providerContext } from "../provider-context.ts";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,10 +12,6 @@ import { registerCommitments } from "./commitments.ts";
 import { registerDecisionTool } from "./decisions.ts";
 import { registerSharedFault } from "./shared-fault.ts";
 import { digest, ENTRY, readFingerprint, RepeatedRead, scopeEvidence, type Scenario } from "./evidence.ts";
-
-// Pi 1.6 providers receive a transcript with the system prompt in its first message.
-const providerContext: (context: Context) => Parameters<Provider["streamSimple"]>[1] =
-  Reflect.get(piAI, "normalizeContext") ?? ((context: Context) => context);
 
 const prompts = {
   "commitment-followup": "The owner tried an accepted recovery and recorded an observed failure. Recommend a materially different remedy only when the new evidence supports it. Suppress rewordings of the accepted action, untested guesses and status-only updates.",
@@ -177,7 +173,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
   pi.registerTool({
     name: "supervisor_review", label: "Review Goal",
     description: "Consult Supervisor about scope or a possible progress stall. Shares the proactive review and returns prior advice without another push.",
-    parameters: Type.Object({ scenario: piAI.StringEnum(["scope-review", "stall-diagnosis"] as const) }),
+    parameters: Type.Object({ scenario: StringEnum(["scope-review", "stall-diagnosis"] as const) }),
     async execute(_id, { scenario }, _signal, _update, ctx) {
       const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
       if (scenario !== "scope-review" && scenario !== "stall-diagnosis") return reply("Unknown Supervisor scenario.");

@@ -5,6 +5,7 @@ import {
   type CompactionEntry, type ExtensionAPI, type ExtensionContext, type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
+import { providerContext } from "../provider-context.ts";
 import { compactWindow, route, supportsCompaction, type Item } from "./provider.ts";
 
 const requireFromExtension = createRequire(import.meta.url);
@@ -77,7 +78,7 @@ export default function registerNativeCompaction(pi: ExtensionAPI) {
         loadResponsesConverter(): Promise<ResponsesConverter>;
       };
       const { convertResponsesMessages } = await loadResponsesConverter();
-      const items = convertResponsesMessages(model, { messages: convertToLlm(messages) }, responsesProviders);
+      const items = convertResponsesMessages(model, providerContext({ messages: convertToLlm(messages) }), responsesProviders);
       const output = await compactWindow(ctx, model, [...prefix, ...items], event.customInstructions, signal);
       signal.throwIfAborted();
       if (!output) {
