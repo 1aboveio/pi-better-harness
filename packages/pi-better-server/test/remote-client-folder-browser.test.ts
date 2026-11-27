@@ -15,7 +15,7 @@ const theme = {
   fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
   bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 } as Theme;
-const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+const plain = (lines: readonly string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 
 function component(state: RemoteFolderBrowserState, rows = 30) {
   const intents: RemoteFolderIntent[] = [];

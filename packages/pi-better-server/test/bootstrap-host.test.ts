@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import privateRuntime from "../scripts/private-runtime/package.json" with { type: "json" };
 
 const bootstrap = fileURLToPath(new URL("../scripts/bootstrap-host.sh", import.meta.url));
 
@@ -31,8 +32,8 @@ fs.appendFileSync(process.env.BOOTSTRAP_TEST_LOG, JSON.stringify({ command: "pi"
 process.exit(Number(process.env.BOOTSTRAP_TEST_PI_EXIT || 0));
 `)}, { mode: 0o755 });
 `, { mode: 0o755 });
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(root, "home"), NODE_VERSION: "24.14.1", PI_VERSION: "1.2.0", PI_CODING_AGENT_DIR: agentDir, BOOTSTRAP_TEST_LOG: log, ...overrides };
-  for (const name of ["HARNESS_VERSION", "MINIMAL_TOOLS_VERSION", "ASK_USER_QUESTION_VERSION", "WEB_TOOLS_VERSION"]) {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(root, "home"), NODE_VERSION: "24.14.1", PI_CODING_AGENT_DIR: agentDir, BOOTSTRAP_TEST_LOG: log, ...overrides };
+  for (const name of ["PI_VERSION", "HARNESS_VERSION", "MINIMAL_TOOLS_VERSION", "ASK_USER_QUESTION_VERSION", "WEB_TOOLS_VERSION"]) {
     delete env[name];
     if (overrides[name]) env[name] = overrides[name];
   }
@@ -45,6 +46,8 @@ test("host bootstrap invokes Pi installation for all four pinned defaults in the
   const run = runBootstrap();
   try {
     assert.equal(run.result.status, 0, run.result.stderr);
+    assert.ok(run.commands[0].args.includes(`@earendil-works/pi-coding-agent@${privateRuntime.dependencies["@earendil-works/pi-coding-agent"]}`));
+    assert.deepEqual(JSON.parse(readFileSync(join(run.prefix, "server/scripts/private-runtime/package.json"), "utf8")), privateRuntime);
     const installs = run.commands.filter((entry) => entry.command === "pi");
     assert.equal(installs.length, 4);
     for (const install of installs) {
@@ -65,9 +68,10 @@ test("host bootstrap invokes Pi installation for all four pinned defaults in the
 });
 
 test("host bootstrap accepts explicit versions for every default package", () => {
-  const run = runBootstrap({ HARNESS_VERSION: "0.25.0", MINIMAL_TOOLS_VERSION: "2.0.0", ASK_USER_QUESTION_VERSION: "2.10.0", WEB_TOOLS_VERSION: "2.11.0" });
+  const run = runBootstrap({ PI_VERSION: "1.2.0", HARNESS_VERSION: "0.25.0", MINIMAL_TOOLS_VERSION: "2.0.0", ASK_USER_QUESTION_VERSION: "2.10.0", WEB_TOOLS_VERSION: "2.11.0" });
   try {
     assert.equal(run.result.status, 0, run.result.stderr);
+    assert.ok(run.commands[0].args.includes("@earendil-works/pi-coding-agent@1.2.0"));
     assert.deepEqual(run.commands.filter((entry) => entry.command === "pi").map((entry) => entry.args), [
       ["install", "npm:@vanillagreen/pi-codex-minimal-tools@2.0.0"],
       ["install", "npm:@juicesharp/rpiv-ask-user-question@2.10.0"],

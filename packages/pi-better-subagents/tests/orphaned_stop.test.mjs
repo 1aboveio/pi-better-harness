@@ -17,6 +17,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { realProcessProbe } from "../health.ts";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import {
     writeMeta,
@@ -390,6 +392,42 @@ describe("compatibility with normal running stop", () => {
         assert.equal(readMeta(id).status, "killed");
         assert.equal(readMeta(id).lifecycleClassification, "killed");
         assert.equal(await waitFor(() => !processExists(pid)), true);
+    });
+
+    it("repeats termination only for the same managed Pi leader still disposing", { skip: process.platform === "win32", timeout: 10_000 }, async t => {
+        const workers = await Promise.all(["changed", "same"].map(async identity => {
+            const child = spawn(process.execPath, ["-e", `
+                let signals = 0;
+                process.on("SIGTERM", () => {
+                    if (++signals === 2) process.exit(0);
+                    process.send("disposing");
+                });
+                process.on("message", () => process.send(signals));
+                process.send("ready");
+            `], { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+            t.after(() => child.kill("SIGKILL"));
+            await once(child, "message");
+            const id = trackDisk(`sa_t68_dispose_${identity}_${child.pid}`);
+            const start = realProcessProbe.startToken(child.pid);
+            assert.ok(start);
+            writeMeta(meta({ id, status: "running", pid: child.pid, pgid: child.pid,
+                management: { root: "/tmp", instance: "fixture", epoch: 1 },
+                pidStartTime: start }));
+            return { id, child };
+        }));
+        const [changed, same] = workers;
+        const exit = once(same.child, "exit");
+        await Promise.all(workers.map(async ({ id, child }) => {
+            const disposing = once(child, "message");
+            assert.equal(stopRun(id).action, "stopped");
+            assert.equal((await disposing)[0], "disposing");
+        }));
+        const readStart = realProcessProbe.startToken;
+        t.mock.method(realProcessProbe, "startToken", pid => pid === changed.child.pid ? "replacement-process" : readStart(pid));
+        assert.deepEqual(await exit, [0, null]);
+        const signals = once(changed.child, "message");
+        changed.child.send("count");
+        assert.equal((await signals)[0], 1);
     });
 
     // @covers stop.orphaned-cleanup

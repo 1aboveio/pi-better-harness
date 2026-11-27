@@ -46,7 +46,7 @@ export async function registeredProducerTools(source: string, cwd: string): Prom
   if (loaded.errors.length) throw new Error(JSON.stringify(loaded.errors));
   return loaded.extensions.flatMap((extension) => [...extension.tools.values()].map((tool) => ({
     name: tool.definition.name, description: tool.definition.description,
-    parameters: tool.definition.parameters, sourceInfo: tool.sourceInfo,
+    parameters: tool.definition.parameters, sourceInfo: tool.sourceInfo, exposure: "direct" as const,
   })));
 }
 

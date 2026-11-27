@@ -34,8 +34,11 @@ function unavailable(error: unknown) {
 export async function compactWindow(ctx: ExtensionContext, model: Model<Api>, input: object[], focus: string | undefined, signal: AbortSignal) {
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) throw new Error(auth.error);
-  const headers = new Headers(model.headers);
-  for (const [name, value] of Object.entries(auth.headers ?? {})) headers.set(name, value);
+  // Preserve null overrides so the OpenAI client also omits its own default headers.
+  const headers: Record<string, string | null> = Object.fromEntries(
+    [...Object.entries(model.headers ?? {}), ...Object.entries(auth.headers ?? {})]
+      .map(([name, value]) => [name.toLowerCase(), value]),
+  );
   let baseURL = model.baseUrl.replace(/\/+$/, "");
   const codex = model.api === "openai-codex-responses";
   if (codex) {
@@ -43,13 +46,13 @@ export async function compactWindow(ctx: ExtensionContext, model: Model<Api>, in
     const claims = JSON.parse(Buffer.from(auth.apiKey?.split(".")[1] ?? "", "base64url").toString());
     const accountId = claims["https://api.openai.com/auth"]?.chatgpt_account_id;
     if (typeof accountId !== "string") throw new Error("Codex account ID unavailable");
-    headers.set("chatgpt-account-id", accountId);
-    headers.set("originator", "pi");
+    headers["chatgpt-account-id"] = accountId;
+    headers.originator = "pi";
   }
   const sessionId = ctx.sessionManager.getSessionId();
-  headers.set(codex ? "session-id" : "session_id", sessionId);
+  headers[codex ? "session-id" : "session_id"] = sessionId;
   // Credentials come exclusively from this Pi route, including gateways using custom headers.
-  if (!auth.apiKey && !headers.has("authorization") && !headers.has("cf-aig-authorization")) {
+  if (!auth.apiKey && headers.authorization == null && headers["cf-aig-authorization"] == null) {
     throw new Error("No credentials configured for the active Responses route");
   }
   const client = new OpenAI({ baseURL, apiKey: auth.apiKey ?? "unused", defaultHeaders: headers, maxRetries: 0 });

@@ -63,7 +63,7 @@ const fixtures = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDB
 after(() => rmSync(fixtures, { recursive: true, force: true }));
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const toolContext = {} as ExtensionContext;
+const toolContext = {} as Parameters<ToolDefinition["execute"]>[4];
 
 /** The slice of pi's session context this extension reads at session start. */
 function sessionContext(cwd: string): ExtensionContext {

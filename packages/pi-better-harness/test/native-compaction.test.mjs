@@ -97,9 +97,9 @@ test("Codex compaction uses the active account and its configured endpoint", asy
   const server = await provider(t);
   const claims = { "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } };
   const token = `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
-  const model = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-test", baseUrl: server.baseUrl + "/codex" };
+  const model = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-test", baseUrl: server.baseUrl + "/codex", headers: { "X-Optional": "model" } };
   const ctx = { getSystemPrompt: () => "Existing system prompt", sessionManager: { getSessionId: () => "test-session" },
-    modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token }) } };
+    modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token, headers: { "x-optional": null, "x-stainless-lang": null } }) } };
   const output = await compactWindow(ctx, model, [{ role: "user", content: "First turn" }], undefined, new AbortController().signal);
   assert.equal(output.at(-1).type, "compaction");
   const [request] = server.requests;
@@ -107,6 +107,8 @@ test("Codex compaction uses the active account and its configured endpoint", asy
   assert.equal(request.headers["chatgpt-account-id"], "test-account");
   assert.equal(request.headers.authorization, `Bearer ${token}`);
   assert.equal(request.headers["session-id"], "test-session");
+  assert.equal(request.headers["x-optional"], undefined);
+  assert.equal(request.headers["x-stainless-lang"], undefined);
 });
 
 test("interrupted compaction leaves the journal intact and committed output survives a fresh Pi process", { timeout: 90_000 }, async t => {

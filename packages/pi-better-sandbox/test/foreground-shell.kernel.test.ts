@@ -119,7 +119,7 @@ const ctx = {
         setStatus: (_key: string, text: string | undefined) => statuses.push(text),
         confirm: async () => true,
     },
-} as unknown as ExtensionCommandContext;
+} as unknown as ExtensionCommandContext & Parameters<ToolDefinition["execute"]>[4];
 
 before(async () => {
     if (!backendAvailable) return;

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import * as piAI from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { setTimeout as wait } from "node:timers/promises";
 import { installSupervisor } from "../extensions/supervisor/index.ts";
@@ -54,6 +55,13 @@ test("scope-only review steers the owner once against the current plan and suppr
   f.fire("tool_result", event);
   await wait(60);
   assert.equal(f.messages.length, 1);
+  const request = f.requests[0];
+  if (typeof piAI.normalizeContext === "function") {
+    assert.equal(request.messages[0].role, "system");
+    assert.match(JSON.stringify(request.messages[0].content), /Diagnose/);
+  } else {
+    assert.match(request.systemPrompt, /Diagnose/);
+  }
   assert.match(JSON.stringify(f.requests[0].messages), /Refactor unrelated feature/);
   f.fire("tool_result", event);
   await wait(40);

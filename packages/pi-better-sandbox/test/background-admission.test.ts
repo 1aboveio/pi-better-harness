@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 import {
-    createEventBus, discoverAndLoadExtensions, ExtensionRunner, SessionManager,
+    createEventBus, discoverAndLoadExtensions, ExtensionRunner, SessionManager, wrapRegisteredTool,
     type ExtensionAPI, type ModelRegistry, type ToolDefinition, type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { createBackgroundAdmission } from "../background-admission.ts";
@@ -78,7 +78,7 @@ async function harness(config: SandboxPermissionSettings, backgroundFirst = fals
     assert.deepEqual(loaded.errors, []);
     const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, root, session, {} as ModelRegistry);
     loaded.runtime.getAllTools = () => runner.getAllRegisteredTools().map(({ definition, sourceInfo }) => ({
-        name: definition.name, description: definition.description, parameters: definition.parameters, sourceInfo,
+        name: definition.name, description: definition.description, parameters: definition.parameters, sourceInfo, exposure: "direct" as const,
     }));
     loaded.runtime.getActiveTools = () => runner.getAllRegisteredTools().map(({ definition }) => definition.name);
     loaded.runtime.sendMessage = () => {};
@@ -91,10 +91,10 @@ async function harness(config: SandboxPermissionSettings, backgroundFirst = fals
         const toolCallId = randomUUID();
         const refusal = await gate(name, input, toolCallId);
         if (refusal?.block) return { blocked: true, text: refusal.reason ?? "Tool call blocked" };
-        const tool = runner.getToolDefinition(name);
+        const tool = runner.getAllRegisteredTools().find(({ definition }) => definition.name === name);
         assert.ok(tool);
         try {
-            const result = await tool.execute(toolCallId, input, undefined, undefined, runner.createContext());
+            const result = await wrapRegisteredTool(tool, runner).execute(toolCallId, input);
             return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
         } catch (error) { await retainWorkRuntimeFailure(); throw error; }
     };

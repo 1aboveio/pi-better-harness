@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import privateRuntime from "../../scripts/private-runtime/package.json" with { type: "json" };
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, socketPathFor } from "../paths.ts";
 import { createSshMuxController, resolveSshCommand, type CommandSpec, type SshMuxController } from "../shared-ssh-core/index.ts";
@@ -26,7 +27,7 @@ export interface TargetOptions {
   signal?: AbortSignal;
   /** Pi startup is enabled by default. Transport-only callers can opt out. */
   ensureServer?: boolean;
-  /** Native SDK 1.2 runtime installation; older CLI SDKs retain registered-launcher startup by default. */
+  /** Install the bundled runtime by default when the CLI uses the pinned Pi SDK. */
   managedRuntime?: boolean;
   /** Codex must retain its own startup path; never auto-start a Pi daemon for it. */
   agent?: "pi" | "codex";
@@ -188,7 +189,7 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
       if (override.exitCode !== 0 || override.timedOut) throw new Error(`Runtime discovery on ${options.host}: ${override.stderr.trim() || "explicit launcher probe failed"}`);
       command = override.stdout || undefined;
     }
-    if (command || options.managedRuntime === false || (options.managedRuntime === undefined && PI_VERSION !== "1.2.0")) {
+    if (command || options.managedRuntime === false || (options.managedRuntime === undefined && PI_VERSION !== privateRuntime.dependencies["@earendil-works/pi-coding-agent"])) {
       const discovery = resolveSshCommand({ command: remoteRuntimeScript(command), ssh: { host: options.host } });
       const found = await runner.runOnce(mux.withMux(discovery.commandSpec), undefined, 30_000);
       checkAbort();

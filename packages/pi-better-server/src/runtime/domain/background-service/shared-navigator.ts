@@ -1539,7 +1539,7 @@ function neighbourCloseTarget(
 
 function buildTranscriptDetailLines(
   detail: BackgroundWorkDetail,
-  transcriptLines: string[],
+  transcriptLines: readonly string[],
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
@@ -1599,7 +1599,7 @@ function detailOverlayOptions() {
   };
 }
 
-function renderEditorLines(width: number): string[] {
+function renderEditorLines(width: number): readonly string[] {
   try {
     const lines = state().editorComponent?.render(width);
     if (lines?.length) return lines;

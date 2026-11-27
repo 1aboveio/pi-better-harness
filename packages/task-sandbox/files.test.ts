@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 import type { SandboxPermissions, SandboxWritePolicy } from "../sandbox-core/index.ts";
 import { SandboxDiagnostics, readDiagnostics, setDiagnosticsEnabled } from "../sandbox-diagnostics/index.ts";
@@ -50,7 +50,7 @@ function fixture() {
 }
 
 function tools(f: ReturnType<typeof fixture>) {
-    const ctx = { cwd: f.root } as ExtensionContext;
+    const ctx = { cwd: f.root } as Parameters<ReturnType<typeof createReadToolDefinition>["execute"]>[4];
     return {
         ctx,
         read: createReadToolDefinition(f.root, { operations: f.ops.read }),
