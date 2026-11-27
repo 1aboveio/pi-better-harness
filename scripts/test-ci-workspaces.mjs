@@ -67,7 +67,13 @@ export function runWorkspaceTests(root, args = []) {
   const shard = parseShard(args);
   for (const [position, workspace] of selectWorkspaces(root).entries()) {
     const splitSuite = shard && workspace === "packages/pi-better-subagents";
-    if (shard && !splitSuite && position % shard.total !== shard.index - 1) continue;
+    if (shard && !splitSuite) {
+      // The five-way CI matrix has spare time in shard 3. Keep the long
+      // Background suite off shard 2, which also owns slow Subagents files.
+      const index = shard.total === 5 && workspace === "packages/pi-better-background-tasks"
+        ? 3 : position % shard.total + 1;
+      if (index !== shard.index) continue;
+    }
     const args = ["run", splitSuite ? "test:shard" : "test", "--workspace", workspace];
     if (splitSuite) args.push("--", `--test-shard=${shard.index}/${shard.total}`, "tests/*.test.mjs");
     const result = spawnSync("npm", args, { cwd: root, stdio: "inherit" });

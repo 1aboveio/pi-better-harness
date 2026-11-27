@@ -93,6 +93,17 @@ test("valid empty shards succeed without running scripts but still validate work
   assert.match(invalid.stderr, /Expected exactly one pi-better-server workspace; found 0/);
 });
 
+test("the five-way CI split runs the Background suite only on its assigned shard", (t) => {
+  const root = fixture(t);
+  workspace(root, "pi-better-server", {});
+  workspace(root, "pi-better-background-tasks", { scripts: { test: "node -p '42'" } });
+  for (const index of [1, 2, 3, 4, 5]) {
+    const result = run(root, ["--shard", `${index}/5`]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(/^42$/m.test(result.stdout), index === 3);
+  }
+});
+
 test("all CI shards run a distinct subagent partition through npm", (t) => {
   const root = fixture(t);
   workspace(root, "pi-better-server", {});

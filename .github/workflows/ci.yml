@@ -229,7 +229,7 @@ jobs:
       fail-fast: false
       matrix:
         pi-version: ["1.2.0", "1.6.1"]
-        partition: ["1/3", "2/3", "3/3", standalone]
+        partition: ["1/3", "2/3", "3/3", standalone, recovery]
     steps:
       - uses: actions/checkout@v4
 
@@ -262,16 +262,23 @@ jobs:
           PI_SDK_VERSION: ${{ matrix.pi-version }}
         run: |
           set -euo pipefail
-          # Keep the expensive real-pack fixture off the general test shards.
+          # Keep the real-pack and slow recovery fixtures off the general shards.
           standalone=test/runtime-standalone.test.ts
+          recovery=(test/runtime-result-supervision.test.ts test/startup-ensure.test.ts)
           test -f "$standalone"
+          for file in "${recovery[@]}"; do test -f "$file"; done
           prefix="$RUNNER_TEMP/pi-compat"
           if [[ "$TEST_PARTITION" == standalone ]]; then
             bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "$standalone"
+          elif [[ "$TEST_PARTITION" == recovery ]]; then
+            bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "${recovery[@]}"
           else
             tests=()
             for file in test/*.test.ts; do
-              if [[ "$file" != "$standalone" ]]; then tests+=("$file"); fi
+              case "$file" in
+                "$standalone"|"${recovery[0]}"|"${recovery[1]}") ;;
+                *) tests+=("$file") ;;
+              esac
             done
             test "${#tests[@]}" -gt 0
             TEST_SHARD="$TEST_PARTITION" bash scripts/test-on-pi.sh "$PI_SDK_VERSION" "$prefix" "${tests[@]}"
