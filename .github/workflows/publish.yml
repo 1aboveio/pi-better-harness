@@ -18,8 +18,7 @@ on:
           - pi-better-harness
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: npm-publish-${{ inputs.package }}
@@ -28,15 +27,29 @@ concurrency:
 jobs:
   publish:
     name: publish ${{ inputs.package }}
-    # Same image as CI: ubuntu-26.04 fails the confinement proofs that
-    # `npm run verify` runs, so a release must not be the first to find out.
     runs-on: ubuntu-24.04
-    if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
     environment: npm-publish
-
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
     steps:
+      - name: Require the selected green main SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main && "$GITHUB_REF" != "refs/tags/green/$GITHUB_SHA" ]]; then
+            echo "::error::Select main or the green tag for the release SHA."
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-green.yml/runs?event=push&branch=main&head_sha=$GITHUB_SHA&status=success" |
+            jq -e '.total_count > 0' || { echo "::error::No successful green run for $GITHUB_SHA."; exit 1; }
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -56,27 +69,6 @@ jobs:
         # npm 11 defaults allow-remote=none, so allow committed lockfile URLs
         # during install while publish still targets registry.npmjs.org below.
         run: npm ci --allow-remote=all
-
-      - name: Install TUI and sandbox test dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes tmux bubblewrap
-          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --ro-bind / / -- /bin/true
-          npm install --global @openai/codex@0.159.2
-          test "$(codex --version)" = "codex-cli 0.159.2"
-
-      - name: Require the Linux Bubblewrap backend
-        run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
-
-      - name: Verify workspace
-        run: npm run verify
-
-      - name: Verify transcript in real Pi TUI
-        run: npm run test:tui-e2e
 
       - name: Resolve package
         id: package
@@ -104,20 +96,6 @@ jobs:
             echo "version=$VERSION"
             echo "tag=$TAG"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Check published version
-        id: registry
-        env:
-          PACKAGE: ${{ steps.package.outputs.name }}
-          VERSION: ${{ steps.package.outputs.version }}
-        run: |
-          if npm view "${PACKAGE}@${VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
-            echo "${PACKAGE}@${VERSION} is already published; npm publish will be skipped."
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "${PACKAGE}@${VERSION} is not published yet."
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Pack dry run
         env:
@@ -315,7 +293,7 @@ jobs:
         run: node scripts/npm-version-visible.mjs "$PACKAGE" "$VERSION" --wait-seconds 600
 
       - name: Verify existing package provenance
-        # Check every visible version, including one found by the second registry lookup.
+        # Check every visible version, including a version found on a rerun.
         # Attestations can become visible after the version document.
         timeout-minutes: 3
         env:

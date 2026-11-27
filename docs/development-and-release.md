@@ -409,11 +409,22 @@ same semantic version without colliding:
 ```
 
 Commit the manifest, lockfile, and changelog changes through a reviewed pull
-request. After CI passes and the PR is merged, dispatch
-`.github/workflows/publish.yml` and select the single npm package to release.
-The workflow reads the version from that package's manifest, publishes only its
-workspace, and creates a package-scoped tag and GitHub release such as
-`pi-better-goal@0.1.15`.
+request. After merge, `release-green.yml` checks the required PR results and tags
+the resulting `main` commit as `green/<full-sha>`. List recent green commits,
+choose the one containing the intended manifest version and changelog, and dispatch
+the publish workflow at its tag:
+
+```sh
+gh run list --workflow release-green.yml --branch main --event push --status success \
+  --limit 10 --json createdAt,headSha,displayTitle
+gh workflow run publish.yml --ref "green/$sha" -f package=pi-better-harness
+```
+
+Set `sha` to the full commit SHA you selected. Dispatching from `main` also
+works when its commit already has a successful green run. The publish workflow
+checks that run before packing and publishing the selected workspace. Once
+that version is visible on npm and its provenance matches the release commit, the
+workflow creates a package-scoped tag and GitHub release such as `pi-better-goal@0.1.15`.
 
 Monitor a dispatched GitHub run with the state-based helper in a background task:
 
@@ -522,7 +533,7 @@ deprecate the unattested one — not to relax the check.
 
 ### npm version skew between CI and publish
 
-`publish.yml` runs only from `main` and pins Node 24.14.1 and npm 11.19.0.
+`publish.yml` pins Node 24.14.1 and npm 11.19.0.
 The Node pin matches the managed-runtime tests; the npm pin supports trusted
 publishing without depending on a changing `npm@latest`. CI's host-side lane
 still uses Node 22.
