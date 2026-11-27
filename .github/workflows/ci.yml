@@ -442,6 +442,10 @@ jobs:
           path: ${{ runner.temp }}/assignment-projection-performance.json
           if-no-files-found: warn
 
+      - name: Check agent catalog
+        if: matrix.lane == 'meta-1'
+        run: npm run catalog:check
+
       - name: Typecheck
         if: matrix.lane == 'meta-1'
         run: npm run typecheck

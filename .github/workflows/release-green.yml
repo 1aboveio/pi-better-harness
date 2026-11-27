@@ -1,0 +1,37 @@
+name: Mark release SHA green
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  mark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a merged PR with passing required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq -er --arg sha "$GITHUB_SHA" '
+              first(.[] | select(.base.ref == "main" and .merged_at != null and .merge_commit_sha == $sha)).number // empty')
+          required=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" \
+            --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique')
+          gh pr checks "$pr" --repo "$GITHUB_REPOSITORY" --required --json name,state |
+            jq -e --argjson required "$required" '
+              ($required | length) > 0 and all(.[]; .state == "SUCCESS") and
+              (($required - map(.name)) | length) == 0'
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Tag the verified main commit
+        run: git push origin "$GITHUB_SHA:refs/tags/green/$GITHUB_SHA"

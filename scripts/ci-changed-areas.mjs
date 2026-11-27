@@ -109,6 +109,8 @@ const EXPLICIT_CODE = new Set(
 );
 
 function isCode(file) {
+  // The catalog loads these Markdown files as agent definitions.
+  if (file.startsWith("packages/pi-better-subagents/roles/")) return true;
   return EXPLICIT_CODE.has(file) || !NOT_CODE.some((pattern) => pattern.test(file));
 }
 
