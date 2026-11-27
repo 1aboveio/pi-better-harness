@@ -44,6 +44,8 @@ test("every name the README's never-bundled list names is excluded, and its name
     ["service-account-prod.json", "credential"],
     ["service-account_prod.json", "credential"],
     ["service-account.prod.json", "credential"],
+    ["keys/service-account2.json", "credential"],
+    ["service_account (1).json", "credential"],
     [".npmrc", "credential"],
     [".netrc", "credential"],
     [".pypirc", "credential"],

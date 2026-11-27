@@ -36,7 +36,7 @@ const SECRET_FILE_PATTERNS: readonly RegExp[] = [
   /^\.pgpass$/i,
   /^credentials?$/i, // no extension, as in ~/.aws/credentials copied into a repo
   /\.tfvars(\.json)?$/i, // terraform.tfvars, prod.auto.tfvars
-  /^service[-_]?accounts?([-_.].+)?\.json$/i, // service-account.json, service-account-prod.json
+  /^service[-_]?account.*\.json$/is, // service-account.json, service-account-prod.json
   /^\.(npmrc|netrc|pypirc|git-credentials|dockercfg)$/i,
   /^(auth|credentials?|secrets?)(\..+)?\.(json|ya?ml|toml|ini)$/i,
   /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?(\.pub)?$/i,
