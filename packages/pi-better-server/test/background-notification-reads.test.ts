@@ -29,6 +29,35 @@ function frameCollector(model: WorkReadModel, frames: SnapshotFrame[]) {
 
 type SnapshotFrame = { snapshot: WorkSnapshot; previousSeq: number };
 
+test("an exact read sees a repaired dismissal before its watcher runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-repaired-dismissal-"));
+  const directory = join(root, "supervisor");
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "repair", { supervisorDirectory: directory,
+    baseDir: join(root, "raw"), durableDir: join(root, "archive"), intervalMs: 60000 });
+  const owner = { kind: "parent-session", workspace: root, sessionId: "owner" };
+  const id = taskId(0);
+  const scope = { background: true, cwd: root, sessionId: owner.sessionId, id };
+  const query = frameCollector(model, []);
+  const get = () => query.handle({ type: "runtime_get_snapshot", scope }) as WorkSnapshot;
+  try {
+    mkdirSync(join(directory, "observed"), { recursive: true });
+    store.registerOperation({ operationId: id, taskId: id, launchToken: id, owner, observer });
+    await model.reconcile();
+    assert.equal(get().rows.length, 1);
+    const path = join(directory, "observed", id + ".json");
+    writeFileSync(path, "{");
+    await model.reconcile();
+    assert.equal(get().status, "degraded");
+    writeFileSync(path, JSON.stringify({ dismissedAt: Date.now() }));
+    const repaired = get();
+    assert.equal(repaired.status, "ready");
+    assert.deepEqual(repaired.rows, []);
+  } finally {
+    query.close(); await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
 for (const unrelatedSessions of [1, 16]) for (const hasLegacyTasks of [false, true]) test(
   `publishing with ${unrelatedSessions} unrelated sessions (legacy tasks: ${hasLegacyTasks})`, async t => {
   const root = mkdtempSync(join(tmpdir(), "background-notifications-"));

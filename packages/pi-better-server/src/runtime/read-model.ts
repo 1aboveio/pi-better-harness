@@ -1171,7 +1171,9 @@ export class WorkReadModel {
           observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
           status, reason, rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
       }
-      if (!published && scope.backgroundHistory && this.background.refresh({ pollLegacy: false })) this.publish(true);
+      // A watcher can observe a partial sidecar before the caller finishes writing a dismissal.
+      const retryExact = scope.id && this.background.status === "degraded";
+      if (!published && (scope.backgroundHistory || retryExact) && this.background.refresh({ pollLegacy: false })) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope, published) : undefined;
       const { rows: tasks, nextDeadline } = this.background.query(scope, index, published);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
