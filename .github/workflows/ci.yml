@@ -382,7 +382,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [scripts-1, scripts-2, scripts-3, workspaces-1, workspaces-2, workspaces-3, meta-1]
+        lane: [scripts-1, scripts-2, scripts-3, workspaces-1, workspaces-2, workspaces-3, workspaces-4, workspaces-5, meta-1]
     steps:
       - uses: actions/checkout@v4
 
@@ -463,7 +463,8 @@ jobs:
         if: startsWith(matrix.lane, 'workspaces-')
         env:
           TEST_LANE: ${{ matrix.lane }}
-        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/3"
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
+        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/5"
 
       - name: Upload navigator golden-path evidence
         if: ${{ always() && startsWith(matrix.lane, 'scripts-') }}
@@ -612,6 +613,7 @@ jobs:
       - name: Server test shard
         working-directory: packages/pi-better-server
         env:
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
           TEST_SHARD: ${{ matrix.shard }}
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/6" test/*.test.ts
 
@@ -666,9 +668,8 @@ jobs:
           check server-tests "$SERVER_RESULT" "$SERVER_AREA"
           exit "$fail"
 
-  # Five focused macOS lanes behind one required name. Running the same suites
-  # in a single job took eleven minutes, because every journey waited for the
-  # one before it.
+  # Share macOS runners across isolated functional suites so that resource
+  # measurements can start while the sandbox checks are running.
   macos-lifecycle:
     name: macos-sandbox (lifecycle)
     needs: changes
@@ -689,43 +690,21 @@ jobs:
         run: npm ci
       - name: Require the macOS Seatbelt backend
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-      - name: Prove runtime lifecycle with real processes and sockets
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/daemon-owner.test.ts
-
-  macos-cancellation:
-    name: macos-sandbox (cancellation)
-    needs: changes
-    if: needs.changes.outputs.sandbox == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 10
-    env:
-      # Turns "no backend, so skip" into a hard failure on a lane whose whole
-      # point is that backend.
-      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Require the macOS Seatbelt backend
-        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-      - name: Prove cancellation authority and crash recovery with real processes
+      - name: Prove lifecycle, cancellation and crash recovery
         working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
+        env:
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
+        run: |
+          node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=3 \
+            test/runtime-lifecycle.test.ts test/daemon-owner.test.ts \
+            test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
   macos-subagent:
-    name: macos-sandbox (subagent ${{ matrix.shard }}/2)
+    name: macos-sandbox (subagent)
     needs: changes
     if: needs.changes.outputs.sandbox == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     env:
       # Turns "no backend, so skip" into a hard failure on a lane whose whole
       # point is that backend.
@@ -743,15 +722,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Accept checkout recovery under macOS Seatbelt
-        if: matrix.shard == 1
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/isolated-workspace.test.mjs
-      - name: Accept tool loading and use permissions in a real SDK worker
-        if: matrix.shard == 2
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs
-      - name: Prove subagent launch and bootstrap ownership on Node 24
+      - name: Prove workspace recovery, worker permissions and launch ownership on Node 24
         working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-shard="${{ matrix.shard }}/2" test/runtime-subagent-*.test.ts
+        env:
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
+        run: |
+          node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 \
+            ../pi-better-subagents/tests/continuation.test.mjs \
+            ../pi-better-subagents/tests/isolated-workspace.test.mjs test/runtime-subagent-*.test.ts
 
   macos-confined-packages:
     name: macos-sandbox (confined packages)
@@ -832,7 +810,7 @@ jobs:
   # reduces their results, so the required name keeps reporting.
   macos-sandbox:
     name: macos-sandbox
-    needs: [changes, macos-lifecycle, macos-cancellation, macos-subagent, macos-confined-packages, macos-confined-harness]
+    needs: [changes, macos-lifecycle, macos-subagent, macos-confined-packages, macos-confined-harness]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -841,7 +819,6 @@ jobs:
         env:
           AFFECTED: ${{ needs.changes.outputs.sandbox || 'true' }}
           LIFECYCLE_RESULT: ${{ needs.macos-lifecycle.result }}
-          CANCELLATION_RESULT: ${{ needs.macos-cancellation.result }}
           SUBAGENT_RESULT: ${{ needs.macos-subagent.result }}
           PACKAGES_RESULT: ${{ needs.macos-confined-packages.result }}
           HARNESS_RESULT: ${{ needs.macos-confined-harness.result }}
@@ -863,7 +840,6 @@ jobs:
             esac
           }
           check macos-lifecycle "$LIFECYCLE_RESULT"
-          check macos-cancellation "$CANCELLATION_RESULT"
           check macos-subagent "$SUBAGENT_RESULT"
           check macos-confined-packages "$PACKAGES_RESULT"
           check macos-confined-harness "$HARNESS_RESULT"

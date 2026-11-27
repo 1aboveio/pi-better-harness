@@ -111,7 +111,6 @@ test("the ci gate does not read the resource measurement", () => {
 const macGreen = {
   AFFECTED: "true",
   LIFECYCLE_RESULT: "success",
-  CANCELLATION_RESULT: "success",
   SUBAGENT_RESULT: "success",
   PACKAGES_RESULT: "success",
   HARNESS_RESULT: "success",
@@ -126,7 +125,6 @@ test("macos-sandbox passes when no sandbox path changed", () => {
     exitCode(macGate, {
       AFFECTED: "false",
       LIFECYCLE_RESULT: "skipped",
-      CANCELLATION_RESULT: "skipped",
       SUBAGENT_RESULT: "skipped",
       PACKAGES_RESULT: "skipped",
       HARNESS_RESULT: "skipped",
