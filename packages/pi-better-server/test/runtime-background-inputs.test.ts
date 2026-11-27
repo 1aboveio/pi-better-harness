@@ -143,7 +143,7 @@ test("ending an assignment removes the ready wait from only its cached terminal 
     assert.equal(observation.metrics.sourceWork.active.stats - before.sourceWork.active.stats, 8,
       "the changed worker's eight files are checked once across all subscribed parents");
     assert.equal(store.getWait(wait).phase, "held");
-    assert.deepEqual(observation.read(scope).find(row => row.id === taskId)?.waits, []);
+    assert.deepEqual(observation.read({ ...scope, id: taskId }).find(row => row.id === taskId)?.waits, []);
     assert.equal(observation.metrics.dependencyQueries - before.dependencyQueries, 1);
     assert.equal(store.getChangeRevision(), revision, "disarming the wait must not wake unrelated callback recovery");
   } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }

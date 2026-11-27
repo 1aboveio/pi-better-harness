@@ -15,7 +15,7 @@ function fixture(Client = WorkClient) {
   reply(requests[0], {});
   const event = () => socket.emit('data', JSON.stringify({type:'event',event:{type:'resync_required',reason:'read-worker-recovered'}})+'\n');
   const disconnect = () => socket.emit('close');
-  const publish = (value: any) => socket.emit('data', JSON.stringify({type:'event',event:{type:'runtime_snapshot',snapshot:value}})+'\n');
+  const publish = (value: any, subscriptionGeneration?: number) => socket.emit('data', JSON.stringify({type:'event',event:{type:'runtime_snapshot',snapshot:value,subscriptionGeneration}})+'\n');
   return {client, requests, reply, event, disconnect, publish};
 }
 async function until(predicate: () => boolean) {
@@ -84,6 +84,28 @@ test(`${name} client retries a replacement subscription after a startup deadline
   } finally {f.client.close();}
 });
 }
+
+test('switching sessions accepts its older snapshot and fences late responses and events', async () => {
+  const f = fixture();
+  try {
+    const first = f.client.subscribe({ sessionId: 'A' });
+    await until(() => f.requests.length === 2);
+    const a = f.requests[1];
+    f.reply(a, { ...snapshot('same'), seq: 12, rows: ['A'] });
+    await first;
+    const stale = f.client.resync();
+    const second = f.client.subscribe({ sessionId: 'B' });
+    await until(() => f.requests.length === 4);
+    const b = f.requests[3];
+    f.reply(b, { ...snapshot('same'), seq: 2, rows: ['B'] });
+    f.publish({ ...snapshot('same'), seq: 3, rows: ['B updated'] }, b.subscriptionGeneration);
+    f.reply(f.requests[2], { ...snapshot('same'), seq: 13, rows: ['A'] });
+    f.publish({ ...snapshot('same'), seq: 14, rows: ['A'] }, a.subscriptionGeneration);
+    assert.deepEqual((await second).rows, ['B']);
+    await stale;
+    assert.deepEqual(f.client.snapshot?.rows, ['B updated']);
+  } finally { f.client.close(); }
+});
 
 test('closing cancels a pending recovery retry', async () => {
   const f=fixture();await f.client.ready;

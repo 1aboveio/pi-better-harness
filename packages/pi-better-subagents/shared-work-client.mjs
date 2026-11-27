@@ -33,6 +33,7 @@ export class WorkClient {
     recoveryAgain = false;
     recoveryDelay = 100;
     scopeGeneration = 0;
+    snapshotGeneration = 0;
 
     constructor(socketPath, agentDir, requiredCapabilities = []) {
         this.socket = typeof socketPath === "string" ? connect(socketPath) : socketPath;
@@ -48,7 +49,10 @@ export class WorkClient {
                     if (message.type === "event") {
                         if (message.event.type === "runtime_catalog_snapshot") { for (const listener of this.catalogListeners) listener(message.event.snapshot); continue; }
                         if (message.event.type === "resync_required") { this.degrade(message.event.reason); this.scheduleRecovery(); }
-                        else if (message.event.type === "runtime_snapshot") this.accept(message.event.snapshot, message.event.previousSeq);
+                        else if (message.event.type === "runtime_snapshot") {
+                            const generation = message.event.subscriptionGeneration ?? this.snapshotGeneration;
+                            this.accept(message.event.snapshot, message.event.previousSeq, generation);
+                        }
                     } else {
                         const request = this.pending.get(message.id);
                         if (!request) continue;
@@ -75,7 +79,14 @@ export class WorkClient {
                 this.pending.delete(id);
                 rejectPending(new Error(`runtime-unhealthy: ${type} timed out`));
             }, 5000);
-            this.pending.set(id, { resolve, reject, rejectPending, timer });
+            this.pending.set(id, { resolve: value => {
+                // Apply subscription receipts in wire order, including events in the same socket chunk.
+                try {
+                    if (type === "runtime_subscribe" && Number.isSafeInteger(params.subscriptionGeneration))
+                        this.accept(value, undefined, params.subscriptionGeneration);
+                    resolve(value);
+                } catch (error) { reject(error); }
+            }, reject, rejectPending, timer });
             this.socket.write(JSON.stringify({ id, type, ...params }) + "\n");
         });
     }
@@ -86,17 +97,20 @@ export class WorkClient {
         this.snapshot = { ...this.snapshot, status: "degraded", reason, rows: this.snapshot?.rows ?? [] };
         this.notify();
     }
-    accept(snapshot, previousSeq) {
-        if (this.snapshot?.instanceId === snapshot.instanceId && snapshot.seq < this.snapshot.seq) return;
+    accept(snapshot, previousSeq, generation = this.scopeGeneration) {
+        if (this.closed || generation !== this.scopeGeneration) return;
+        const sameSubscription = this.snapshotGeneration === generation;
+        if (sameSubscription && this.snapshot?.instanceId === snapshot.instanceId && snapshot.seq < this.snapshot.seq) return;
         if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) {
             this.degrade("instance-changed: resync required");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "instance-changed" };
-        } else if (this.snapshot?.seq !== undefined && Number.isSafeInteger(previousSeq) && previousSeq > this.snapshot.seq) {
+        } else if (sameSubscription && this.snapshot?.seq !== undefined && Number.isSafeInteger(previousSeq) && previousSeq > this.snapshot.seq) {
             this.degrade("sequence-gap: replacing with a full authoritative snapshot");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "sequence-gap" };
         }
         // Global seq may skip unrelated changes; only a missing subscription
         // predecessor indicates loss. The received snapshot is still complete.
+        this.snapshotGeneration = generation;
         this.snapshot = Object.freeze(snapshot); this.notify();
     }
     scheduleRecovery(delay = 0) {
@@ -131,18 +145,16 @@ export class WorkClient {
     }
     async subscribe(scope) {
         await this.ready;
-        this.scopeGeneration++;
+        const generation = ++this.scopeGeneration;
         clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
         this.recoveryAgain = false; this.recoveryDelay = 100;
         this.scope = scope;
-        const snapshot = await this.request("runtime_subscribe", { scope });
-        this.accept(snapshot); return snapshot;
+        return this.request("runtime_subscribe", { scope, subscriptionGeneration: generation });
     }
     async resync() {
         const generation = this.scopeGeneration;
-        const snapshot = await this.request("runtime_subscribe", { scope: this.scope, sinceSeq: this.snapshot?.seq, instanceId: this.snapshot?.instanceId });
-        if (!this.closed && generation === this.scopeGeneration) this.accept(snapshot);
-        return snapshot;
+        return this.request("runtime_subscribe", { scope: this.scope, subscriptionGeneration: generation,
+            sinceSeq: this.snapshotGeneration === generation ? this.snapshot?.seq : undefined, instanceId: this.snapshot?.instanceId });
     }
     async get(scope) {
         await this.ready;

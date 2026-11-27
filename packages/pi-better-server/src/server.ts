@@ -113,6 +113,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
     const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
     const resultRoot = realpathSync(getAgentDir());
+    const hasQueuedCleanup = () => controlStore.store.serverAssignmentCleanup(1).length > 0;
+    const cleanupReason = () => resultSupervision?.busy || hasQueuedCleanup()
+      ? { kind: "assignment-cleanup", id: resultSupervision?.hostId ?? "server:" + instanceId } : undefined;
+    const cleanupBlocksShutdown = () => {
+      const revision = controlStore.store.serverAssignmentCleanupRevision();
+      if (!resultSupervision && hasQueuedCleanup()) {
+        resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+      }
+      return resultSupervision?.hasCleanupAtIdle(revision) || controlStore.store.serverAssignmentCleanupRevision() !== revision;
+    };
     const resultPort = { status() {
       resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
       resultSupervision.reconcile();
@@ -135,7 +145,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
       }
     };
-    if (controlStore.store.resultSupervisions(true).length || controlStore.store.serverAssignmentCleanup(1).length) {
+    if (controlStore.store.resultSupervisions(true).length || hasQueuedCleanup()) {
       resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
     }
     resultPorts.set(resultRoot, resultPort);
@@ -290,6 +300,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (!greeted) throw new Error("runtime_get_status requires hello");
             // Status observes the last inventory; only idle shutdown requests a fresh liveness check.
             const observation = workModel?.observation();
+            const cleanup = cleanupReason();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               subagentManagement: launches?.status() ?? null,
@@ -301,7 +312,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...requests.values(),
                 ...registry.lifecycleReasons(),
-                ...(resultSupervision?.busy ? [{ kind: "assignment-cleanup", id: resultSupervision.hostId }] : []),
+                ...(cleanup ? [cleanup] : []),
                 ...(resultSupervision?.livenessReasons() ?? []),
                 ...(launches?.lifecycleReasons() ?? []),
                 ...(backgroundTools?.lifecycleReasons() ?? []),
@@ -627,6 +638,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   // HostedSession idleness does not cover detached accepted work.
                   // Unknown observation fails closed for an irreversible activation.
                   upgradeBlockers = await work().upgradeObligations();
+                  if (cleanupBlocksShutdown()) upgradeBlockers.push({ kind: "assignment-cleanup", id: resultSupervision?.hostId });
                   if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
                   if (launches?.cleaningRegistry) throw new Error("Waiting for subagent registry cleanup");
                   if (inFlight > 0 || resultSupervision?.busy || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
@@ -688,12 +700,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           // No create/open can slip between this check and the synchronous admission fence.
           if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || resultSupervision?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           // An assignment can end after startup or between two asynchronous stops.
-          const cleanupRevision = controlStore.store.serverAssignmentCleanupRevision();
-          if (!resultSupervision && controlStore.store.serverAssignmentCleanup(1).length) {
-            resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
-          }
-          if (resultSupervision?.hasCleanupAtIdle(cleanupRevision) || resultSupervision?.livenessReasons().length) return;
-          if (controlStore.store.serverAssignmentCleanupRevision() !== cleanupRevision) return;
+          if (cleanupBlocksShutdown() || resultSupervision?.livenessReasons().length) return;
           draining = true;
           idleStopping = true;
           idleEvidence = { at: now(), deadline: hostedUsed ? zeroSince! + config.daemonIdleMs : runtimeZeroSince! + config.runtimeIdleMs,

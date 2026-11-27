@@ -42,6 +42,7 @@ export class WorkQueries {
   private lastBackgroundKey?: string;
   private model: WorkReadModel;
   private socket: Socket;
+  private subscriptionGeneration?: number;
   private maxQueuedBytes: number;
   constructor(model: WorkReadModel, socket: Socket, maxQueuedBytes = 4 * 1024 * 1024) {
     this.model = model; this.socket = socket; this.maxQueuedBytes = maxQueuedBytes;
@@ -68,7 +69,8 @@ export class WorkQueries {
         eventEncodings.set(snapshot, prefix); queryEncodingMetrics.serializations++;
       }
       // The snapshot is shared; its predecessor belongs to this subscription.
-      line = prefix + ',"previousSeq":' + (this.lastSnapshotSeq ?? snapshot.seq) + '}}\n';
+      line = prefix + ',"previousSeq":' + (this.lastSnapshotSeq ?? snapshot.seq)
+        + (this.subscriptionGeneration === undefined ? '' : ',"subscriptionGeneration":' + this.subscriptionGeneration) + '}}\n';
     } else line = JSON.stringify({ type: "event", event }) + "\n";
     if (Buffer.byteLength(line) > 4 * 1024 * 1024) {
       this.close();
@@ -93,6 +95,7 @@ export class WorkQueries {
     if (Buffer.byteLength(snapshotJSON(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
+      this.subscriptionGeneration = Number.isSafeInteger(command.subscriptionGeneration) ? Number(command.subscriptionGeneration) : undefined;
       this.lastSnapshotSeq = snapshot.seq;
       this.lastBackgroundKey = scope.background && !scope.backgroundHistory ? backgroundNotificationKey(snapshot) : undefined;
       this.dispose = this.model.onChange(() => {
