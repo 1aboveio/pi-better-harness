@@ -57,6 +57,34 @@ test("A staged source race degrades A but preserves verified B frames and cursor
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("verification retries a changed archive when only the live run was hinted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-archive-race-"));
+  const durableDir = join(root, "durable");
+  const id = "sa_race";
+  const meta = { id, cwd: root, sessionId: id, status: "completed", startedAt: 1,
+    recipe: { version: 1, sessionId: id, cwd: root, sessionDir: join(durableDir, "sessions") } };
+  const runDir = join(root, "runs", id);
+  const archives = join(durableDir, "attempts");
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(archives, { recursive: true });
+  const live = join(runDir, "meta.json"), archive = join(archives, id + ".json");
+  writeFileSync(live, JSON.stringify(meta));
+  writeFileSync(archive, JSON.stringify({ version: 1, meta }));
+  const model = new WorkReadModel(root, "archive-race", { baseDir: root, durableDir, intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    writeFileSync(live, JSON.stringify({ ...meta, name: "updated" }));
+    appendFileSync(archive, "\n");
+    await (model as any).scan([live]);
+    assert.match(model.observation().reason!, /Source changed during observation/);
+    await model.reconcile(false);
+    assert.equal(model.snapshot({ id }).status, "ready");
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.name, "updated");
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a held partial A write degrades A but sends no unrelated B frames", async () => {
   const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
   const put = (id: string, cwd: string) => {
