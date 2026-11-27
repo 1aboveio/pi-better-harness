@@ -91,6 +91,9 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
         }
         const ssh = { ssh: { host: 'fixture' }, command: 'true' };
         await assert.rejects(invoke('bg_task_spawn', ssh, 'prior-client', r => r.parametersDigest = published.bg_task_spawn), /runtime-draining/);
+        const watch = { ...ssh, success_when: { type: 'json_path_exists', path: '$.ready' } };
+        await assert.rejects(invoke('bg_task_watch', watch, 'prior-watch-client', r => r.parametersDigest = published.bg_task_watch), /runtime-draining/);
+        await assert.rejects(invoke('bg_task_watch', { ...watch, success_when: { type: 'json_path_exists', path: 'ready' } }), /Invalid Background tool parameters/);
         const changed = structuredClone(definitions.get('bg_task_spawn').parameters);
         changed.properties.timeout_seconds.minimum = 1;
         await assert.rejects(invoke('bg_task_spawn', ssh, 'changed-rule', r => r.parametersDigest = backgroundParametersDigest(changed)), /capability-mismatch/);

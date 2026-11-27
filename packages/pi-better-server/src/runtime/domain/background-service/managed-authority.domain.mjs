@@ -6,13 +6,18 @@ import { readAdmissionStartToken, readProcessStartTokenFresh } from "./process-i
 const ordered = (value) => value === null || typeof value !== 'object' ? value : Array.isArray(value) ? value.map(ordered) : Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])]));
 export const backgroundDigest = (value) => createHash('sha256').update(JSON.stringify(ordered(value))).digest('hex');
 export const TASK_TIMEOUT_HELP = "Optional whole-task timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to use the 24-hour maximum. Spawned processes also have a 24-hour maximum. When the Background tasks sandbox profile sets a command time limit, that cap applies to each actual command (and each watch check) independently: a smaller timeout_seconds still wins, and 0 does not disable the policy cap.";
-// Admission v1/v2 hashes the full schema. Preserve the 0.20.1 wire text
-// for this annotation; all property names, validation rules and defaults remain in the digest.
+// Basalt 0.5.6 misreads an escaped dollar in nested tool schemas.
+export const JSON_PATH_ROOT_PATTERN = '^[$]';
+// Admission v1/v2 hashes the full schema. Use the published spelling of
+// equivalent patterns and timeout help so clients and servers can upgrade independently.
 const PUBLISHED_TIMEOUT_HELP = "Optional whole-task timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout. When the Background tasks sandbox profile sets a command time limit, that cap applies to each actual command (and each watch check) independently: a smaller timeout_seconds still wins, and 0 does not disable the policy cap.";
 export function backgroundParametersDigest(parameters) {
     const wire = JSON.stringify(ordered(parameters), (key, value) => {
         if (key === 'timeout_seconds' && value?.description === TASK_TIMEOUT_HELP) {
             return { ...value, description: PUBLISHED_TIMEOUT_HELP };
+        }
+        if (key === 'path' && value?.type === 'string' && value.pattern === JSON_PATH_ROOT_PATTERN) {
+            return { ...value, pattern: '^\\$' };
         }
         return value;
     });
