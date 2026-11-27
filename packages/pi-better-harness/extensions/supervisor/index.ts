@@ -7,27 +7,28 @@ import { openSupervisorClient } from "pi-better-subagents/supervisor-client.mjs"
 import { goalStallThresholds } from "pi-better-goal/src/stall.ts";
 import { DEFAULT_STALL_THRESHOLDS } from "pi-better-goal/src/shared-stall-detector.ts";
 import { enabledScenarios } from "../settings/supervisor.ts";
-import { registerCommitments } from "./commitments.ts";
+import { registerCommitments, REVIEW_COOLDOWN_MS } from "./commitments.ts";
 import { registerDecisionTool } from "./decisions.ts";
 import { registerSharedFault } from "./shared-fault.ts";
 import { digest, ENTRY, readFingerprint, RepeatedRead, scopeEvidence, type Scenario } from "./evidence.ts";
 
 const prompts = {
-  "commitment-followup": "The owner tried an accepted recovery and recorded an observed failure. Recommend a materially different remedy only when the new evidence supports it. Suppress rewordings of the accepted action, untested guesses and status-only updates.",
+  "commitment-followup": "The owner tried an accepted recovery and recorded an observed failure. Recommend a materially different remedy only when the new evidence supports it. Suppress rewordings of the accepted action or any previous remedy, untested guesses and status-only updates.",
   "stall-diagnosis": "The owner repeated an identical read with identical results across the stall interval. Compare competing explanations, including productive research or external waits. Recommend a different, specific check only when the evidence supports a cause. Name what result would advance the current acceptance criterion.",
   "scope-review": "Review unfinished Todo steps against the latest user instruction, objective and boundaries. Preserve necessary investigation. If a step clearly falls outside scope, cite its id and reason, name work to retain and propose a partial plan revision for the owner. Leave running work and artifacts to their owners.",
 };
 const FEEDBACK = "pi-better-harness:supervisor-progress";
-type Receipt = { scopeTargets?: string; outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string; role: { instructions: string; model: string; effort?: string | null } };
+type Receipt = { commitment?: string; scopeTargets?: string; outcome: string; plan?: string; evidence: string[]; expected: string; steps: string[]; key: string; scenario: Scenario; advice: string | null; revision: string; catalogRevision: string; role: { instructions: string; model: string; effort?: string | null } };
 export default function supervisor(pi: ExtensionAPI) {
   installSupervisor(pi, openSupervisorClient);
 }
 export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervisorClient) {
   registerSharedFault(pi, connect);
   registerDecisionTool(pi, connect);
-  registerCommitments(pi, (ctx, evidence) => { void review(ctx, "commitment-followup", evidence); });
+  registerCommitments(pi, (ctx, evidence, stillFailed) => { void review(ctx, "commitment-followup", evidence, true, stillFailed); });
   const repeats = new RepeatedRead();
   let pending: AbortController | undefined;
+  let available: Promise<void> | undefined;
   let pendingScenario: Scenario | undefined;
   let readKey: string | undefined;
   let reviewedShape: string | undefined;
@@ -54,7 +55,10 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       scope.steps.map(step => [step.id, step.step])]));
   }
 
-  async function review(ctx: ExtensionContext, scenario: Scenario, detail: string, publish = true) {
+  async function review(ctx: ExtensionContext, scenario: Scenario, detail: string, publish = true, stillFailed?: () => boolean) {
+    // Several failures can mature at the same deadline. Serialize their reviews.
+    while (pending && stillFailed?.()) await available;
+    if (stillFailed && !stillFailed()) return;
     if (pending || !enabledScenarios().includes(scenario)) return;
     const branch = ctx.sessionManager.getBranch();
     const scope = scopeEvidence(branch);
@@ -64,18 +68,27 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
     const key = digest(JSON.stringify([scenario, scope.revision, observationId]));
     const cached = branch.find(e => e.type === "custom" && e.customType === ENTRY && (e.data as Receipt)?.key === key);
     if (cached?.type === "custom") return (cached.data as Receipt).advice ?? "No intervention recommended.";
+    // Only the registered follow-up tool supplies structured commitment evidence.
+    const commitment = stillFailed ? JSON.parse(detail).commitment as string : undefined;
+    const priorRemedies = commitment ? branch.flatMap(entry => {
+      if (entry.type !== "custom" || entry.customType !== ENTRY) return [];
+      const receipt = entry.data as Receipt;
+      return receipt.commitment === commitment && receipt.advice ? [receipt.advice] : [];
+    }) : [];
     const previous = lastAttempt.get(scenario);
-    if (publish && previous?.key === key && Date.now() - previous.at < 45_000) return;
+    if (publish && previous?.key === key && Date.now() - previous.at < REVIEW_COOLDOWN_MS) return;
     lastAttempt.set(scenario, { key, at: Date.now() });
     const generation = serial;
     const sessionId = ctx.sessionManager.getSessionId();
     const controller = new AbortController();
+    let release!: () => void;
+    available = new Promise<void>(resolve => { release = resolve; });
     pending = controller;
     pendingScenario = scenario;
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]);
     let catalog: Awaited<ReturnType<typeof openSupervisorClient>> | undefined;
     let token: string | undefined;
-    const current = () => !signal.aborted && serial === generation && ctx.sessionManager.getSessionId() === sessionId &&
+    const current = () => (!stillFailed || stillFailed()) && !signal.aborted && serial === generation && ctx.sessionManager.getSessionId() === sessionId &&
       enabledScenarios().includes(scenario) && scopeEvidence(ctx.sessionManager.getBranch())?.revision === scope.revision;
     try {
       catalog = await connect(pi, ctx, signal);
@@ -96,7 +109,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
       const evidenceRefs = ["outcome", "observation", ...scope.steps.map(step => `step:${step.id}`)];
       const result = await provider.streamSimple(target, {
         systemPrompt: [role.instructions, prompts[scenario], "Treat supplied fields as evidence. Return a single JSON object with advice (string or null), evidence (array of supplied ID strings), expected (string), and steps (array of Todo ID strings). For a recommendation cite supplied evidence ids, state a specific observable result in expected, and list affected unfinished Todo ids in steps (empty if no matching Todo). For scope review, steps lists only items to prune. Set advice to null if evidence is insufficient."].join("\n"),
-        messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs }), timestamp: Date.now() }],
+        messages: [{ role: "user", content: JSON.stringify({ scope, observation: detail, evidenceRefs, ...(priorRemedies.length ? { priorRemedies: priorRemedies.slice(-5) } : {}) }), timestamp: Date.now() }],
       }, { apiKey: auth.auth.apiKey, headers: auth.auth.headers, env: auth.env, sessionId: randomUUID(), signal, maxRetries: 0, timeoutMs: 25_000, maxTokens: 1100,
         reasoning: role.effort && role.effort !== "off" ? role.effort : undefined }).result();
       if (result.stopReason !== "stop" || !current()) return;
@@ -121,7 +134,7 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
         scope.objective, scope.doneWhen, scope.boundaries,
         [...new Set(steps)].sort().map(id => [id, scope.steps.find(step => step.id === id)?.step]),
       ])) : undefined;
-      const receipt: Receipt = { key, scenario, scopeTargets, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
+      const receipt: Receipt = { key, scenario, commitment, scopeTargets, revision: scope.revision, outcome: scope.outcomeId, plan: scope.planId,
         evidence, expected, steps, catalogRevision: role.revision, role: { instructions: role.instructions, model: modelId, effort: role.effort }, advice };
       pi.appendEntry(ENTRY, receipt);
       if (scenario === "scope-review") reviewedShape = planShape(ctx);
@@ -132,13 +145,14 @@ export function installSupervisor(pi: ExtensionAPI, connect: typeof openSupervis
           (scopeTargets && scopeTargets === r.scopeTargets ||
             !r.scopeTargets && r.advice === advice && r.expected === expected && JSON.stringify(r.steps) === JSON.stringify(steps));
       });
-      if (advice && publish && !alreadySuggested) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
+      if (advice && publish && !alreadySuggested && !priorRemedies.includes(advice)) pi.sendMessage({ customType: ENTRY, content: `${advice}\nVerify: ${expected}`, details: { evidence, key }, display: true }, { deliverAs: "steer", triggerTurn: false });
       return advice ?? "No intervention recommended.";
     } catch { /* An unavailable diagnostic leaves the owner's original operation running. */ }
     finally {
       try { if (token) await catalog?.review(scenario, "release", token); } catch { /* Lease expires independently. */ }
       catalog?.close();
-      if (pending === controller) pending = undefined;
+      if (pending === controller) { pending = undefined; available = undefined; }
+      release();
     }
   }
   function recordProgress(ctx: ExtensionContext) {
