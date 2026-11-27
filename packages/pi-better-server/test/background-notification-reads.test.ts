@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,9 +12,18 @@ import { WorkReadModel, type WorkSnapshot } from "../src/runtime/read-model.ts";
 
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
+const legacyRegistry = await import(new URL("../src/runtime/domain/background/registry.mjs", import.meta.url).href);
+
+function legacyTask(cwd: string, sessionId: string) {
+  const id = legacyRegistry.nextTaskId();
+  return { id, kind: "process", status: "running", startedAt: Date.now(), cwd, callbackOrigin: { cwd, sessionId },
+    logPath: legacyRegistry.logPathFor(id), spawnPid: process.pid };
+}
+
 type SnapshotFrame = { snapshot: WorkSnapshot; previousSeq: number };
 
-for (const unrelatedSessions of [1, 16]) test(`publishing one Background change with ${unrelatedSessions} unrelated sessions`, async t => {
+for (const unrelatedSessions of [1, 16]) for (const hasLegacyTasks of [false, true]) test(
+  `publishing with ${unrelatedSessions} unrelated sessions (legacy tasks: ${hasLegacyTasks})`, async t => {
   const root = mkdtempSync(join(tmpdir(), "background-notifications-"));
   const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const model = new WorkReadModel(root, "notifications", { baseDir: join(root, "raw"), durableDir: join(root, "archive"),
@@ -23,7 +32,13 @@ for (const unrelatedSessions of [1, 16]) test(`publishing one Background change 
   const listeners: Array<{ frames: SnapshotFrame[]; initial: WorkSnapshot }> = [];
   const owner = { kind: "parent-session", workspace: root, sessionId: "owner-0" };
   const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+  const legacyTasks = [];
   try {
+    for (let i = 1; hasLegacyTasks && i <= unrelatedSessions; i++) {
+      const task = legacyTask(root, "owner-" + i);
+      legacyTasks.push(task);
+      legacyRegistry.writeMeta(task);
+    }
     await model.reconcile();
     for (let i = 0; i <= unrelatedSessions; i++) {
       const frames: SnapshotFrame[] = [];
@@ -54,6 +69,12 @@ for (const unrelatedSessions of [1, 16]) test(`publishing one Background change 
     assert.equal(diagnostics.mock.callCount(), 0, "ordinary reads do not collect queue diagnostics");
 
     const background = (model as any).background;
+    // Warm the independent legacy inventory, then count its next maintenance pass separately.
+    background.refresh();
+    const beforePoll = background.registryMetrics.indexRevisionChecks;
+    background.refresh();
+    const pollChecks = background.registryMetrics.indexRevisionChecks - beforePoll;
+    assert.equal(pollChecks, 2 + (hasLegacyTasks ? 2 * unrelatedSessions : 0));
     const recent = t.mock.method(background, "refreshRecent");
     const legacy = t.mock.method(background, "visibleLegacy");
     const signatures = t.mock.method(background, "scopeSignature");
@@ -64,8 +85,9 @@ for (const unrelatedSessions of [1, 16]) test(`publishing one Background change 
     model.prepareBackgroundQuery();
     const work = { recent: recent.mock.callCount(), legacy: legacy.mock.callCount(),
       signatures: signatures.mock.callCount(), snapshots: snapshots.mock.callCount() };
-    t.diagnostic(JSON.stringify({ unrelatedSessions, terminalPublication: work,
-      indexRevisionChecks: background.registryMetrics.indexRevisionChecks - initialStampChecks }));
+    const indexRevisionChecks = background.registryMetrics.indexRevisionChecks - initialStampChecks;
+    t.diagnostic(JSON.stringify({ unrelatedSessions, hasLegacyTasks, terminalPublication: work, indexRevisionChecks, pollChecks }));
+    assert.equal(indexRevisionChecks, 0, "a coordinator publication does not poll legacy origin directories");
     assert.deepEqual(work, { recent: 2, legacy: 1, signatures: 1, snapshots: 1 });
     assert.equal(listeners.slice(1).flatMap(listener => listener.frames).length, 0);
     const current = queries[0]!.handle({ type: "runtime_get_snapshot", scope }) as WorkSnapshot;
@@ -82,7 +104,42 @@ for (const unrelatedSessions of [1, 16]) test(`publishing one Background change 
     assert.equal(secondOwner.frames[0]!.previousSeq, secondOwner.initial.seq, "skipped updates cannot create a sequence gap");
   } finally {
     queries.forEach(query => query.close());
+    legacyTasks.forEach(task => legacyRegistry.removeMeta(task));
     await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the maintenance timer discovers new legacy origins and in-place edits without a coordinator write", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const root = mkdtempSync(join(tmpdir(), "background-legacy-poll-"));
+  const model = new WorkReadModel(root, "legacy", { baseDir: join(root, "raw"), durableDir: join(root, "archive"),
+    supervisorDirectory: join(root, "supervisor"), intervalMs: 1000 });
+  const scope = { background: true, cwd: root, sessionId: "legacy-owner" };
+  const seeded = legacyTask(root, "other-owner");
+  const task = legacyTask(root, scope.sessionId);
+  const frames: SnapshotFrame[] = [];
+  const socket = Object.assign(new EventEmitter(), { writableLength: 0, write(line: string) { frames.push(JSON.parse(line).event); } });
+  const query = new WorkQueries(model, socket as unknown as Socket);
+  const poll = async () => { t.mock.timers.tick(1000); await model.reconcile(false); };
+  try {
+    legacyRegistry.writeMeta(seeded);
+    await model.reconcile();
+    query.handle({ type: "runtime_subscribe", scope });
+    await poll();
+    await poll();
+    assert.equal(frames.length, 0);
+    legacyRegistry.writeMeta(task);
+    await poll();
+    assert.equal(frames.at(-1)?.snapshot.rows[0]?.meta.id, task.id);
+    writeFileSync(legacyRegistry.metaPathFor(task.id), JSON.stringify({ ...task, name: "changed in place" }));
+    await poll();
+    assert.equal(frames.at(-1)?.snapshot.rows[0]?.meta.name, "changed in place");
+    legacyRegistry.removeMeta(task);
+    await poll();
+    assert.deepEqual(frames.at(-1)?.snapshot.rows, []);
+  } finally {
+    query.close(); await model.close();
+    legacyRegistry.removeMeta(task); legacyRegistry.removeMeta(seeded); rmSync(root, { recursive: true, force: true });
   }
 });
 

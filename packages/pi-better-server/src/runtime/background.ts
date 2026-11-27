@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, observationRevisionForOrigin, belongsToOrigin, metaPathFor, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
+import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, beginOriginIndexScan, observationRevisionForOrigin, belongsToOrigin, metaPathFor, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
 // @ts-expect-error Generated canonical progress policy.
 import { supervisedProgress } from "./domain/background-service/supervised-progress.domain.mjs";
 import { BackgroundHistory } from "./background-history.ts";
@@ -56,6 +56,7 @@ export class BackgroundObservation {
   private allRequested = false;
   private history?: BackgroundHistory;
   private legacy = new Map<string, BackgroundScope>();
+  private legacyIndexState?: { roots: string; missing: Set<string> };
   private recentRevision?: number;
   private recent: any[] = [];
   status: "ready" | "rebuilding" | "degraded" = "rebuilding";
@@ -69,18 +70,13 @@ export class BackgroundObservation {
     // Native mutations can commit between the last scheduled observation and
     // the next list. Reuse the durable bounded inbox before cache validation.
     const batch = this.inbox.receive(this.db, this.identity);
-    if (batch.size && this.refresh()) this.changed();
+    if (batch.size && this.refresh({ pollLegacy: false })) this.changed();
     if (this.inbox.hasPendingChanges) this.schedule();
   }
-  private sourceRevision(scope: WorkScope, workspaceRevisions?: Map<string, string>): string[] {
-    if (!this.ready) return [];
-    if (!scope.cwd) return [];
-    let workspace = workspaceRevisions?.get(scope.cwd);
-    if (workspace === undefined) {
-      workspace = String(observationRevisionForOrigin({ cwd: scope.cwd }));
-      workspaceRevisions?.set(scope.cwd, workspace);
-    }
-    return scope.sessionId ? [observationRevisionForOrigin({ cwd: scope.cwd, sessionId: scope.sessionId }), workspace] : [workspace];
+  private sourceRevision(scope: WorkScope, revision = observationRevisionForOrigin): string[] {
+    if (!this.ready || !scope.cwd) return [];
+    const workspace = revision({ cwd: scope.cwd });
+    return scope.sessionId ? [revision({ cwd: scope.cwd, sessionId: scope.sessionId }), workspace] : [workspace];
   }
   contentRevision(scope: WorkScope, fromRefresh: boolean): string {
     if (!this.ready || !scope.cwd) return JSON.stringify([this.status, this.reason]);
@@ -89,13 +85,13 @@ export class BackgroundObservation {
     const legacy = fromRefresh ? undefined : this.sourceRevision(scope);
     return JSON.stringify([entry.version, this.status, this.reason, legacy]);
   }
-  private legacyRevision(entry: BackgroundScope, workspaceRevisions?: Map<string, string>): string {
+  private legacyRevision(entry: BackgroundScope, revision = observationRevisionForOrigin): string {
     // Older writers can edit meta.json in place without updating their origin index.
     const files = entry.rows.map(row => {
       const stat = statSync(metaPathFor(row.id), { bigint: true, throwIfNoEntry: false });
       return stat ? [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join("/") : "missing";
     });
-    return [...this.sourceRevision(entry.origin, workspaceRevisions), ...files].join("|");
+    return [...this.sourceRevision(entry.origin, revision), ...files].join("|");
   }
   nextDeadline(scope: WorkScope): number | null {
     if (!this.ready) return null;
@@ -120,7 +116,7 @@ export class BackgroundObservation {
     if (!this.ready) throw new Error("Background inbox coverage is unverified");
     if (options.refresh !== false) {
       this.enabled = true;
-      this.refresh();
+      this.refresh({ pollLegacy: false });
     }
     if (!this.db) return [];
     let operations: any[] = [];
@@ -153,7 +149,7 @@ export class BackgroundObservation {
   private schedule() {
     if (!this.ready || this.scheduled) return;
     this.scheduled = true;
-    setImmediate(() => { this.scheduled = false; if (!this.closed && this.refresh()) this.changed(); });
+    setImmediate(() => { this.scheduled = false; if (!this.closed && this.refresh({ pollLegacy: false })) this.changed(); });
   }
   private oweRepair() {
     this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,'',0)`).run(this.identity ?? "");
@@ -227,7 +223,7 @@ export class BackgroundObservation {
       throw error;
     }
   }
-  refresh(): boolean {
+  refresh({ pollLegacy = true } = {}): boolean {
     if (!this.ready) return false;
     if (this.observationActive) return false;
     if (!this.enabled) return false;
@@ -356,12 +352,16 @@ export class BackgroundObservation {
           recentParents.add(parentKey(row));
         }
       }
-      const workspaceRevisions = new Map<string, string>();
+      // Journal entries and runner hints say nothing about unrelated legacy files.
+      // The periodic inventory verifies old writers even when no journal event arrives.
+      const scan = this.legacy.size && (pollLegacy || this.status !== "ready") ? beginOriginIndexScan(this.legacyIndexState) : undefined;
       let changed = changedParents.size > 0 || this.status !== "ready";
       for (const [key, entry] of this.legacy) {
         const scopedRevision = this.hasInputVersions ? this.scopeVersions.get(key) ?? 0 : revision;
-        const legacyRevision = this.legacyRevision(entry, workspaceRevisions);
-        const legacyChanged = legacyRevision !== entry.legacyRevision || (entry.legacyDeadline !== null && entry.legacyDeadline <= now);
+        const expired = entry.legacyDeadline !== null && entry.legacyDeadline <= now;
+        const legacyRevision = scan || expired || entry.legacyRevision === undefined
+          ? this.legacyRevision(entry, scan?.revision) : entry.legacyRevision;
+        const legacyChanged = expired || legacyRevision !== entry.legacyRevision;
         const recentChanged = this.db && (entry.recentDirty || entry.recentRevision !== scopedRevision || recentParents.has(key)
           || (entry.recentDeadline ?? Infinity) <= now
           || (unknownPreviousParents.size > 0 && entry.recent.some(row => unknownPreviousParents.has(row.operationId))));
@@ -399,6 +399,7 @@ export class BackgroundObservation {
         this.expiry.unref();
       }
       observation?.commit();
+      if (scan) this.legacyIndexState = scan.state;
       return changed;
     } catch (error) {
       observation?.release();
@@ -621,7 +622,7 @@ export class BackgroundObservation {
     if (!this.ready) { this.enabled = true; return []; }
     const newlyGlobal = scope.backgroundAll && !this.allRequested;
     if (scope.backgroundAll) this.allRequested = true;
-    if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh(); }
+    if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh({ pollLegacy: false }); }
     const legacy = this.legacyScope(scope);
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     // Retained terminals stay visible by default, but a sidecar dismissal must
