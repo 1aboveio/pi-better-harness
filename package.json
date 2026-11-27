@@ -23,7 +23,6 @@
       "./packages/pi-better-harness/extensions/task-context/index.ts",
       "./packages/pi-better-harness/extensions/project-context/index.ts",
       "./packages/pi-better-harness/extensions/minimal-output/index.ts",
-      "./packages/pi-better-harness/extensions/native-compaction/index.ts",
       "./packages/pi-better-harness/extensions/recap/index.ts",
       "./packages/pi-better-harness/extensions/supervisor/index.ts",
       "./packages/pi-better-harness/extensions/settings/index.ts"

@@ -28,15 +28,14 @@ function archivedPrefix(branch: SessionEntry[], checkpoint: Checkpoint) {
     ...branch.slice(Math.max(0, start), cut).filter(entry => entry.type !== "compaction").flatMap(sessionEntryToContextMessages)];
 }
 
-export default function nativeCompaction(pi: ExtensionAPI) {
-  const toggle = {
-    id: "native-compaction", label: "OpenAI native compaction", values: ["Off", "On"],
-    description: "Use native compaction for GPT models on supported Responses endpoints. Applies to future compactions.",
-    get: () => readHarnessSetting(key) === true ? "On" : "Off",
-    change: (value: string) => { updateHarnessSetting(key, () => value === "On"); },
-  };
-  pi.events.on("harness-settings:request", () => pi.events.emit("harness-settings:register", toggle));
+export const nativeCompactionSetting = {
+  id: "native-compaction", label: "OpenAI native compaction", values: ["Off", "On"],
+  description: "Use native compaction for GPT models on supported Responses endpoints. Applies to future compactions.",
+  get: () => readHarnessSetting(key) === true ? "On" : "Off",
+  change: (value: string) => { updateHarnessSetting(key, () => value === "On"); },
+};
 
+export default function registerNativeCompaction(pi: ExtensionAPI) {
   const marker = randomUUID();
   let replay: Checkpoint | undefined;
   let portable: ReturnType<typeof archivedPrefix> | undefined;
@@ -58,12 +57,11 @@ export default function nativeCompaction(pi: ExtensionAPI) {
       preparation.messagesToSummarize.unshift(...archivedPrefix(branchEntries, previousNative));
       preparation.previousSummary = undefined;
     };
-    if (!supportsCompaction(model) || readHarnessSetting(key) !== true) {
-      restoreForPi();
-      return;
-    }
-
     try {
+      if (!supportsCompaction(model) || readHarnessSetting(key) !== true) {
+        restoreForPi();
+        return;
+      }
       let prefix: Item[] = [];
       let messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
       if (previousNative && previousNative.details.route === route(model)) {

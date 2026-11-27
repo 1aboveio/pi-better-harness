@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import nativeCompaction from "../../extensions/native-compaction/index.ts";
+import nativeCompaction, { nativeCompactionSetting as toggle } from "../../extensions/native-compaction/index.ts";
 
 const [root, modelId, sessionFile, automatic] = process.argv.slice(2);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -12,7 +12,6 @@ const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, ca
     ...(process.env.PI_NATIVE_COMPACTION_LIVE_WINDOW === "1" ? {} : { keepRecentTokens: 64 }) } });
 const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), refreshOnCreate: false,
   modelsPath: join(agentDir, "models.json"), modelsStorePath: join(agentDir, "models-store.json") });
-let toggle;
 let request;
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
@@ -23,8 +22,6 @@ const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settings
       const { input, ...settings } = payload;
       request = { prefix: input.map(digest), settings: digest(settings) };
     });
-    pi.events.on("harness-settings:register", control => { toggle = control; });
-    pi.events.emit("harness-settings:request", undefined);
   } }] });
 await resourceLoader.reload();
 const sessionManager = sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(root, join(root, "sessions"));
