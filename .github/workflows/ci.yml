@@ -697,11 +697,15 @@ jobs:
             test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
   macos-subagent:
-    name: macos-sandbox (subagent)
+    name: macos-sandbox (subagent ${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.sandbox == 'true'
     runs-on: macos-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     env:
       # Turns "no backend, so skip" into a hard failure on a lane whose whole
       # point is that backend.
@@ -719,14 +723,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Prove workspace recovery, worker permissions and launch ownership on Node 24
+      - name: Accept checkout recovery under macOS Seatbelt
+        if: matrix.shard == 1
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/isolated-workspace.test.mjs
+      - name: Accept tool loading and use permissions in a real SDK worker
+        if: matrix.shard == 2
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs
+      - name: Prove subagent launch and bootstrap ownership on Node 24
         working-directory: packages/pi-better-server
-        env:
-          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
-        run: |
-          node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 \
-            ../pi-better-subagents/tests/continuation.test.mjs \
-            ../pi-better-subagents/tests/isolated-workspace.test.mjs test/runtime-subagent-*.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-shard="${{ matrix.shard }}/2" test/runtime-subagent-*.test.ts
 
   macos-confined-packages:
     name: macos-sandbox (confined packages)
