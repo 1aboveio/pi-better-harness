@@ -170,7 +170,8 @@ test("recent Background terminals expire through deadline work without a caller 
   const root = mkdtempSync(join(tmpdir(), "background-expiry-"));
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 200000 });
   const store = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => Date.now() });
-  const observation = new BackgroundObservation(root, join(root, "supervisor"));
+  const published = t.mock.fn();
+  const observation = new BackgroundObservation(root, join(root, "supervisor"), undefined, published);
   const owner = { kind: "parent-session" as const, workspace: root, sessionId: "parent" };
   const scope = { background: true, cwd: root, sessionId: "parent" };
   try {
@@ -181,7 +182,9 @@ test("recent Background terminals expire through deadline work without a caller 
     assert.equal(observation.read(scope).length, 1);
     observation.refresh();
     t.mock.timers.tick(30001);
+    assert.equal(observation.read(scope).length, 0, "an explicit read sees the expiry before scheduled publication");
     await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(published.mock.callCount(), 1, "the read does not consume the subscription update");
     assert.equal(observation.read(scope).length, 0);
   } finally { await observation.close(); store.close(); t.mock.timers.reset(); rmSync(root, { recursive: true, force: true }); }
 });
