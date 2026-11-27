@@ -72,6 +72,9 @@ export async function ensureRuntime(options: RuntimeOptions): Promise<any> {
   options.signal?.throwIfAborted();
   const timeoutMs = options.timeoutMs ?? 15000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error("Runtime timeout must be from 1 to 120000 ms");
+  if (process.platform === "win32") {
+    throw new Error("runtime-unavailable: native Windows managed-service installation is not available yet. Run Pi on a supported Linux or macOS host.");
+  }
   const platform = `${process.platform}-${process.arch}`;
   const directory = fileURLToPath(new URL("../../artifacts/", import.meta.url));
   let artifact: ServerArtifact;

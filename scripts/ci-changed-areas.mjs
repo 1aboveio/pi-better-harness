@@ -65,6 +65,12 @@ const AREA_PATTERNS = {
     "docs/tests/sandbox-compatibility.smoke.manifest.json",
   ],
   windows: [
+    "packages/pi-better-server/scripts/private-runtime/**",
+    "packages/pi-better-server/src/runtime/client.ts",
+    "packages/pi-better-server/src/startup/artifact.ts",
+    "packages/pi-better-server/src/startup/managed-types.ts",
+    "scripts/sync-runtime-client.mjs",
+    "scripts/verify-windows-managed-artifact.mjs",
     "packages/pi-better-background-tasks/**",
     "packages/ssh-core/**",
     "packages/pi-better-ssh/**",

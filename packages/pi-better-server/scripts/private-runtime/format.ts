@@ -3,14 +3,16 @@ import { isAbsolute, posix } from "node:path";
 import type { RuntimePlatform, ServerBuild, StagedRuntime } from "../../src/startup/managed-types.ts";
 
 export const NODE_CHECKSUMS: Record<RuntimePlatform, string> = {
+  "win32-x64": "6e50ce5498c0cebc20fd39ab3ff5df836ed2f8a31aa093cecad8497cff126d70",
   "linux-x64": "ace9fa104992ed0829642629c46ca7bd7fd6e76278cb96c958c4b387d29658ea",
   "linux-arm64": "734ff04fa7f8ed2e8a78d40cacf5ac3fc4515dac2858757cbab313eb483ba8a2",
   "darwin-x64": "2526230ad7d922be82d4fdb1e7ee1e84303e133e3b4b0ec4c2897ab31de0253d",
   "darwin-arm64": "25495ff85bd89e2d8a24d88566d7e2f827c6b0d3d872b2cebf75371f93fcb1fe",
 };
-// Extracted bin/node hashes from the archives authenticated by NODE_CHECKSUMS.
+// Extracted node executable hashes from the archives authenticated by NODE_CHECKSUMS.
 // Source: https://nodejs.org/dist/v24.14.1/SHASUMS256.txt
 export const NODE_EXECUTABLE_CHECKSUMS: Record<RuntimePlatform, string> = {
+  "win32-x64": "58e74bf02fc5bbacc41dcb8bef089961cd5bddd37830b87784e4fc624d145d1f",
   "linux-x64": "bf9112eb83a827dc9f9c8d19bb7bddcbf00f7b2fedae18fdcaee05406981f20a",
   "linux-arm64": "7fac13c04c19207c3e904a7721f8c045e6b99493471e2df85444f764cdd21934",
   "darwin-x64": "9ab4f6249a8de4671c3205ef58621dfb19d120a9c59fd96ed206571bafb0319c",

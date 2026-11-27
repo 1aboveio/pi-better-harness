@@ -1,6 +1,6 @@
 import type { Readiness } from "./ensure.ts";
 
-export type RuntimePlatform = "linux-x64" | "linux-arm64" | "darwin-x64" | "darwin-arm64";
+export type RuntimePlatform = "linux-x64" | "linux-arm64" | "darwin-x64" | "darwin-arm64" | "win32-x64";
 
 /** Identity excludes timestamps and the generated manifest itself. */
 export interface ServerBuild {
