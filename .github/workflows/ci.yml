@@ -221,7 +221,7 @@ jobs:
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/5)
+    name: pi-1x-compat (${{ matrix.pi-version }}, ${{ matrix.shard }}/3)
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-24.04
@@ -230,7 +230,7 @@ jobs:
       fail-fast: false
       matrix:
         pi-version: ["1.2.0", "1.6.1"]
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -258,7 +258,7 @@ jobs:
 
       - name: pi-better-server suite on Pi ${{ matrix.pi-version }}
         env:
-          TEST_SHARD: ${{ matrix.shard }}/5
+          TEST_SHARD: ${{ matrix.shard }}/3
           PI_SDK_VERSION: ${{ matrix.pi-version }}
         run: bash packages/pi-better-server/scripts/test-on-pi.sh "$PI_SDK_VERSION" "$RUNNER_TEMP/pi-compat"
 
