@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
 import { commandAvailable } from "pi-better-goal/src/command-binding.ts";
-import { workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
+import { restoredWorkflowMatches, workflowOwnerFromSkill } from "pi-better-goal/src/workflow.ts";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
@@ -177,12 +177,12 @@ function workflowPlanOwner(ctx: ExtensionContext, entries = ctx.sessionManager.g
 function reopeningPlanOwner(pi: ExtensionAPI, ctx: ExtensionContext, goal: GoalSnapshot): string | null {
   const command = goal.command;
   if (command?.source !== "skill") return null;
-  const binding = workflowBinding(ctx.sessionManager.getBranch());
-  if (binding) return binding.owner;
+  const entries = ctx.sessionManager.getBranch();
   if (!commandAvailable(pi, command)) throw new Error(`Restore /${command.name} before changing its task plan.`);
   const owner = workflowOwnerFromSkill(command.name.slice("skill:".length), command.path,
     name => pi.getCommands().find(item => item.source === "skill" && item.name === `skill:${name}`)?.sourceInfo.path);
-  return owner?.name ?? null;
+  if (!restoredWorkflowMatches(goal, entries, owner)) throw new Error("Reinvoke the original workflow before changing its Todo.");
+  return workflowBinding(entries)?.owner ?? owner?.name ?? null;
 }
 
 export default function taskContextExtension(pi: ExtensionAPI): void {
@@ -1046,6 +1046,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         request.doneWhen = [...new Set([...originalCriteria, ...run.criteria])];
         request.evidence = run.evidence;
       }
+      request.auditHandled = true;
       return;
     }
     if (request.action === "inspect") {

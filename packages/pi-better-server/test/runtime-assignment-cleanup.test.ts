@@ -15,7 +15,7 @@ import { DEFAULT_STOP_WAIT_MS, SUPERVISOR_GROUP_CLEANUP_DEADLINE_MS, SUPERVISOR_
 import { acquireMutationStore } from "../src/runtime/mutation-store.ts";
 import { startDaemon } from "../src/server.ts";
 import { ENTITY_BUDGET } from "../src/runtime/work-budget.ts";
-import { makeEnv, waitFor } from "./helpers.ts";
+import { Client, makeEnv, waitFor } from "./helpers.ts";
 import { RuntimeResultSupervision } from "../src/runtime/result-supervision.ts";
 
 test("Windows PID and legacy group-empty records cannot verify a process tree", () => {
@@ -150,6 +150,13 @@ test("idle shutdown drains queued lost groups and leaves unverifiable and foreig
     const decision = { revision: 1, owner, recipient, outcome: "cancelled", reason: "Ended", processUncertain: true, evidence: [], waits: [] };
     lease.store.recordAssignmentOutcome({ ...decision, assignmentId: "unverified" });
     assert.equal(lease.store.resultSupervisions(true).length, 0);
+    const observer = await Client.connect(daemon.socketPath);
+    try {
+      await observer.request({ type: "hello", protocolVersion: 1 });
+      const status = await observer.request({ type: "runtime_get_status" });
+      assert.ok(status.data.livenessReasons.some((reason: any) => reason.kind === "assignment-cleanup"),
+        "queued stops are visible before the supervision host starts");
+    } finally { observer.close(); }
     now += 60000;
     await daemon.sweepIdle();
     assert.equal(existsSync(daemon.socketPath), true, "a full unverified page yields before the idle decision");

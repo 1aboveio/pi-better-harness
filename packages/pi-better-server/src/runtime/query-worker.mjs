@@ -92,7 +92,8 @@ model.snapshot = scope => observeExecution("snapshot", () => {
   scope = workScope(scope ?? {});
   const key = JSON.stringify(scope ?? {});
   const revision = model.contentRevision(scope);
-  const cacheable = !scope?.backgroundHistory;
+  // Historical IDs can outlive the parent's active/recent observation window.
+  const cacheable = !scope?.backgroundHistory && !(scope?.background && scope.id);
   const previous = cacheable ? cache.get(key) : undefined;
   const comparedAt = Date.now();
   const hit = previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > comparedAt);

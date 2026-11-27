@@ -342,9 +342,9 @@ export class WorkReadModel {
   onChange(listener: () => void, scope?: WorkScope) {
     if (scope) scope = { ...scope, cursor: undefined };
     const release = scope?.background ? this.background.retain(scope) : undefined;
-    let revision = scope ? this.contentRevision(scope) : undefined;
+    let revision = scope ? this.contentRevision(scope, true) : undefined;
     const notify = () => {
-      const next = scope ? this.contentRevision(scope) : undefined;
+      const next = scope ? this.contentRevision(scope, true) : undefined;
       if (scope && next === revision) return;
       revision = next; listener();
     };
@@ -419,10 +419,11 @@ export class WorkReadModel {
   prepareBackgroundQuery() {
     this.background.prepareQuery();
   }
-  contentRevision(scope: WorkScope = {}) {
+  contentRevision(scope: WorkScope = {}, fromRefresh = false) {
     if (scope.background) {
       if (scope.backgroundHistory) return String(this.revision);
-      return hash([this.revision, this.background.sourceRevision(scope)]);
+      if (!this.observationInitialized) return hash([this.state, this.reason]);
+      return this.background.contentRevision(scope, fromRefresh);
     }
     const entry = this.scopeEntry(scope);
     return `${entry.token}:${entry.revision}`;

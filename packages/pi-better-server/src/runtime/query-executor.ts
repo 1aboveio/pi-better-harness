@@ -305,6 +305,9 @@ export class WorkQueryExecutor {
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
+    if (command.type === "runtime_subscribe" && Number.isSafeInteger(input.subscriptionGeneration)) {
+      command.subscriptionGeneration = input.subscriptionGeneration;
+    }
     if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness" && command.type !== "runtime_get_upgrade_obligations") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);

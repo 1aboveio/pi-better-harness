@@ -88,6 +88,18 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; ledger?: 
   };
 }
 
+test("an enabled Harness must acknowledge the completion audit", async t => {
+  const h = await fixture(t);
+  await h.command("Check deployment");
+  h.events.on("pi-better-harness:task-context", (request: any) => {
+    if (request.action === "audit") delete request.auditHandled;
+  });
+  const result = await h.complete();
+  assert.equal(result.details.ok, false);
+  assert.match(result.content[0].text, /did not confirm/);
+  assert.equal(h.goal()?.status, "active");
+});
+
 const accepted = { objective: "Ship checkout", doneWhen: ["Checkout succeeds"], boundaries: ["No production writes"] };
 
 for (const first of ["pause", "resume"] as const) {
@@ -249,6 +261,10 @@ test("a failed workflow reopen keeps its binding across edits and reload", async
 
   await assert.rejects(h.update({ todo: [] }), /Restore \/skill:rush-issues/);
   writeFileSync(skill, "# Skill without workflow metadata");
+  const before = h.entries.length;
+  await assert.rejects(h.update({ outcome: refinement, todo: [{ step: "Replace original plan", status: "pending" }] }), /original workflow/);
+  assert.equal(h.entries.length, before);
+  assert.equal(h.goal()?.status, "complete");
   await h.update({ outcome: refinement });
   assert.equal(h.goal()?.status, "complete");
   writeFileSync(skill, contents);

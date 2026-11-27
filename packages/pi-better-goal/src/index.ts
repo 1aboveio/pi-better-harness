@@ -43,7 +43,7 @@ import {
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
-import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { currentWorkflowOwner, restoredWorkflowMatches, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import { canStartGoalFromOutcome, GOAL_PANEL_START_EVENT, type GoalPanelStartRequest, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
@@ -1051,13 +1051,8 @@ export default function (pi: ExtensionAPI): void {
     const command = previous ? previous.command : owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
     const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
     const restoredOwner = previous?.command ? goalWorkflowOwner(goal) : null;
-    if (previous?.command?.source === "skill") {
-      const original = previous.workflowBinding === undefined
-        ? currentWorkflowOwner(ctx.sessionManager.getBranch(), previous.goalId) : previous.workflowBinding;
-      if ((previous.workflowBinding !== undefined || original) &&
-          (original?.name !== restoredOwner?.name || original?.path !== restoredOwner?.path)) {
-        return "Reinvoke the original workflow to continue its Todo.";
-      }
+    if (previous?.command?.source === "skill" && !restoredWorkflowMatches(previous, ctx.sessionManager.getBranch(), restoredOwner)) {
+      return "Reinvoke the original workflow to continue its Todo.";
     }
     if (handoffOwner && restoredOwner?.name !== handoffOwner) return "Reinvoke the original workflow to continue its Todo.";
     if (command?.source === "skill") {
@@ -1342,6 +1337,10 @@ export default function (pi: ExtensionAPI): void {
         return { content: [{ type: "text", text: "Workflow changed during the completion check. Read the current Goal." }], details: { ok: false, goal: latest } };
       }
       const audit = requestTaskContext(pi, { action: "audit", workflowOwnsPlan: !!gated }, current);
+      if (audit.enabled && !audit.auditHandled) {
+        return { content: [{ type: "text", text: "Harness did not confirm the Todo audit. Update Harness before completing this Goal." }],
+          details: { ok: false, goal: current } };
+      }
       const criteria = audit.doneWhen?.length ? audit.doneWhen : audit.objective ? [audit.objective] : [];
       const evidence = [...input.evidence ?? [], ...audit.evidence ?? []];
       const missing = criteria.filter(criterion => !evidence.some(item => item.criterion === criterion && item.result.trim()));

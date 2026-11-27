@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { EXTENSION_NAME } from "./types.js";
+import { EXTENSION_NAME, type GoalSnapshot } from "./types.js";
 
 export const WORKFLOW_ENTRY_TYPE = "pi-better-workflow";
 
@@ -109,6 +109,12 @@ export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>, atGoal
     if (awaitingInitialBinding) return owner;
   }
   return atGoalStart ? null : owner;
+}
+
+export function restoredWorkflowMatches(goal: GoalSnapshot, entries: Iterable<SessionEntryLike>, restored: WorkflowOwner | null): boolean {
+  const original = goal.workflowBinding === undefined ? currentWorkflowOwner(entries, goal.goalId) : goal.workflowBinding;
+  if (goal.workflowBinding === undefined && !original) return true;
+  return original?.name === restored?.name && original?.path === restored?.path;
 }
 
 export function skillCommandName(text: string): string | null {
