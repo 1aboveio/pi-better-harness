@@ -10,7 +10,7 @@ import { updateHarnessSetting } from "../extensions/shared-harness-settings.ts";
 import { OUTCOME_ENTRY } from "../extensions/task-context/outcome-state.ts";
 import { EXTENSION_NAME } from "../extensions/task-context/types.ts";
 
-function fixture(t, scenario, client = {}, render = JSON.stringify) {
+function fixture(t, scenario, client = {}, render = JSON.stringify, modelDelay = 20) {
   const dir = mkdtempSync(join(tmpdir(), "pi-supervisor-extension-"));
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -27,7 +27,7 @@ function fixture(t, scenario, client = {}, render = JSON.stringify) {
     find: () => ({ id: "model", provider: "test" }),
     getProviderAuth: async () => ({ auth: {} }),
     getProvider: () => ({ streamSimple: (_model, context) => { requests.push(context); return { result: async () => {
-      await wait(20);
+      if (modelDelay) await wait(modelDelay);
       return { stopReason: "stop", content: [{ type: "text", text: render({ advice: "Inspect the original acceptance criterion before expanding the plan.", evidence: ["step:one", "observation"], expected: "The accepted CI work continues.", steps: ["one"] }) }] };
     } }; } }),
   } };
@@ -186,4 +186,84 @@ test("grounded annotated evidence from a model is accepted and unfamiliar IDs ar
   await wait(65);
   assert.equal(f.messages.length, 1);
   assert.equal(f.sessionManager.getBranch().filter(e => e.customType === "pi-better-harness:supervisor-review").length, 1);
+});
+
+test("a failed recovery resumes its one-shot recheck after reload and only steers once", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  let admissions = 0;
+  const f = fixture(t, "commitment-followup", { review: async (_scenario, action) => {
+    if (action === "begin" && ++admissions === 1) return { status: "busy" };
+    return { status: "admitted", token: "one" };
+  } }, JSON.stringify, 0);
+  const run = p => f.tools.get("supervisor_followup").execute("call", p, undefined, undefined, f.ctx);
+  const accept = await run({ action: "accept", recovery: "Restart the watcher", verification: "Receive a CI event" });
+  const id = accept.content[0].text.split(" ")[0];
+  const record = (call, isError) => f.sessionManager.appendMessage({ role: "toolResult", toolCallId: call,
+    toolName: "read", isError, content: [{ type: "text", text: call }], timestamp: Date.now() });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  record("failed", true);
+  await run({ id, action: "attempt", toolCallId: "failed", observation: "Watcher refused the connection" });
+  await flush();
+  assert.equal(admissions, 1);
+  assert.equal(f.requests.length, 0);
+  t.mock.timers.tick(20_000);
+  f.fire("session_shutdown", {});
+  f.fire("session_start", {});
+  t.mock.timers.tick(24_999);
+  await flush();
+  assert.equal(admissions, 1);
+  // The timer receipt must preserve evidence already collected for the next attempt.
+  record("retry", false);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(f.messages.length, 1);
+  assert.equal(admissions, 2);
+  assert.match((await run({ id, action: "status" })).content[0].text, /Watcher refused the connection/);
+  assert.match((await run({ id, action: "attempt", toolCallId: "retry", observation: "Watcher reconnected" })).content[0].text, /attempted/);
+  record("failed-again", true);
+  await run({ id, action: "attempt", toolCallId: "failed-again", observation: "Watcher refused the connection" });
+  t.mock.timers.tick(45_000);
+  await flush();
+  assert.equal(f.messages.length, 1);
+  assert.equal(admissions, 2);
+  record("connected", false);
+  await run({ id, action: "attempt", toolCallId: "connected", observation: "Connected" });
+  record("stage", false);
+  assert.match((await run({ id, action: "verify", toolCallId: "stage", observation: "Build finished" })).content[0].text, /verified/);
+  t.mock.timers.tick(90_000);
+  await flush();
+  assert.equal(admissions, 2);
+  f.fire("session_shutdown", {});
+});
+
+test("disabled follow-up drops queued steering; a recovered attempt cancels its recheck", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  let resume;
+  const held = new Promise(resolve => { resume = resolve; });
+  const f = fixture(t, "commitment-followup", { role: async () => {
+    await held;
+    return { model: "test/model", instructions: "Diagnose", revision: "r1" };
+  } }, JSON.stringify, 0);
+  const tool = p => f.tools.get("supervisor_followup").execute("id", p, undefined, undefined, f.ctx);
+  const accepted = await tool({ action: "accept", recovery: "Reconnect", verification: "Read stage" });
+  const id = accepted.content[0].text.split(" ")[0];
+  const attempt = async (call, isError) => {
+    f.sessionManager.appendMessage({ role: "toolResult", toolCallId: call, toolName: "read", isError,
+      content: [{ type: "text", text: call }], timestamp: Date.now() });
+    await tool({ id, action: "attempt", toolCallId: call, observation: call });
+  };
+  await attempt("offline", true);
+  f.settings(false);
+  resume();
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(45_000);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.messages.length, 0);
+  f.settings(true);
+  await attempt("new failure", true);
+  await attempt("recovered", false);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(45_000);
+  assert.equal(f.messages.length, 0);
+  f.fire("session_shutdown", {});
 });
