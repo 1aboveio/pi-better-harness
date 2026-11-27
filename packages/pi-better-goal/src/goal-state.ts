@@ -16,6 +16,7 @@ interface GoalLike {
   goalId: string;
   objective: string;
   command?: unknown;
+  workflowBinding?: { name?: unknown; path?: unknown } | null;
   status: GoalStatus;
   pauseReason?: unknown;
   tokenBudget?: number | null;
@@ -133,6 +134,9 @@ function normalizeGoal(goal: GoalLike): GoalSnapshot {
     goalId: goal.goalId,
     objective: goal.objective,
     ...(isCommandBinding(goal.command) ? { command: goal.command } : {}),
+    ...(goal.workflowBinding === null ? { workflowBinding: null } :
+      typeof goal.workflowBinding?.name === "string" && typeof goal.workflowBinding.path === "string"
+        ? { workflowBinding: { name: goal.workflowBinding.name, path: goal.workflowBinding.path } } : {}),
     status: goal.status,
     ...(pauseReason ? { pauseReason } : {}),
     tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,

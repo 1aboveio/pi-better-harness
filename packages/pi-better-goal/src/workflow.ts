@@ -84,13 +84,19 @@ export function workflowEntry(owner: WorkflowOwner | null) {
     : { version: 1, kind: "set" as const, owner };
 }
 
-export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>, atGoalCompletion?: string): WorkflowOwner | null {
+export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>, atGoalStart?: string): WorkflowOwner | null {
   let owner: WorkflowOwner | null = null;
+  let awaitingInitialBinding = false;
   for (const entry of entries) {
+    if (awaitingInitialBinding && (entry.type === "message" || entry.customType === EXTENSION_NAME)) return null;
     if (entry.type !== "custom") continue;
-    if (atGoalCompletion && entry.customType === EXTENSION_NAME) {
+    if (atGoalStart && entry.customType === EXTENSION_NAME) {
       const data = entry.data as { kind?: string; goal?: { goalId?: string; status?: string } } | null;
-      if (data?.kind === "set" && data.goal?.goalId === atGoalCompletion && data.goal.status === "complete") return owner;
+      if (data?.kind === "set" && data.goal?.goalId === atGoalStart) {
+        // Automatic Goals inherit the active owner. Explicit skill Goals record it just after creation.
+        if (owner) return owner;
+        awaitingInitialBinding = true;
+      }
     }
     if (entry.customType !== WORKFLOW_ENTRY_TYPE) continue;
     const data = entry.data as { version?: unknown; kind?: unknown; owner?: Partial<WorkflowOwner> } | null;
@@ -100,8 +106,9 @@ export function currentWorkflowOwner(entries: Iterable<SessionEntryLike>, atGoal
       typeof data.owner.path === "string" && data.owner.role === "coordinator" && data.owner.planOwner === "workflow") {
       owner = data.owner as WorkflowOwner;
     }
+    if (awaitingInitialBinding) return owner;
   }
-  return atGoalCompletion ? null : owner;
+  return atGoalStart ? null : owner;
 }
 
 export function skillCommandName(text: string): string | null {

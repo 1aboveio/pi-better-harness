@@ -77,7 +77,7 @@ import {
   type SupervisorStartOptions,
   type SupervisorTaskStatus,
 } from "./supervisor/index.js";
-import { processGroupExitVerified } from "./supervisor/identity.js";
+import { processGroupExitVerified, verifyProcessIdentity } from "./supervisor/identity.js";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.js";
 import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.js";
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
@@ -1355,7 +1355,8 @@ export class ObservedWaitHost {
           store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
           return;
         }
-        if (!pgid) return;
+        if (!pgid || (process.platform === "win32" &&
+            verifyProcessIdentity(inspection.command?.pid, inspection.command?.pidStartTime) !== "verified")) return;
       }
       if (!this.localCancels.has(taskId)) {
         this.localCancels.add(taskId);

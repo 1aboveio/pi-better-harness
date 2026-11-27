@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -108,15 +108,16 @@ for (const heldType of ['hello', 'runtime_register_catalog']) {
     });
 }
 
-for (const reason of ['abort', 'timeout']) {
+for (const reason of ['abort', 'timeout', 'disconnect']) {
     test(`a post-dispatch ${reason} leaves the batch receipt unknown`, { timeout: 10000 }, async t => {
-        const { request, controller, launch, requests, directory } = await holdManagedLaunch(t, 'runtime_launch_subagent');
+        const { request, socket, controller, launch, requests, directory } = await holdManagedLaunch(t, 'runtime_launch_subagent');
         const grant = join(directory, request.authority.id + '.json');
         assert.ok(existsSync(grant), 'the server received a usable grant');
         if (reason === 'abort') {
             controller.abort();
             assert.equal(existsSync(grant), false, 'abort immediately revokes further admissions');
         }
+        if (reason === 'disconnect') socket.destroy();
         const receipt = await launch;
         assert.equal(receipt.details.status, 'outcome_unknown');
         assert.match(receipt.content[0].text, /subagent_list/);
@@ -129,4 +130,13 @@ test('a definitive managed launch rejection keeps the server error', async t => 
     const { request, socket, launch } = await holdManagedLaunch(t, 'runtime_launch_subagent');
     socket.write(JSON.stringify({ id: request.id, success: false, error: 'invalid-launch-grant' }) + '\n');
     await assert.rejects(launch, /invalid-launch-grant/);
+});
+
+test('a grant removal failure rejects the interrupted launch with retry guidance', async t => {
+    const { request, controller, launch, directory } = await holdManagedLaunch(t, 'runtime_launch_subagent');
+    const grant = join(directory, request.authority.id + '.json');
+    rmSync(grant);
+    mkdirSync(grant);
+    controller.abort();
+    await assert.rejects(launch, /Cannot remove the subagent launch grant.*Check subagent_list/);
 });

@@ -35,7 +35,7 @@ import { currentProcessStartToken, readProcessStartToken } from "./process-ident
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, resolveForegroundSandboxPlan, currentForegroundSandboxPolicy, resolveWorkerSandboxPlan, sandboxProvenance, } from "./sandbox.domain.mjs";
 import { openStore, cancellationCredential, } from "./shared-operation-coordinator/index.domain.mjs";
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
-import { processGroupExitVerified } from "./supervisor/identity.domain.mjs";
+import { processGroupExitVerified, verifyProcessIdentity } from "./supervisor/identity.domain.mjs";
 import { readStopRequest, writeTextAtomic } from "./supervisor/store.domain.mjs";
 import { ciObserverArgv, ciRunFromArgv, validCiRun } from "./ci-observation.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
@@ -848,7 +848,8 @@ export class ObservedWaitHost {
                     store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
                     return;
                 }
-                if (!pgid)
+                if (!pgid || (process.platform === "win32" &&
+                    verifyProcessIdentity(inspection.command?.pid, inspection.command?.pidStartTime) !== "verified"))
                     return;
             }
             if (!this.localCancels.has(taskId)) {
