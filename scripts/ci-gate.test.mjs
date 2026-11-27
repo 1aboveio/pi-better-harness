@@ -60,7 +60,7 @@ function exitCode(script, env) {
 
 const source = readFileSync(workflowPath, "utf8");
 const ciGate = extractGate(source, "ci", "Require every test lane");
-const macGate = extractGate(source, "macos-sandbox", "Require both macOS halves");
+const macGate = extractGate(source, "macos-sandbox", "Require all macOS sandbox jobs");
 
 const green = {
   CHANGES_RESULT: "success",
@@ -113,10 +113,9 @@ const macGreen = {
   LIFECYCLE_RESULT: "success",
   SUBAGENT_RESULT: "success",
   PACKAGES_RESULT: "success",
-  HARNESS_RESULT: "success",
 };
 
-test("macos-sandbox passes when every half succeeded", () => {
+test("macos-sandbox passes when every sandbox job succeeded", () => {
   assert.equal(exitCode(macGate, macGreen), 0);
 });
 
@@ -127,16 +126,17 @@ test("macos-sandbox passes when no sandbox path changed", () => {
       LIFECYCLE_RESULT: "skipped",
       SUBAGENT_RESULT: "skipped",
       PACKAGES_RESULT: "skipped",
-      HARNESS_RESULT: "skipped",
     }),
     0,
   );
 });
 
-test("macos-sandbox fails when any half failed", () => {
-  assert.equal(exitCode(macGate, { ...macGreen, SUBAGENT_RESULT: "failure" }), 1);
+test("macos-sandbox fails when any sandbox job failed", () => {
+  for (const name of ["LIFECYCLE_RESULT", "SUBAGENT_RESULT", "PACKAGES_RESULT"]) {
+    assert.equal(exitCode(macGate, { ...macGreen, [name]: "failure" }), 1, name);
+  }
 });
 
-test("macos-sandbox fails when a half skipped although sandbox paths changed", () => {
-  assert.equal(exitCode(macGate, { ...macGreen, HARNESS_RESULT: "skipped" }), 1);
+test("macos-sandbox fails when a sandbox job skipped although its paths changed", () => {
+  assert.equal(exitCode(macGate, { ...macGreen, PACKAGES_RESULT: "skipped" }), 1);
 });
