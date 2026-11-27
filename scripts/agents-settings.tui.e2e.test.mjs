@@ -63,14 +63,14 @@ export default function(pi) {
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
         wait(/pi-better-subagents/);
         literal("/harness-settings"); key("Tab"); key("Enter");
-        const hub = wait(/Agent catalog\s+Open/);
+        const hub = wait(/Agent catalog\s+›/);
         const rows = hub.split("\n").filter(line => /^(?:> |  )\S.*?\s{2,}\S/.test(line));
         const selected = rows.findIndex(line => line.startsWith("> "));
-        const catalog = rows.findIndex(line => /^(?:> |  )Agent catalog\s+Open/.test(line));
+        const catalog = rows.findIndex(line => /^(?:> |  )Agent catalog\s+›/.test(line));
         assert.ok(selected >= 0 && catalog >= 0, "the hub shows its cursor and the catalog shortcut");
         const direction = catalog < selected ? "Up" : "Down";
         for (let i = 0; i < Math.abs(catalog - selected); i++) key(direction);
-        wait(/^> Agent catalog\s+Open/m);
+        wait(/^> Agent catalog\s+›/m);
         key("Enter");
         const catalogScreen = wait(/Agents.*definitions/);
         assert.match(catalogScreen.split("\n")[0], /^Agents/);
