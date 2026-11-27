@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.59.1",
+  "version": "0.59.2",
   "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, Goals, and Todo lists.",
   "license": "MIT",
   "type": "module",

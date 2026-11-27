@@ -10,10 +10,10 @@ import { startWorkObservation, stopWorkObservation, workObservation } from "../w
 
 // An external query transport deterministically advances between bounded pages.
 // The collector must preserve its final notification, without another event.
-for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "no-new-event", "transient-read"]) test(`shared observation pagination recovery: ${mode}`, async () => {
+for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "no-new-event", "transient-read", "subscribe-timeout"]) test(`shared observation pagination recovery: ${mode}`, async () => {
     const stopDuringRecovery = mode === "stop";
     const root = realpathSync(mkdtempSync("/tmp/pi-obs-retry-"));
-    let sequence = 0, conflicts = 0, historyReads = 0, anchorReads = 0;
+    let sequence = 0, conflicts = 0, historyReads = 0, anchorReads = 0, subscriptions = 0;
     const originalGet = WorkClient.prototype.get;
     if (["final-page-stop", "final-anchor-stop"].includes(mode)) WorkClient.prototype.get = async function(scope) {
         const result = await originalGet.call(this, scope);
@@ -29,6 +29,10 @@ for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "
             buffer += chunk;
             while (buffer.includes("\n")) {
                 const end = buffer.indexOf("\n"), command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
+                if (mode === "subscribe-timeout" && command.type === "runtime_subscribe" && ++subscriptions === 1) {
+                    socket.write(JSON.stringify({ id: command.id, success: false, error: "runtime-unhealthy: runtime_subscribe timed out" }) + "\n");
+                    continue;
+                }
                 if (command.type === "runtime_get_snapshot" && command.scope.active === false) {
                     historyReads++;
                     if (mode === "no-new-event" || mode === "transient-read" && historyReads <= 4) {
@@ -59,6 +63,13 @@ for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "
             assert.equal(workObservation()?.status, "degraded");
             assert.equal(historyReads, reads, "without a new notification, failure must not schedule retries");
             assert.ok(reads <= 4, "only the initial and already coalesced subscription demand may run");
+            return;
+        }
+        if (mode === "subscribe-timeout") {
+            const deadline = Date.now() + 2000;
+            while (workObservation()?.status !== "ready" && Date.now() < deadline) await delay(10);
+            assert.equal(subscriptions, 2);
+            assert.equal(workObservation()?.status, "ready");
             return;
         }
         if (mode === "transient-read") {
