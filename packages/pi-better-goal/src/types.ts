@@ -102,6 +102,8 @@ export interface GoalSnapshot {
   goalId: string;
   objective: string;
   command?: GoalCommandBinding;
+  /** Canonical coordinator of a skill at creation; older Goals predate this field. */
+  workflowBinding?: { name: string; path: string } | null;
   status: GoalStatus;
   /** Present only while `status` is "paused". */
   pauseReason?: GoalPauseReason;

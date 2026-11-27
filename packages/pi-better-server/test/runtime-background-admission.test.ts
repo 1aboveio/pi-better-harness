@@ -61,15 +61,30 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
                     supervision: { hostId: 'local-fixture' } });
                 const poll = async () => {
                     for (let i = 0; i < count; i++) {
-                        await invoke('__background_poll', {}, randomUUID(), record => { record.owner.sessionId = `quiet-view-${i}`; });
+                        await invoke('__background_poll', {}, randomUUID(), record => { record.owner.sessionId = `quiet-view-${i}`; record.branchIds = [`branch-${i}`]; });
                     }
                 };
                 await poll();
                 const before: number = service.metrics().reconciles;
                 assignmentStore.store.recordAssignmentOutcome({ assignmentId, owner, recipient, revision: 1, outcome: 'succeeded',
                     reason: 'Done', evidence: [], waits: [], processUncertain: false });
+                assignmentStore.store.recordTerminalOutcome({ operationId: assignmentId, eventId: `exit-${assignmentId}`, owner,
+                    outcome: 'succeeded', evidence: [{ kind: 'terminal-record', ref: assignmentId, summary: 'exit 0' }] });
                 await poll();
                 assert.equal(service.metrics().reconciles - before, 0, `ending an assignment with ${count} unrelated warm views`);
+                const parent = { kind: 'parent-session', sessionId: `active-parent-${count}`, workspace: root };
+                const pollParent = () => invoke('__background_poll', {}, randomUUID(), record => { record.owner = parent; });
+                const taskId = `parent-task-${count}`;
+                assignmentStore.store.registerOperation({ operationId: taskId, taskId, launchToken: taskId, owner: parent,
+                    observer: { kind: 'local-supervisor', version: '1' }, supervision: { hostId: 'local-fixture' } });
+                await pollParent();
+                const beforePublication: number = service.metrics().reconciles;
+                assignmentStore.store.recordTerminalOutcome({ operationId: taskId, eventId: `exit-${taskId}`, owner: parent,
+                    outcome: 'succeeded', evidence: [{ kind: 'terminal-record', ref: taskId, summary: 'exit 0' }] });
+                await poll();
+                assert.equal(service.metrics().reconciles - beforePublication, 0, `no callback reconciliation for ${count} unrelated parents`);
+                await pollParent();
+                assert.equal(service.metrics().reconciles - beforePublication, 1, 'the parent whose task settled reconciles');
             }
         } finally { assignmentStore.release(); }
         const childLogResult = await invoke('__background_log', {id:child.id,lines:1}, 'child-log', r => r.branchIds=['branch']);

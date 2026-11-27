@@ -33,10 +33,11 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
     const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
     let unsubscribe: unknown;
     let dispatched = false;
-    const cancel = () => {
-        try { rmSync(path, { force: true }); } catch { /* Finally retries cleanup. */ }
-        client.close();
+    const revoke = () => {
+        // Retry removal in the launch promise, where an I/O error can reach the caller.
+        try { rmSync(path, { force: true }); } catch { client.close(); }
     };
+    const cancel = () => { revoke(); client.close(); };
     signal?.addEventListener("abort", cancel, { once: true });
     try {
         signal?.throwIfAborted();
@@ -60,8 +61,8 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
             if (checking) return;
             checking = true;
             try {
-                if (canonicalJson(currentSandboxPermissions(pi) ?? {}) !== canonicalJson(payload.permissions)) rmSync(path, { force: true });
-            } catch { rmSync(path, { force: true }); }
+                if (canonicalJson(currentSandboxPermissions(pi) ?? {}) !== canonicalJson(payload.permissions)) revoke();
+            } catch { revoke(); }
             finally { checking = false; }
         });
         signal?.throwIfAborted();
@@ -69,22 +70,19 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
         return await client.request("runtime_launch_subagent", { authority: { id, secret } });
     } catch (error) {
         if (!dispatched) signal?.throwIfAborted();
-        // Revoking the grant can stop later batch admissions after a worker has already started.
-        if (dispatched && error instanceof Error && (
-            (signal?.aborted && error.message === "runtime-unavailable: client closed")
-            || error.message === "runtime-unhealthy: runtime_launch_subagent timed out"
-        )) {
-            return {
-                isError: true,
-                details: { status: "outcome_unknown" },
-                content: [{ type: "text", text: "The launch receipt is unknown. Check subagent_list in this session before retrying. A worker may already be running." }],
-            };
+        if ((error as NodeJS.ErrnoException)?.code === "LAUNCH_OUTCOME_UNKNOWN") {
+            return { isError: true, details: { status: "outcome_unknown" }, content: [{ type: "text",
+                text: "Launch receipt unavailable. Check subagent_list in this session before retrying. One or more workers may already be running." }] };
         }
         throw error;
     } finally {
         signal?.removeEventListener("abort", cancel);
         if (typeof unsubscribe === "function") unsubscribe();
         client.close();
-        rmSync(path, { force: true });
+        try { rmSync(path, { force: true }); }
+        catch (error) {
+            throw new Error("Cannot remove the subagent launch grant." +
+                (dispatched ? " Check subagent_list in this session before retrying. One or more workers may already be running." : ""), { cause: error });
+        }
     }
 }
