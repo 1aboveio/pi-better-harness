@@ -54,7 +54,7 @@ export default function registerNativeCompaction(pi: ExtensionAPI) {
     const previousNative = native(previous) ? previous : undefined;
     const restoreForPi = () => {
       if (!previousNative) return;
-      preparation.messagesToSummarize.unshift(...archivedPrefix(branchEntries, previousNative));
+      preparation.messagesToSummarize = [...archivedPrefix(branchEntries, previousNative), ...preparation.messagesToSummarize];
       preparation.previousSummary = undefined;
     };
     try {

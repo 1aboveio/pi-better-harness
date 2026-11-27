@@ -3,7 +3,9 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import nativeCompaction, { nativeCompactionSetting as toggle } from "../../extensions/native-compaction/index.ts";
+import { nativeCompactionSetting as toggle } from "../../extensions/native-compaction/index.ts";
+
+import harnessSettings from "../../extensions/settings/index.ts";
 
 const [root, modelId, sessionFile, automatic] = process.argv.slice(2);
 const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -17,7 +19,7 @@ const digest = value => createHash("sha256").update(JSON.stringify(value)).diges
 const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
   noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
   extensionFactories: [{ name: "native-compaction", factory(pi) {
-    nativeCompaction(pi);
+    harnessSettings(pi);
     pi.on("before_provider_request", ({ payload }) => {
       const { input, ...settings } = payload;
       request = { prefix: input.map(digest), settings: digest(settings) };
