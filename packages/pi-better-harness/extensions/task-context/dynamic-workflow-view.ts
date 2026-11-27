@@ -2,7 +2,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { planText, type PlanRenderTheme } from "./plan-presentation.js";
 import { renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 import { phase, reviewState, type Step, type WorkflowRun } from "./dynamic-workflow.js";
-import type { WorkflowNode } from "./workflow-diagram.js";
+import { diagramCounts, type WorkflowNode } from "./workflow-diagram.js";
 import { renderWorkflowFrame, type WorkflowFrame, type WorkflowTheme } from "./workflow-view.js";
 
 const marker = { ready: "○", working: "●", waiting: "·", failed: "×", complete: "✓", standby: "–" } as const;
@@ -24,12 +24,17 @@ function diagramNodes(run: WorkflowRun, selected?: string): WorkflowNode[] {
   return [...groups.values()].map(members => {
     const first = members[0]!;
     const states = members.map(s => phase(run, s));
-    const state = (["failed", "working", "ready", "waiting", "complete", "standby"] as const)
-      .find(candidate => states.includes(candidate))!;
+    const order = ["failed", "working", "ready", "waiting", "complete", "standby"] as const;
     const name = planText(first.stage ?? first.title);
-    const detail = members.length > 1 ? " [" + members.map((s, i) => s.id + " " + marker[states[i]!]).join(" ∥ ") + "]" : "";
-    const label = { text: marker[state] + " " + name + detail, color: colors[state], selected: members.some(s => s.id === selected) };
-    return { ids: members.map(s => s.id), name, label: [label], parents: first.dependsOn ?? [], revision: first.review?.revision };
+    const selectedGroup = members.some(s => s.id === selected);
+    const state = states[0]!;
+    const label = members.length === 1
+      ? [{ text: marker[state] + " " + name, color: colors[state], selected: selectedGroup }]
+      : [{ text: name, color: "text", selected: selectedGroup }, ...diagramCounts(order.map(key => ({
+          glyph: marker[key], color: colors[key], count: states.filter(value => value === key).length,
+        })))];
+    return { ids: members.map(s => s.id), name, label, parents: first.dependsOn ?? [], revision: first.review?.revision };
+
   });
 }
 

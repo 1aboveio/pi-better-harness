@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.58.0] - 2026-11-27
+
+### Changed
+
+- Show compact workflow stage counts such as `Implement ●2`. Pending stages show `○`, and the Todo header retains overall progress.
+- Show Recap as one expandable line in the conversation transcript. Wait for the foreground and background workers to settle and for any Goal to pause or complete. Expanding the entry shows the full recap and any agreed next step.
+- Let Work Navigator titles use the space left by each row’s status and elapsed time. A longer diagnostic or a narrower terminal shortens the title as needed.
+
+## [pi-better-goal@0.18.0] - 2026-11-27
+
+### Added
+
+- Report verified idle transitions to observers of the current session when the Goal and its workers settle.
+
+## [pi-better-background-tasks@0.21.3] - 2026-11-27
+
+### Fixed
+
+- Give background task titles the available space on each navigator row as status details change.
+
+## [pi-better-subagents@0.39.3] - 2026-11-27
+
+### Fixed
+
+- Fit agent and child task titles to the space left by each row’s status while keeping elapsed times right-aligned.
+
+## [pi-better-server@0.8.3] - 2026-11-27
+
+### Changed
+
+- Include the adaptive Work Navigator row layout in the hosted Background Tasks and Subagents runtimes.
+
 ## [pi-better-harness@0.57.0] - 2026-11-26
 
 ### Added

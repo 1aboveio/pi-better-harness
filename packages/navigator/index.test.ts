@@ -148,9 +148,12 @@ describe("shared background work navigator", () => {
       ["main", "leaf-a", "leaf-b", "with-task"].map((id, i) => ({
         ...agents.listRows(now)[0]!, id, name: id, sortStartedAt: 100 - i,
       })) });
+    const title = "Verify unchanged stable-ID OIDC checks across all supported tenants";
+    let diagnostic = "";
     const unregisterTasks = registerBackgroundWorkProvider({ ...tasks, listRows: (now) =>
       ["main", "with-task", "missing-owner"].map((parentAgentId) => ({ ...tasks.listRows(now)[0]!,
-        id: `${parentAgentId}-task`, name: `${parentAgentId}-task`, parentAgentId,
+        id: `${parentAgentId}-task`, name: parentAgentId === "main" ? title : `${parentAgentId}-task`, parentAgentId,
+        facts: parentAgentId === "main" && diagnostic ? [diagnostic] : [],
       })) });
     let widget: unknown;
     const ctx = { mode: "tui", hasUI: true, ui: { factory: undefined as any, setStatus() {},
@@ -165,15 +168,26 @@ describe("shared background work navigator", () => {
         truncate: truncateToWidth,
       });
       const lines = renderWidget(widget, 100);
-      const mainTask = lines.findIndex(line => line.includes("main-task"));
-      assert.ok(mainTask >= 0);
-      assert.match(lines[mainTask]!, /└─ >_ main-task/);
+      const mainTask = lines.findIndex(line => line.includes(title));
+      assert.ok(mainTask >= 0, "the short running status leaves room for the full child title");
+      assert.match(lines[mainTask]!, /└─ >_ Verify.*running +1s$/);
       assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
       assert.match(lines[mainTask + 2]!, /leaf-b/);
       assert.match(lines[mainTask + 3]!, /with-task/);
       assert.match(lines[mainTask + 4]!, /└.*with-task-task/);
       assert.match(lines[mainTask + 5]!, /missing-owner.*not running/);
       assert.match(lines[mainTask + 6]!, /└.*missing-owner-task/);
+      const taskAt = (width: number) => renderWidget(widget, width).find(line => line.includes("└─ >_ Verify"))!;
+      diagnostic = "suspected stall; no observed progress for six minutes";
+      refreshBackgroundWorkNavigator(ctx);
+      const crowded = taskAt(120);
+      assert.ok(crowded.includes(diagnostic) && !crowded.includes(title), crowded);
+      assert.equal(visibleWidth(crowded), 120);
+      assert.match(crowded, /1s$/);
+      assert.ok(taskAt(166).includes(title), "resizing restores the title");
+      diagnostic = "";
+      refreshBackgroundWorkNavigator(ctx);
+      assert.ok(taskAt(100).includes(title), "clearing the diagnostic restores the title at the original width");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterAgents();

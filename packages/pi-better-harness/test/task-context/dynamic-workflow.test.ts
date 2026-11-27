@@ -54,8 +54,8 @@ test("two independent tasks join, then versioned review either ships directly or
     const all = lines.join(" ");
     assert.match(all, /Research/);
     assert.match(all, /↺|┬/);
-    assert.match(all, /one ○/);
-    assert.match(all, /two ✓/);
+    assert.match(all, /○1/);
+    assert.match(all, /✓1/);
     const expanded = renderDynamic(first, width, { fg: (_, s) => s }, true, {});
     assert.match(lines.join("\n"), /… 1 more/);
     assert.doesNotMatch(expanded.join("\n"), /… 1 more/);

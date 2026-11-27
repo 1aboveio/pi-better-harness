@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { renderWorkflowFrame } from "./workflow-view.js";
 import type { CompactTaskHeader } from "./compact-task-header.js";
-import { workflowDiagram, type DiagramPart, type WorkflowNode } from "./workflow-diagram.js";
+import { diagramCounts, workflowDiagram, type DiagramPart, type WorkflowNode } from "./workflow-diagram.js";
 import {
   alignedPlanLabels, plainPlanTheme, planRowTitleColor, planText, renderPlanHeading, renderPlanPresentation, statusStyle,
   type DisplayStatus, type PlanRenderTheme, type PlanPresentation,
@@ -271,23 +271,20 @@ function issueStageLabel(name: keyof IssueStages, units: IssueStages[], openFind
   const detail = (text: string, color: string) => {
     node.push({ color: "dim", text: node.length === 1 ? " " : " · " }, { text, color });
   };
-  if (name === "implement" || name === "ship") {
-    detail(`${done}/${eligible}`, eligible > 0 && done === eligible ? "success" : "muted");
+  if (done > 0 && (name === "implement" || name === "ship")) {
+    detail(`${done}/${eligible}`, done === eligible ? "success" : "muted");
   }
-  for (const [state, label] of [
-    ["failed", "failed"], ["blocked", "blocked"], ["unknown", "unknown"], ["in_progress", "active"],
-  ] as const) {
-    const count = counts.get(state);
-    if (count) detail(`${count} ${label}`, statusStyle(state).color);
-  }
-  if (name === "fix") {
-    const pending = counts.get("pending");
-    if (pending) detail(`${pending} pending`, "muted");
-    if (node.length === 1) detail(done ? `${done} fixed` : "as needed", done ? "success" : "dim");
-  }
+  const states: DisplayStatus[] = ["failed", "blocked", "unknown", "in_progress"];
+  if (name === "fix") states.push("pending", "completed");
+  node.push(...diagramCounts(states.map(state => ({ ...statusStyle(state), count: counts.get(state) ?? 0 }))));
+
   if (name === "review") {
     if (openFindings) detail(`${openFindings} open finding${openFindings === 1 ? "" : "s"}`, "muted");
-    if (node.length === 1) detail(done ? `${done}/${eligible} passed` : "pending", done && done === eligible ? "success" : "muted");
+    if (done && node.length === 1) detail(`✓${done}/${eligible}`, done === eligible ? "success" : "muted");
+  }
+  if (node.length === 1) {
+    const style = statusStyle(name === "fix" ? "skipped" : "pending");
+    detail(style.glyph, style.color);
   }
   return node;
 }

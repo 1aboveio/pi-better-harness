@@ -778,21 +778,22 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
   const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
-  const name = row.name || row.id;
+  const name = rowDisplayName(row);
+  const summary = singleLine(rowSummary(row));
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
   const elapsed = singleLine(row.elapsed || "-");
-  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
   const elapsedWidth = Math.min(Math.max(piVisibleWidth(elapsed), 4), 12);
   const statusWidth = 2;
   const leftPrefixWidth = piVisibleWidth(prefix) + statusWidth + 1;
-  const maxNameWidth = Math.max(8, Math.floor(available * 0.36));
-  const nameWidth = Math.max(8, Math.min(44, maxNameWidth, available - leftPrefixWidth - elapsedWidth - 10));
-  const rightWidth = Math.max(8, available - leftPrefixWidth - nameWidth - 1);
-  const summaryWidth = Math.max(1, rightWidth - elapsedWidth - 1);
-  const left = `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)}`;
-  const right = `${dim(fitRight(rowSummary(row), summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
-  const gap = Math.max(1, available - piVisibleWidth(left) - piVisibleWidth(right));
+  const textWidth = Math.max(0, width - leftPrefixWidth - elapsedWidth - 2);
+  // Reserve a readable title when both texts are long. Each side can use the other's spare cells.
+  const preferredNameWidth = Math.max(8, Math.ceil(textWidth / 3), textWidth - piVisibleWidth(summary));
+  const nameWidth = Math.min(piVisibleWidth(name), textWidth, preferredNameWidth);
+  const summaryWidth = textWidth - nameWidth;
+  const left = `${prefix}${fit(status, statusWidth)} ${piTruncateToWidth(name, nameWidth)}`;
+  const right = `${dim(fitRight(summary, summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
+  const gap = Math.max(1, width - piVisibleWidth(left) - piVisibleWidth(right));
   return `${left}${" ".repeat(gap)}${right}`;
 }
 
