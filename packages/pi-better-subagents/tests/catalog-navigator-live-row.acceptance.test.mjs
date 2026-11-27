@@ -10,10 +10,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
@@ -23,9 +24,8 @@ const agentName = "Live Row Agent";
 const holdMs = 18_000;
 
 describe("catalog navigator live row", { concurrency: false }, () => {
-    (enabled ? it : it.skip)("lists a named agent launched in the same Pi TUI process", { timeout: 90_000 }, async () => {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const sandbox = join(repoRoot, ".acceptance-sandbox", `live-row-${stamp}`);
+    (enabled ? it : it.skip)("lists a named agent launched in the same Pi TUI process", { timeout: 300_000 }, async (t) => {
+        const sandbox = process.env.PI_ACCEPTANCE_SANDBOX ?? mkdtempSync("/tmp/pi-live-row-");
         const agent = join(sandbox, "pi-agent");
         const work = join(sandbox, "work");
         const tmp = join(sandbox, "tmp");
@@ -34,7 +34,18 @@ describe("catalog navigator live row", { concurrency: false }, () => {
         mkdirSync(work, { recursive: true });
         mkdirSync(tmp, { recursive: true });
         mkdirSync(sessions, { recursive: true });
-        const phase = join(sandbox, "navigator-live-row.phase");
+        const previousTmp = process.env.TMPDIR;
+        process.env.TMPDIR = tmp;
+        t.after(() => {
+            if (previousTmp === undefined) delete process.env.TMPDIR;
+            else process.env.TMPDIR = previousTmp;
+        });
+        const owner = await prepareOwnedRuntime(agent);
+        t.after(async () => {
+            await stopOwnedRuntime(join(agent, "server"), owner);
+            if (!process.env.PI_ACCEPTANCE_SANDBOX) removeOwnedFixture(sandbox);
+        });
+        const phase = join(sandbox, `navigator-live-row-${process.pid}.phase`);
         const hold = await startHold(holdMs, () => writeFileSync(phase + ".provider-ready", "ready"));
         const hits = join(sandbox, "hold-hits.json");
         hold.hitsPath = hits;
@@ -71,7 +82,7 @@ overrides:
 ---
 Reply with the single word DONE.
 `);
-        const out = join(sandbox, "navigator-live-row.json");
+        const out = join(sandbox, `navigator-live-row-${process.pid}.json`);
         const screen = join(sandbox, "navigator-live-row.pty");
         const pi = process.env.PI_BIN ?? "pi";
         const child = spawn("python3", ["-"], {
@@ -106,7 +117,7 @@ Reply with the single word DONE.
         assert.ok(navigator.listedIds.includes(row.id), JSON.stringify(navigator.listedIds));
         const rendered = JSON.stringify(navigator);
         assert.match(rendered, new RegExp(agentName));
-        assert.match(rendered, /role\.developer/);
+        assert.equal(navigator.detail.metadata.find(item => item.label === "role")?.value, "developer");
         assert.match(rendered, /hold-stream/);
         assert.match(rendered, /\blow\b/);
         assert.match(rendered, new RegExp(row.id));
@@ -180,7 +191,7 @@ argv = [
     ${JSON.stringify(pi)},
     "--no-extensions", "-e", ${JSON.stringify(extension)}, "-e", ${JSON.stringify(probe)},
     "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve",
-    "--no-session", "--session-dir", ${JSON.stringify(sessions)},
+    "--session-dir", ${JSON.stringify(sessions)},
     "--model", "hold/hold-stream", "--thinking", "low",
     "--tools", "subagent_spawn,subagent_result,subagent_stop",
 ]

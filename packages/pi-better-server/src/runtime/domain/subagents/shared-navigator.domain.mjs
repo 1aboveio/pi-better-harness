@@ -1891,8 +1891,7 @@ function truncateVisible(value, width) {
 /**
  * Render one provider detail with the overlay line builder and the main-list
  * row formatter. Callers must already be inside the process that registered
- * the provider. `listedIds` is the live list; `rowLine` uses the same
- * formatter on the detail payload when the live list has filtered the run.
+ * the provider. `rowLine` is null when the provider no longer lists the item.
  */
 export function renderRegisteredWorkDetail(providerId, id, width = 100) {
     const s = state();
@@ -1930,28 +1929,11 @@ export function renderRegisteredWorkDetail(providerId, id, width = 100) {
     catch {
         lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
     }
-    const modelLine = detail.metadata.find((item) => item.label === "model")?.value ?? "";
-    const effortMatch = modelLine.match(/ · effort (.+)$/);
-    const elapsed = detail.metadata.find((item) => item.label === "elapsed")?.value ?? "-";
-    const row = {
-        providerId,
-        id: detail.id,
-        name: detail.title,
-        model: effortMatch ? modelLine.slice(0, effortMatch.index) : modelLine,
-        ...(effortMatch ? { effort: effortMatch[1] } : {}),
-        status: detail.status,
-        statusTone: detail.statusTone,
-        kind: "subagent",
-        elapsed,
-        primary: "",
-        sortStartedAt: 0,
-        navigatorId: rowKey(providerId, detail.id),
-        providerLabel: provider?.label ?? providerId,
-    };
+    const row = listed.find(item => item.id === id);
     return {
         detail,
         lines,
-        rowLine: formatMainListRow(row, true, fg, width),
+        rowLine: row ? formatMainListRow(row, true, fg, width) : null,
         listLines,
         listedIds,
     };

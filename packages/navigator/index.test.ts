@@ -9,6 +9,7 @@ import {
   ensureBackgroundWorkNavigator,
   isNavigatorUiAvailable,
   refreshBackgroundWorkNavigator,
+  renderRegisteredWorkDetail,
   registerBackgroundWorkProvider,
   getNavigatorView,
   setNavigatorView,
@@ -57,6 +58,17 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  it("renders the provider’s listed row and keeps details available after the row leaves the list", (t) => {
+    const source = provider("example", "Example", 1, 1, () => undefined);
+    t.after(registerBackgroundWorkProvider(source));
+    const render = () => renderRegisteredWorkDetail("example", "example-1");
+    assert.match(render().rowLine ?? "", /Example row.*Example primary/);
+    source.listRows = () => [];
+    const hidden = render();
+    assert.equal(hidden.rowLine, null);
+    assert.equal(hidden.detail?.title, "Example detail");
+  });
+
   for (const decorateBeforeNavigator of [true, false]) {
     it(`composes editor method decorators (decorated first: ${decorateBeforeNavigator})`, () => {
       const inputs: string[] = [];
