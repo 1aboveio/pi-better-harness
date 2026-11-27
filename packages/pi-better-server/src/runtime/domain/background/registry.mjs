@@ -286,7 +286,34 @@ export function recentMetaDeadline(origin) {
 }
 /** Exact cooperative source identity; no metadata or historical enumeration. */
 export function observationRevisionForOrigin(origin) {
-    return [originActiveIndexDir(origin), recentPath(origin)].map(indexDirectorySignature).join(";");
+    return observedIndexRevision(originKey(origin));
+}
+const absentOrigin = "missing;missing";
+function observedIndexRevision(key) {
+    const root = baseDir();
+    return [join(root, "by-origin-active", key), join(root, "by-origin-recent", key)]
+        .map(path => indexDirectorySignature(path, true)).join(";");
+}
+/** A missing origin directory cannot appear without changing its parent. Existing directories
+ * still need exact checks because writes to their children do not change the parent's stamp. */
+export function beginOriginIndexScan(previous) {
+    const roots = observedIndexRevision("");
+    const missing = new Set();
+    const revisions = new Map();
+    function revision(origin) {
+        if (roots === absentOrigin)
+            return absentOrigin;
+        const key = originKey(origin);
+        const cached = revisions.get(key);
+        if (cached !== undefined)
+            return cached;
+        const stamp = previous?.roots === roots && previous.missing.has(key) ? absentOrigin : observedIndexRevision(key);
+        if (stamp === absentOrigin)
+            missing.add(key);
+        revisions.set(key, stamp);
+        return stamp;
+    }
+    return { state: { roots, missing }, revision };
 }
 /** Bounded cooperative writes, including results written before the first reader. */
 export function observeRecentMetasForOrigin(origin) {
@@ -450,13 +477,15 @@ function removeIndexEntry(directory, id) {
         indexIdsCache.delete(directory);
     }
 }
-function indexDirectorySignature(directory) {
+function indexDirectorySignature(directory, verifyAbsence = false) {
     registryIo.indexRevisionChecks += 1;
     try {
-        const stat = statSync(directory);
-        return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        const stat = statSync(directory, { bigint: true });
+        return [stat.dev, stat.ino, stat.mtimeNs, stat.ctimeNs].join(":");
     }
-    catch {
+    catch (error) {
+        if (verifyAbsence && error.code !== "ENOENT")
+            throw error;
         return "missing";
     }
 }

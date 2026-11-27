@@ -108,6 +108,7 @@ export class WorkReadModel {
   private hints = new Map<string, number>();
   private repair?: AsyncGenerator<string[]>;
   private repairOwed = false;
+  private legacyPollOwed = true;
   private imported = false;
   private repairWrite: Promise<void> = Promise.resolve();
   private repairPersistencePending = false;
@@ -180,7 +181,12 @@ export class WorkReadModel {
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
     for (const path of [this.runs, this.archives, this.markers]) { this.watchRootParent(path); this.watchDirectory(path); }
-    this.timer = setInterval(() => { this.checkpointAttemptAllowed = true; this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
+    this.timer = setInterval(() => {
+      this.checkpointAttemptAllowed = true;
+      this.repairOwed = true;
+      this.legacyPollOwed = true;
+      if (!this.pending) void this.reconcile(false);
+    }, options.intervalMs ?? 1000);
     this.timer.unref();
   }
 
@@ -622,7 +628,9 @@ export class WorkReadModel {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         this.inventoryPhase?.("background");
-        if (this.background.refresh()) this.publish(true);
+        const pollLegacy = this.legacyPollOwed;
+        this.legacyPollOwed = false;
+        if (this.background.refresh({ pollLegacy })) this.publish(true);
         if (this.rejectUnsupportedAssignmentRevision()) break;
         this.refreshAssignments();
         // Metadata repair cannot verify an incompatible coordinator. Keep its
@@ -1159,7 +1167,7 @@ export class WorkReadModel {
           observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
           status, reason, rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
       }
-      if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
+      if (scope.backgroundHistory && this.background.refresh({ pollLegacy: false })) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
