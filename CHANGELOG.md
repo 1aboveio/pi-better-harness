@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.59.1] - 2026-11-27
+
+### Fixed
+
+- Bundle the Goal workflow, interrupted subagent launch, and Windows cleanup fixes from Goal 0.18.1, Subagents 0.40.1, and Background Tasks 0.21.5.
+
+## [pi-better-goal@0.18.1] - 2026-11-27
+
+### Fixed
+
+- Reopening a Goal restores the coordinator it started with, including in older sessions. Completing a Goal manually preserves any other coordinator the user has since invoked.
+
+## [pi-better-subagents@0.40.1] - 2026-11-27
+
+### Fixed
+
+- If the connection drops after a batch launch is sent, the tool tells you to check `subagent_list` before retrying. A failure to remove the launch grant is reported to the caller.
+
+## [pi-better-background-tasks@0.21.5] - 2026-11-27
+
+### Fixed
+
+- On Windows, keep an outstanding stop for a lost task whose process identity cannot be verified. Retry the stop when the identity can be confirmed.
+
+## [pi-better-server@0.8.5] - 2026-11-27
+
+### Fixed
+
+- The managed runtime reports an unknown launch outcome if the connection drops before a subagent receipt arrives. It also picks up the Background Tasks cleanup fix for Windows.
+
 ## [pi-better-harness@0.59.0] - 2026-11-27
 
 ### Changed
