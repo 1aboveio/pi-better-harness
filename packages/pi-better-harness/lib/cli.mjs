@@ -22,7 +22,7 @@ export const componentPackages = [
 ];
 
 const usage = `Usage: pi-better-harness <install|uninstall> [--local]
-       pi-better-harness instructions <preview|enable|sync|disable>
+       pi-better-harness instructions <preview|enable|sync|disable|web>
 
 Commands:
   instructions  Manage the Harness block in the global APPEND_SYSTEM.md
@@ -59,6 +59,8 @@ export function run(argv, options = {}) {
   const local = argv.includes("--local") || argv.includes("-l");
   const positional = argv.filter((arg) => !["--local", "-l"].includes(arg));
   const command = positional[0];
+  if (command === "instructions" && !local && positional.length === 2 && positional[1] === "web")
+    return import("./prompt-web.mjs").then(m => m.launchPromptWeb(options.agentDir ?? defaultAgentDir(), stdout));
   if (command === "instructions" && !local && positional.length === 2 && ["preview", "enable", "sync", "disable"].includes(positional[1])) {
     try {
       if (positional[1] === "preview") {

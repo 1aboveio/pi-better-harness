@@ -55,7 +55,7 @@ function score(text, rubric) {
 export async function evaluateCases(cases, baseline, candidate, sampleCount, resolveModel, generate, signal) {
   const results = [];
   for (const c of cases) {
-    const row = { id: c.id, failure: c.failure, rubric: c.rubric, samples: [] };
+    const row = { id: c.id, expected: c.expected, counterexample: c.counterexample, failure: c.failure, rubric: c.rubric, samples: [] };
     results.push(row);
     if (c.level !== "response") { row.status = "unsupported"; continue; }
     if (!c.payload?.messages?.some(m => m.role === "user")) { row.status = "missing_input"; continue; }

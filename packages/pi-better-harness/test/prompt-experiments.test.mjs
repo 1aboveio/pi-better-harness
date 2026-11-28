@@ -9,6 +9,7 @@ import register from "../lib/prompt-tools.mjs";
 import { manageInstructions, currentInstructions } from "../lib/instructions.mjs";
 import { activeRevision, begin, end } from "../lib/prompt-revisions.mjs";
 import { replayTurn } from "../lib/prompt-turn.mjs";
+import { startPromptWeb } from "../lib/prompt-web.mjs";
 
 const text = content => ({ role: "assistant", content });
 const user = content => ({ role: "user", content });
@@ -57,7 +58,7 @@ async function fixture(t, respond) {
   const event = (name, data) => events.get(name)(data, ctx);
   const request = messages => event("before_provider_request", { payload: { stream: true, model: "local", messages: [system, ...messages] } });
   const reference = () => event("message_end", { message: { ...text([{ type: "text", text: "Original answer" }]), stopReason: "stop" } });
-  const { id: candidate } = await call("edit", { base: active, module: "communication", text: edited });
+  const { id: candidate } = await call("edit", { base: active, module: "user:communication", text: edited });
   return { dir, cwd, calls, ctx, active, candidate, open, event, call, command, request, reference };
 }
 
@@ -133,6 +134,79 @@ test("cancellation preserves the partial tool trace", async () => {
   assert.equal(result.trace.at(-1).content, "recorded result");
 });
 
+test("browser replays a named session capture and TUI evaluates the selected revision; evidence survives restart", async t => {
+  const f = await fixture(t, body => body.messages[0].content.includes(edited) ? "Passed." : "Passed. Deployment pending.");
+  const web = await startPromptWeb(f.dir);
+  t.after(() => web.close());
+  const url = new URL(web.url);
+  const api = async args => {
+    const res = await fetch(url.origin + "/api", { method:"POST", headers:{ origin:url.origin, "content-type":"application/json",
+      authorization:"Bearer " + url.hash.slice(1) }, body:JSON.stringify(args) });
+    const response = await res.json();
+    if (!res.ok) throw Error(response.error);
+    return response.result;
+  };
+  const notifications = [];
+  const displays = [];
+  let queue = [];
+  f.ctx.ui.notify = (msg, level) => { if (level === "error") notifications.push(msg); };
+  f.ctx.ui.select = async (title, choices) => {
+    const next = queue.shift();
+    if (next === "candidate") return choices.find(v => v.includes(f.candidate.slice(0,10)));
+    if (next === "first") return choices[0];
+    return next;
+  };
+  f.ctx.ui.input = async () => "1";
+  f.ctx.ui.editor = async (_, value) => { displays.push(value); };
+  queue = ["Connect browser", "Close"];
+  await f.command("manager");
+  const session = (await api({ action:"state" })).connections[0].id;
+  const pair = {session,base:f.active,candidate:f.candidate};
+  await assert.rejects(api({action:"replay", ...pair}), /Missing pre-answer/);
+  await f.command("capture");
+  f.request([user("Did tests pass?")]);
+  f.reference(); f.event("agent_end",{});
+  const connected = await api({action:"state", ...pair});
+  assert.equal(connected.session.name, f.cwd);
+  const [{id:caseId,label}] = connected.session.captures;
+  assert.equal(label,"Did tests pass?");
+  const baseState = await api({action:"state",session,candidate:f.active});
+  const rows = baseState.modules.map(r => r.id === "bundled:communication" ? {...r,enabled:false} : r);
+  const off = await api({action:"save",session,candidate:f.active,modules:rows});
+  const toggle = await api({action:"replay",...pair,candidate:off,caseId});
+  assert.equal(toggle.compositions.baseline.bundled.find(r => r.id === "bundled:communication").enabled,true);
+  assert.equal(toggle.compositions.candidate.bundled.find(r => r.id === "bundled:communication").enabled,false);
+  assert.deepEqual(toggle.compositions.baseline.bundled.map(r => r.version),toggle.compositions.candidate.bundled.map(r => r.version));
+  const toggledEvidence = await api({action:"judge",...pair,candidate:off,evidence:toggle.evidenceId,judgment:"Reviewed toggle."});
+  const replay = await api({action:"replay", ...pair, caseId});
+  assert.equal(replay.active,f.active); assert.equal(replay.candidate,f.candidate);
+  assert.notEqual(replay.baselineOutput.text,replay.candidateOutput.text);
+  assert.deepEqual(replay.compositions.baseline.bundled,replay.compositions.candidate.bundled);
+  assert.equal(replay.compositions.candidate.users[0].id,"user:communication");
+  assert.deepEqual(toggle.compositions.candidate.packageEvidence,replay.compositions.candidate.packageEvidence);
+  await assert.rejects(api({action:"promote",...pair,evidence:toggledEvidence,confirmed:true}),/completed comparison/);
+  await api({action:"judge", ...pair, evidence:replay.evidenceId, judgment:"Direct answer."});
+  queue = ["Choose revision","candidate","Evaluate a case suite","first","first","Close"];
+  await f.command("manager");
+  assert.deepEqual(notifications,[]);
+  assert.ok(displays.at(-1).includes("Samples per case: 1"));
+  const suite = (await api({action:"state", ...pair})).evidence.find(e => e.results);
+  assert.equal(suite.results.length,3); assert.equal(suite.model,"fixture/local");
+  assert.equal(suite.active,f.active); assert.equal(suite.candidate,f.candidate);
+  f.event("session_shutdown",{}); f.open();
+  await assert.rejects(api({action:"replay", ...pair, caseId}), /disconnected/);
+  const state = await api({action:"state", ...pair});
+  assert.equal(state.active,f.active); assert.match(state.problem,/disconnected/);
+  assert.ok(state.evidence.some(e => e.judgment === "Direct answer."));
+  queue = ["Choose revision","candidate","Evidence","first",undefined,"Close"];
+  await f.command("manager");
+  assert.ok(displays.at(-1).includes(f.candidate));
+  f.ctx.model.api = "unsupported";
+  queue = ["Choose revision","candidate","Evaluate a case suite","Close"];
+  await f.command("manager");
+  assert.match(notifications.at(-1),/No supported/);
+});
+
 test("reviewed case export, portable evaluation, repeated failures and explicit proposal promotion", async t => {
   const f = await fixture(t, body => {
     if (body.messages.at(-1).content.includes("close delivery")) return body.messages[0].content.includes("Drop every qualification.") ? "Close delivery." : "Deployment is pending.";
@@ -166,9 +240,10 @@ test("reviewed case export, portable evaluation, repeated failures and explicit 
   assert.deepEqual((await f.call("evaluate", { samples: 1 })).results.map(c => c.status), ["scored", "missing_input", "unsupported"]);
   await f.command("import");
   await f.call("evaluate", { samples: 1 });
-  const propose = { failures: ["unit-status", "format-status"], counterexample: "delivery-status", module: "communication", text: edited };
+  const propose = { failures: ["unit-status", "format-status"], counterexample: "delivery-status", module: "user:communication", text: edited };
   await assert.rejects(f.call("propose", propose), /Enable/);
   await f.command("learning", "on");
+  await assert.rejects(f.call("propose",{...propose,module:"bundled:communication"}),/read-only/);
   const regressing = await f.call("propose", { ...propose, text: edited + " Drop every qualification." });
   assert.deepEqual(regressing.after.results.map(r => r.samples[0].candidate.status), ["pass", "pass", "fail"]);
   const proposal = await f.call("propose", propose);

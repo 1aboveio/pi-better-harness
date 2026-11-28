@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "@sinclair/typebox";
+import { loadedBlock } from "./prompt-manager.mjs";
+import { openPromptManager } from "./prompt-tui.mjs";
+import { shareSession } from "./prompt-web.mjs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -8,7 +11,7 @@ import { defaultAgentDir } from "./install-settings.mjs";
 import { activatePrompt, promptSource } from "./instructions.mjs";
 import { recordedDispatch, recordedTools, replayTurn } from "./prompt-turn.mjs";
 import { checkpoint, taskArm } from "./prompt-task.mjs";
-import { activeRevision, begin, createCandidate, end, history, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
+import { activeRevision, attribution, begin, createCandidate, end, history, orderedModules, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
 
 function difference(before, after) {
   const a = before.split("\n");
@@ -64,7 +67,48 @@ async function generate(payload, model, ctx, signal) {
 
 export default function registerPromptTools(pi) {
   const dir = defaultAgentDir();
-  if (promptSource(dir) !== "modular") return;
+  let shared;
+  let suiteLabel = "Imported reviewed suite";
+  const connection = ctx => {
+    const name = [ctx.sessionManager?.getSessionName?.() ?? ctx.cwd, ctx.sessionManager?.getSessionId?.()].filter(Boolean).join(" / ");
+    const suites = () => [{ id: "bundled", label: "Bundled writing cases", cases: writingCases },
+      ...(cases === writingCases ? [] : [{ id: createHash("sha256").update(JSON.stringify(cases)).digest("hex"), label: suiteLabel, cases }])];
+    const models = () => [...new Map([ctx.model, ...(ctx.modelRegistry?.getAvailable?.() ?? [])].filter(m => m?.api === "openai-completions")
+      .map(m => [m.provider + "/" + m.id, m])).entries()];
+    return {
+      describe() {
+        const lastUser = capture?.payload?.messages.findLast(m => m.role === "user");
+        return { name, loaded: loadedBlock(ctx), captures: capture?.reference ? [{ id: capture.id,
+          label: typeof lastUser?.content === "string" ? lastUser.content.slice(0, 100) : "Captured user request",
+          model: capture.model.provider + "/" + capture.model.id }] : [],
+          suites: suites().map(({ id, label }) => ({ id, label })), models: models().map(([key]) => key) };
+      },
+      async run(args) {
+        if (active().id !== args.base) throw Error("Active revision changed; refresh the candidate.");
+        if (args.action === "replay") return replay(args, ctx, undefined);
+        if (args.action !== "evaluate") throw Error("Unknown experiment.");
+        const revision = readRevision(dir, args.candidate);
+        const suite = suites().find(s => s.id === args.suite);
+        const model = models().find(([key]) => key === args.model)?.[1];
+        if (!suite) throw Error("Suite changed or is unavailable. Refresh the selection.");
+        if (!model || !Number.isInteger(args.samples) || args.samples < 1 || args.samples > 16)
+          throw Error("Select a supported openai-completions model and 1 to 16 samples.");
+        return { ...await evaluateCases(suite.cases, active(), revision, args.samples, () => model,
+          body => generate(body, model, ctx), undefined), suite: suite.label, model: args.model, session: name };
+      },
+    };
+  };
+  const openManager = ctx => {
+    const session = connection(ctx);
+    return openPromptManager(dir, ctx.ui, session, async () => {
+      if (shared) { shared.close(); shared = undefined; return "Browser connection closed."; }
+      shared = await shareSession(dir, session.describe().name, session);
+      return "Session available in the browser connection selector.";
+    }, () => Boolean(shared));
+  };
+  pi.events?.on("harness-settings:request", () => pi.events.emit("harness-settings:register",
+    { id: "prompt-manager", label: "Prompt manager", command: "/prompt-manager", open: openManager }));
+  pi.registerCommand("prompt-manager", { description: "Manage Harness prompt revisions", handler: (_, ctx) => openManager(ctx) });
   let capture;
   let run;
   let cases = writingCases;
@@ -72,6 +116,19 @@ export default function registerPromptTools(pi) {
   let learning = false;
   let proposal;
   let task;
+  pi.on("session_shutdown", () => {
+    shared?.close();
+    shared = undefined;
+    task?.snapshot.dispose();
+    task = undefined;
+    capture = undefined;
+    run = undefined;
+    cases = writingCases;
+    comparison = undefined;
+    learning = false;
+    proposal = undefined;
+  });
+  if (promptSource(dir) !== "modular") return;
   const string = Type.String({ minLength: 1 });
   const tool = (name, description, fields, execute) => pi.registerTool({
     name, label: name, description, parameters: Type.Object(fields),
@@ -90,17 +147,20 @@ export default function registerPromptTools(pi) {
     const start = system.indexOf(begin + "\n");
     const finish = system.indexOf("\n" + end, start);
     const loaded = start >= 0 && finish > start ? system.slice(start + begin.length + 1, finish) : undefined;
-    return { source: promptSource(dir), active: current.id, modules: Object.keys(current.modules),
+    const modules = orderedModules(current);
+    return { source: promptSource(dir), active: current.id, modules, bundled:modules.filter(r => r.origin === "bundled"),
+      user:modules.filter(r => r.origin === "user"), composition:attribution(current),
       loadedDigest: loaded === undefined ? undefined : createHash("sha256").update(loaded).digest("hex"),
       activeLoaded: loaded === current.rendered,
       history: history(dir), captured: capture?.reference ? capture.id : undefined };
   });
   tool("prompt_read", "Read a module at a specific revision.", { revision: string, module: string }, args => {
     const source = readRevision(dir, args.revision);
-    if (!Object.hasOwn(source.modules, args.module)) throw Error("Unknown module. Use prompt_list.");
-    return { revision: source.id, text: source.modules[args.module] };
+    const row = orderedModules(source).find(r => r.id === args.module || r.id === "bundled:" + args.module);
+    if (!row) throw Error("Unknown module. Use prompt_list.");
+    return { revision: source.id, ...row };
   });
-  tool("prompt_edit", "Create a candidate by replacing one module.", { base: string, module: string, text: string },
+  tool("prompt_edit", "Create or edit a user:name module in a candidate. Bundled text is read-only.", { base: string, module: string, text: string },
     args => createCandidate(dir, active().id, args.base, args.module, args.text));
 
   pi.registerCommand("prompt-capture", { description: "Keep the next response input in memory for paired replay.",
@@ -159,16 +219,6 @@ export default function registerPromptTools(pi) {
       capture.reference = structuredClone(event.message.content.filter(part => part.type !== "thinking"));
     }
   });
-  pi.on("session_shutdown", () => {
-    task?.snapshot.dispose();
-    task = undefined;
-    capture = undefined;
-    run = undefined;
-    cases = writingCases;
-    comparison = undefined;
-    learning = false;
-    proposal = undefined;
-  });
   tool("prompt_task_replay", "Restore a captured workspace independently for two bounded multi-turn task runs.",
     { caseId: string, candidate: string, budget: Type.Integer({ minimum: 1, maximum: 64 }) }, async (args, ctx, signal) => {
       if (!task || !capture?.reference || args.caseId !== capture.id || task.inputs.length !== task.snapshot.spec.turns)
@@ -198,11 +248,12 @@ export default function registerPromptTools(pi) {
   pi.registerCommand("prompt-import", { description: "Load a reviewed case suite, or use the bundled writing cases with no argument.",
     handler: async (path, ctx) => {
       cases = path.trim() ? inspectSuite(JSON.parse(await readFile(resolve(ctx.cwd, path.trim()), "utf8"))) : writingCases;
+      suiteLabel = path.trim();
       comparison = undefined;
       ctx.ui.notify(`Loaded ${cases.length} prompt cases.`, "info");
     } });
-  const evaluate = (selected, candidate, count, ctx, signal) => evaluateCases(selected, active(), candidate, count,
-    c => c.model ? ctx.modelRegistry.find(c.provider, c.model) : ctx.model,
+  const evaluate = (selected, candidate, count, ctx, signal, model = ctx.model) => evaluateCases(selected, active(), candidate, count,
+    c => c.model ? ctx.modelRegistry.find(c.provider, c.model) : model,
     (body, model) => generate(body, model, ctx, signal), signal);
   tool("prompt_evaluate", "Compare revisions on the imported suite or bundled writing cases.",
     { candidate: Type.Optional(string), samples: Type.Integer({ minimum: 1, maximum: 16 }) }, async (args, ctx, signal) => {
@@ -246,29 +297,29 @@ export default function registerPromptTools(pi) {
         generate: body => generate(body, model, ctx, signal), dispatch: recordedDispatch(records), budget: args.budget, signal });
       return { caseId: args.caseId, active: baseline.id, candidate: candidate.id, baselineOutput: await arm(baseline), candidateOutput: await arm(candidate) };
     });
-  tool("prompt_replay", "Generate both arms from a captured writing input. No requested tools are executed.",
-    { caseId: string, candidate: string }, async (args, ctx, signal) => {
+  async function replay(args, ctx, signal) {
       const selected = capture;
+      if (promptSource(dir) !== "modular") throw Error("Replay requires enabled modular Harness instructions.");
       if (!selected?.reference || selected.id !== args.caseId) throw Error("Missing pre-answer input. Run /prompt-capture before the selected answer.");
       const { payload, model } = selected;
       if (model?.api !== "openai-completions" || payload.stream !== true || (payload.n ?? 1) !== 1)
         throw Error("Replay requires a single streamed openai-completions response");
       const baseline = active();
       const candidate = readRevision(dir, args.candidate);
-      if (candidate.template !== baseline.template || Object.keys(baseline.modules).filter(k => candidate.modules[k] !== baseline.modules[k]).length !== 1)
-        throw Error("Choose a candidate with exactly one changed module.");
       const original = swapModule(payload, baseline, baseline);
       const changed = swapModule(payload, baseline, candidate);
       const baselineOutput = await generate(original, model, ctx, signal);
       const candidateOutput = await generate(changed, model, ctx, signal);
       const { messages, tools, ...settings } = payload;
-      run = { id: randomUUID(), caseId: selected.id, active: baseline.id, candidate: candidate.id,
+      run = { id: randomUUID(), caseId: selected.id, active: baseline.id, candidate: candidate.id, session: ctx.sessionManager?.getSessionId?.() ?? ctx.cwd,
         provider: model.provider, model: model.id, settings, inputDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
         reference: selected.reference, baselineOutput, candidateOutput,
         difference: difference(baselineOutput.text, candidateOutput.text),
         requiresTurnReplay: baselineOutput.requiresTurnReplay || candidateOutput.requiresTurnReplay };
       return run;
-    });
+    }
+  tool("prompt_replay", "Generate both arms from a captured writing input. No requested tools are executed.",
+    { caseId: string, candidate: string }, replay);
   tool("prompt_compare", "Record the rubric and judgment for a paired replay.",
     { runId: string, rubric: string, judgment: string }, args => {
       if (!run || run.id !== args.runId) throw Error("Unknown run. Use the ID returned by prompt_replay.");

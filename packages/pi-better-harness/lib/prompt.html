@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt manager · Pi Harness</title><link rel="stylesheet" href="/manager.css"></head>
+<body><header><strong>Pi Harness</strong><span>Prompt manager</span></header>
+<main><aside><label>Revision<select id="revisions"></select></label>
+<label>Pi session<select id="session"></select></label><button id="refresh">Refresh</button>
+<dl id="status"></dl><section id="packageProof"></section><h2>Activation history</h2><section id="history"></section></aside>
+<article><h1>Prompt manager</h1><p role="status" id="notice"></p>
+<nav><button data-view="modules">Modules</button><button data-view="review">Review</button><button data-view="experiments">Experiments</button></nav>
+<section id="modules"><h2>Ordered modules</h2><div id="rows"></div><footer><button id="add">Add module</button><button id="preview">Preview draft</button><button class="primary" id="save">Save candidate</button></footer><pre id="draft"></pre></section>
+<section id="review" hidden><h2>Changes from parent</h2><pre id="parentDiff"></pre><h2>Changes from active</h2><pre id="diff"></pre><button class="primary" id="publish">Publish manually</button><h2>Rendered prompt</h2><pre id="rendered"></pre><details><summary>Installed block</summary><pre id="installed"></pre></details></section>
+<section id="experiments" hidden><h2>Replay a response</h2><label>Captured request<select id="captures"></select></label><button id="replay">Replay a response</button>
+<h2>Evaluate a case suite</h2><label>Reviewed suite<select id="suites"></select></label><label>Model<select id="models"></select></label><label>Samples per case<input id="samples" type="number" min="1" max="16" value="1"></label><button id="evaluate">Evaluate a case suite</button>
+<h2>Comparison evidence</h2><label>Result<select id="evidence"></select></label><pre id="result"></pre><label>Judgment<textarea id="judgment" rows="3"></textarea></label><footer><button id="judge">Record judgment</button><button id="promote">Promote evaluated revision</button></footer></section>
+</article></main><script type="module" src="/manager.js"></script></body></html>

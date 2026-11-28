@@ -335,14 +335,42 @@ precedence over automatic discovery.
 
 ### Try a prompt edit
 
+Open **Prompt manager** from `/harness-settings`, or run
+`pi-better-harness instructions web` for the browser interface. Both use
+the current Pi agent directory (`PI_CODING_AGENT_DIR`). The CLI prints a
+private loopback URL and opens the browser. Set `BROWSER=none` to print
+the URL only. Stop the CLI to close the server.
+
+Bundled modules retain the package's text and order. Toggle each independently.
+User modules have separate names, text and order, including when a user module
+shares a name with a bundled module. Enabled bundled modules render first.
+Package updates retain the toggles and user text. Historical snapshots keep
+their original rendering. The manager shows the scope of matching upstream
+validation or says when evidence is missing.
+
+Select a revision, edit the local composition and save a candidate. Review
+the parent and active diffs before publishing. Manual publication and
+rollback appear in activation history. Reload Pi to load the installed
+revision. Off, saved-text and custom-file configurations retain their source.
+
+To compare a candidate, capture a response with `/prompt-capture` or load
+a reviewed suite with `/prompt-import`. The TUI can use its current session
+directly. For the browser, choose **Connect browser** in the TUI and select
+the named Pi session on the page. The connection lasts until disconnect,
+reload or session shutdown. Select a captured request or a suite and model
+in **Experiments**. Results and judgments stay in the agent directory and
+can be reopened from either interface. Promotion requires a reviewed result
+for the displayed baseline and candidate.
+
 Enable the modular instructions and reload Pi. For existing overrides, remove
 `instructionsPrompt` and `instructionsFile` from the global Harness settings
 before syncing. Use a streaming `openai-completions` model for response replay.
 
 1. Run `/prompt-capture`, then send the writing request you want to evaluate,
    for example "Unit checks passed and deployment verification is pending. Can we close delivery?"
-2. Ask the agent to list modules, read `verification`, and use `prompt_edit` to
-   create a candidate requiring the pending check in the first sentence.
+2. Ask the agent to list modules, read `bundled:verification`, and use
+   `prompt_edit` to create a `user:verification` module requiring the pending
+   check in the first sentence. To replace a bundled rule, turn it off in the manager.
 3. Ask it to run `prompt_replay` with the case and candidate IDs, inspect
    both new responses, and use `prompt_compare` to record the rubric and judgment.
 4. Request `prompt_promote` for those revisions and the evaluation ID. Confirm
@@ -403,7 +431,7 @@ An empty import argument restores the bundled cases.
 To use evaluated cases for an edit, enable `/prompt-learning on`. Ask the
 agent to select two distinct baseline failures with the same failure category
 and one passing counterexample. With `prompt_propose`, it supplies those IDs
-and a replacement module. Inspect the before/after samples, then use
+and a user module edit. Inspect the before/after samples, then use
 `prompt_judge_proposal` and `prompt_promote` or clear the pending proposal
 with `/prompt-learning discard`. Learning is disabled in a fresh session.
 
