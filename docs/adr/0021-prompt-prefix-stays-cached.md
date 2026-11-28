@@ -49,6 +49,10 @@ effect when Pi next loads resources, including an explicit `/reload` or opening
 a saved conversation in a new process. Treat a resource reload as a deliberate
 change to the prompt. Compaction alone must preserve the supplement verbatim.
 
+[ADR 0033 · Modular Harness prompts and replay](0033-modular-prompts-and-replay.md) extends the source of
+this block with an ordered template and versioned modules. Candidate edits and
+replays use isolated state. Promotion follows the resource-loading boundary above.
+
 ## Context and trade-off
 
 Cache hit rate for sessions driven by this bundle moved as follows on a
