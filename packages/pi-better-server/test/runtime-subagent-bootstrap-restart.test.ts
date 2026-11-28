@@ -67,6 +67,7 @@ test(`replacement ${phase} preserves the exact launch and writer fence`, { timeo
       await stop(daemon, "stop"); daemon = await start(new URL("./support/work-daemon.ts", import.meta.url));
       const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
       try {
+        await observer.ready;
         const deadline = Date.now() + 10000;
         while (!(await observer.request("runtime_get_status")).subagentManagement?.continuationReady) {
           assert.ok(Date.now() < deadline, `Runtime bridge did not recover: ${errors}`); await delay(25);
