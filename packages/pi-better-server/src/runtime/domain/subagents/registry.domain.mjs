@@ -22,6 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { readFile, readdir } from "node:fs/promises";
+import { setImmediate as yieldToIO } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.domain.mjs";
@@ -215,6 +216,8 @@ export async function* scanParkRecords(metas = listMetas(), include) {
         for (const entry of batch)
             if (entry)
                 yield entry;
+        if (offset + batchSize < metas.length)
+            await yieldToIO();
     }
 }
 /**

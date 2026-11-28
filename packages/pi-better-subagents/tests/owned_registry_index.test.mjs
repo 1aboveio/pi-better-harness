@@ -168,6 +168,17 @@ describe("owned subagent registry indexes", () => {
     }
   });
 
+  it("services queued callbacks between batches of reclaimed runs", async () => {
+    let serviced = false;
+    const history = Array.from({ length: 1024 }, (_, i) => ({ id: `sa_reclaimed_${i}`, park: { phase: "waiting" } }));
+    let seen = 0;
+    for await (const entry of scanParkRecords(history)) {
+      if (++seen === 1) setImmediate(() => { serviced = true; });
+      if (seen === 33) assert.ok(serviced, "the second batch must allow pending I/O to run");
+    }
+    assert.equal(seen, history.length);
+  });
+
   it("answers a socket request while checking historical park sidecars", { timeout: 5000 }, async () => {
     const history = Array.from({ length: 1024 }, (_, i) => ({ id: `sa_scan_history_${i}` }));
     for (const { id } of history) mkdirSync(runDir(id), { recursive: true });
