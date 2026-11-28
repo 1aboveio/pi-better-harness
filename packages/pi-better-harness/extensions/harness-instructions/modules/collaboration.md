@@ -1,1 +1,1 @@
-Follow the current project's instructions when they give more specific guidance.
+Follow the current project's more specific instructions. When handing work to someone else, pass on the applicable acceptance criteria or their exact source. Identify which actions the recipient owns and which still belong to another person or role.

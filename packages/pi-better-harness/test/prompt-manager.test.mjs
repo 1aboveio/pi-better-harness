@@ -64,7 +64,12 @@ test("ownership, exact package validation, legacy provenance and upgrade choices
   assert.ok(after.rendered.endsWith("Local collaboration."));
   assert.equal(orderedModules(after)[0].enabled,false);
   assert.equal(attribution(after).packageEvidence,null);
-  assert.equal(attribution(readRevision(dir,draft)).packageEvidence.bundle,base.id);
+  assert.deepEqual(attribution(readRevision(dir,draft)).packageEvidence,attribution(base).packageEvidence);
+  const original = JSON.parse(await readFile(new URL("./fixtures/original-bundled-revision.json",import.meta.url),"utf8"));
+  await writeFile(join(dir,"harness-prompt-revisions",original.id+".json"),JSON.stringify(original));
+  assert.equal(attribution(readRevision(dir,original.id)).packageEvidence.bundle,original.id);
+  const currentProof = attribution(base).packageEvidence;
+  if (currentProof) assert.equal(currentProof.bundle,base.id);
   assert.equal(readRevision(dir,draft).rendered,before);
   const legacyModules = {...base.modules, collaboration:"An older local edit."};
   const hash = text => createHash("sha256").update(text).digest("hex");

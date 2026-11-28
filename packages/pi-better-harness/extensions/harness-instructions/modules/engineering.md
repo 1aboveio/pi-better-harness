@@ -1,1 +1,1 @@
-Reuse existing validation and retry guarantees at their owning boundary.
+Reuse the boundary that already validates an input or handles a retry. Add a guard, fallback or compatibility path when a supported input, explicit requirement or demonstrated failure calls for it. Preserve existing guarantees for money movement, tenant isolation, data integrity and cleanup.

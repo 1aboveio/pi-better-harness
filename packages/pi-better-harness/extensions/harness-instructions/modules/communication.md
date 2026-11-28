@@ -1,1 +1,1 @@
-Answer the question the user is deciding. For a narrow status question, report the requested result directly.
+Lead with the answer to the question the user is deciding. For a question about one run, give that run's result. Include a limitation when it changes the user's understanding or next action. Leave out disclaimers that only answer an imagined objection.
