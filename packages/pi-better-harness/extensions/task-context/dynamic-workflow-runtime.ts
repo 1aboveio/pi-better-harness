@@ -8,9 +8,9 @@ import { DELEGATION_MODE_REQUEST } from "pi-better-subagents/delegation.ts";
 import { isRecord } from "./workflow-plan.js";
 import { describeRun } from "./dynamic-workflow-view.js";
 
-const modes = ["off", "on", "adaptive"] as const;
+const modes = ["off", "on"] as const;
 type Mode = typeof modes[number];
-const planning = "Analyze the user's current intent. Use dynamic_workflow action define with the actual objective, observable criteria and task-specific steps. Express real dependencies and parallel branches. Where delegation is permitted, inspect suitable entries with agents_catalog before selecting their canonical ids. Use stages and review/revision only where the task needs them. Bind goalId only for the Goal this work delivers.";
+const planning = "Analyze the user's current intent. Use dynamic_workflow action define with the actual objective, observable criteria and task-specific steps. Express real dependencies and parallel branches. Give diagram nodes distinct one- or two-word names using diagramLabel or a shared stage. Where delegation is permitted, inspect suitable entries with agents_catalog before selecting their canonical ids. Use stages and review/revision only where the task needs them. Bind goalId only for the Goal this work delivers.";
 const execution = "Read get_todo to resume the accepted workflow. Work each ready step, then submit its required output using the current runId and revision. For a catalog item, call subagent_spawn with workflow:{runId,step}, its selected role or agent, inheriting catalog settings. Inspect subagent_result after its callback. For review or revision, submit the current artifactVersion and findings or output. Finish with evidence for each objective criterion.";
 
 function catalogChoice(ctx: ExtensionContext, id: string): CatalogChoice {
@@ -51,7 +51,7 @@ export function registerDynamicWorkflow(pi: ExtensionAPI, owner: (ctx: Extension
   const persist = (next: WorkflowRun) => save({ version: 1, run: next });
   const clear = () => save({ version: 1, clear: true });
   const setting = {
-    id: "dynamic-workflow", label: "Automatic dynamic workflows", values: [...modes], get: () => mode,
+    id: "dynamic-workflow", label: "Automatic dynamic workflows (Beta)", values: [...modes], get: () => mode,
     change(value: string) {
       if (!modes.includes(value as Mode)) throw new Error("Unknown dynamic workflow mode.");
       mode = updateHarnessSetting("dynamicWorkflow", () => value as Mode);
@@ -59,15 +59,15 @@ export function registerDynamicWorkflow(pi: ExtensionAPI, owner: (ctx: Extension
     },
   };
   const loadMode = () => {
-    const saved = readHarnessSetting<Mode>("dynamicWorkflow");
-    mode = saved && modes.includes(saved) ? saved : "off";
+    const saved = readHarnessSetting("dynamicWorkflow");
+    mode = saved === "adaptive" || saved === "on" ? "on" : "off";
   };
   const active = () => { const current = run(); return !!current && !current.evidence; };
   const available = () => mode !== "off" || pending() || active();
   const guidance = () => {
     if (active()) return execution;
-    if (pending() || mode === "on") return planning;
-    if (mode === "adaptive") return "Handle simple single-action requests directly. For tasks with dependencies, role handoffs, parallel work or repeated review, consider a dynamic workflow. " + planning;
+    if (pending()) return planning;
+    if (mode === "on") return "Handle simple single-action requests directly. For tasks with dependencies, role handoffs, parallel work or repeated review, consider a dynamic workflow. " + planning;
     return undefined;
   };
   pi.registerCommand("dynamic-workflow", {

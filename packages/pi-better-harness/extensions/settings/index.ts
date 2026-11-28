@@ -15,7 +15,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"],
     get: getNavigatorView, change: (value: string) => setNavigatorView(value) };
   const supervisorMode = {
-    id: "supervisor-mode", label: "Supervisor mode", values: ["Off", "On"],
+    id: "supervisor-mode", label: "Supervisor mode (Beta)", values: ["Off", "On"],
     description: "Run the selected scenarios for sessions sharing this agent directory. Turning the mode off keeps your selections.",
     get() {
       try { return readSupervisorSettings().enabled ? "On" : "Off"; }
@@ -59,7 +59,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
           }, [...registry.controls(), nativeCompactionSetting, supervisorMode], view, [
             { id: "supervisor:scenarios", label: "Supervisor scenarios", kind: "page",
               description: "Choose which scenarios run when Supervisor mode is on." },
-            { id: "instructions:toggle", label: "Harness instructions", kind: "toggle", value: state,
+            { id: "instructions:toggle", label: "Harness instructions (Beta)", kind: "toggle", value: state,
               description: "Toggle the global APPEND_SYSTEM.md block. Applies on startup or /reload." },
             ...(prompt === undefined ? [] : [{ id: "instructions:edit", label: "Instructions prompt", kind: "editor" as const,
               description: "Edit the Markdown included in the Harness block." }]),

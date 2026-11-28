@@ -38,7 +38,7 @@ test(
         body.previous_response_id,
       ]);
       const isRecap = body.messages.some((m) => String(m.content).includes(prompt));
-      const text = isRecap ? JSON.stringify({ recap: panel }) : "Confirmed foreground answer.";
+      const text = isRecap ? JSON.stringify({ recap: panel, next: "Verify the staged install." }) : "Confirmed foreground answer.";
       res.writeHead(200, { "content-type": "text/event-stream" });
       for (const [delta, finish_reason] of [
         [{ role: "assistant", content: text }, null],
@@ -160,7 +160,7 @@ test(
     assert.equal(requests.length, 0);
     send("First exchange");
     key("Enter");
-    await wait((p) => p.includes(panel));
+    await wait((p) => p.includes("↳ Recap: " + panel) && p.includes("Next: Verify the staged install."));
     send("Second exchange");
     key("Enter");
     const transcript = await wait(p => requests.length >= 4 && p.split(panel).length === 3);

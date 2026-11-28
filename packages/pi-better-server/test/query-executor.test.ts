@@ -181,7 +181,9 @@ test("a dropped same-consumer snapshot reports a gap while unrelated global comm
     write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
     write("sa_b", scope.cwd, "after-unrelated"); await f.executor.livenessReasons();
     await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "after-unrelated");
-    assert.equal(seen.some(value => value.resyncReason === "sequence-gap"), false);
+    assert.equal(seen.length, 1, "only the subscribed scope's change should notify the client");
+    assert.equal(seen[0].status, "ready");
+    assert.ok(!seen[0].resyncRequired);
     seen.length = 0;
     write("sa_b", scope.cwd, "gap-one"); await f.executor.livenessReasons(); await wait(() => dropped);
     write("sa_b", scope.cwd, "gap-two"); await f.executor.livenessReasons();

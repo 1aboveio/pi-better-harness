@@ -10,6 +10,7 @@ import { requestTaskContext } from "pi-better-goal/src/task-context.ts";
 import { captureLaunchContext } from "pi-better-subagents/launch-context.ts";
 import { launchWorkflowAssignment } from "pi-better-subagents/workflow-assignment.ts";
 import extension from "../../extensions/task-context/index.js";
+import { updateHarnessSetting } from "../../extensions/shared-harness-settings.ts";
 import { advanceWorkflow, defineWorkflow, phase, type Definition, type DynamicInput, type WorkflowRun } from "../../extensions/task-context/dynamic-workflow.js";
 import { renderDynamic, renderDynamicFrame } from "../../extensions/task-context/dynamic-workflow-view.js";
 import { createPlanWidget } from "../../extensions/task-context/plan-widget.js";
@@ -63,6 +64,40 @@ test("two independent tasks join, then versioned review either ships directly or
     assert.doesNotMatch(all, /\b(?:ready|waiting|standby|complete|working)\b/);
   }
   assert.throws(() => defineWorkflow({ ...report, steps: report.steps.map(s => s.id === "fix" ? { ...s, dependsOn: ["ship"] } : s) }, []), /revision step/);
+});
+
+test("a sequential run uses the full list width throughout execution", () => {
+  const initial = defineWorkflow({ ...report, steps: [
+    { id: "audit", title: "Audit issue acceptance criteria", output: "Findings" },
+    { id: "save", title: "Save and verify criteria", dependsOn: ["audit"], output: "Receipt" },
+  ] }, []);
+  const audited = submit(initial, "audit");
+  for (const run of [initial, audited, submit(audited, "save")]) {
+    for (const width of [34, 36, 100]) {
+      const frame = renderDynamicFrame(run, width, { fg: (_, text) => text }, false, {});
+      const body = frame.lines.slice(-2);
+      assert.ok(body[0]!.endsWith(run.steps[0]!.title));
+      assert.ok(body[1]!.endsWith(run.steps[1]!.title));
+      const y = frame.lines.length - 1;
+      assert.equal(frame.stepAt(width - 1, y), "save");
+      assert.equal(frame.resizeAt(Math.floor(width / 2), y), undefined);
+    }
+  }
+});
+
+test("parallel steps keep distinct short labels at their join as each step finishes", () => {
+  const initial = defineWorkflow({ ...report, steps: [
+    { id: "code", title: "Review the code for correctness", diagramLabel: "Code review", output: "Findings" },
+    { id: "ux", title: "Review the interface for usability", diagramLabel: "UX review", output: "Findings" },
+    { id: "publish", title: "Publish the review findings", dependsOn: ["code", "ux"], output: "Report" },
+  ] }, []);
+  const reviewed = submit(initial, "code");
+  for (const run of [initial, reviewed, submit(reviewed, "ux")]) {
+    const lines = renderDynamic(run, 150, { fg: (_, text) => text }, true, {});
+    const columns = lines.filter(line => line.includes(" │ ")).map(line => line.split(" │ "));
+    assert.deepEqual(columns.map(([list]) => list!.trimEnd().slice(2)), run.steps.map(step => step.title));
+    assert.match(columns.map(([, graph]) => graph).join("\n"), /Code review \+ UX review → [·○] publish/);
+  }
 });
 
 test("independent stages retain their individual edges at a join", () => {
@@ -178,14 +213,19 @@ test("one-off activation, branch restore, dedicated owner and automatic modes sh
   const h = await harness(t);
   const control = h.settings.get("dynamic-workflow");
   assert.equal(control.get(), "off");
+  assert.deepEqual(control.values, ["off", "on"]);
+  assert.match(control.label, /\(Beta\)/);
   await assert.rejects(h.run({ action: "define", definition: report }), /off/);
-  for (const mode of ["off", "on", "adaptive"]) {
+  updateHarnessSetting("dynamicWorkflow", () => "adaptive");
+  await h.hooks.get("session_start")({}, h.ctx);
+  assert.equal(control.get(), "on");
+  for (const mode of ["off", "on"]) {
     control.change(mode);
     const fork = h.entries.length;
     if (mode !== "off") {
       const options = { sections: {} as Record<string, string> };
       h.hooks.get("before_agent_start")({ systemPrompt: "", systemPromptOptions: options }, h.ctx);
-      assert.match(options.sections.dynamic_workflow!, mode === "adaptive" ? /single-action/ : /objective/);
+      assert.match(options.sections.dynamic_workflow!, /single-action/);
       assert.equal((await h.run({ action: "define", definition: report })).objective, report.objective);
       h.entries.length = fork;
       await h.hooks.get("session_tree")({}, h.ctx);

@@ -228,7 +228,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi-version: ["1.2.0", "1.6.1"]
+        pi-version: ["1.2.0", "1.7.0"]
         partition: ["1/3", "2/3", "3/3", standalone, recovery]
     steps:
       - uses: actions/checkout@v4
@@ -296,7 +296,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi-version: ["1.0.0", "1.3.0", "1.6.1"]
+        pi-version: ["1.0.0", "1.3.0", "1.7.0"]
     env:
       PI_SDK_VERSION: ${{ matrix.pi-version }}
     steps:
@@ -330,8 +330,8 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
-      - name: Align workspace development dependencies with the Pi 1.6.1 host
-        if: matrix.pi-version == '1.6.1'
+      - name: Align workspace development dependencies with the Pi 1.7.0 host
+        if: matrix.pi-version == '1.7.0'
         run: |
           node --input-type=module <<'NODE'
           import { globSync, readFileSync, writeFileSync } from "node:fs";
@@ -368,11 +368,11 @@ jobs:
           NODE
 
       - name: Typecheck affected extensions and shared modules
-        if: matrix.pi-version != '1.6.1'
+        if: matrix.pi-version != '1.7.0'
         run: npm run typecheck -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
-      - name: Typecheck the workspace and exercise Harness on Pi 1.6.1
-        if: matrix.pi-version == '1.6.1'
+      - name: Typecheck the workspace and exercise Harness on Pi 1.7.0
+        if: matrix.pi-version == '1.7.0'
         run: |
           npm run typecheck
           node --import tsx --import ./scripts/isolate-registry.mjs --test \
@@ -380,11 +380,11 @@ jobs:
             packages/pi-better-harness/test/task-context/{dynamic-workflow,work-ledger,work-ledger-session}.test.ts
 
       - name: Verify Recap settings and foreground request isolation in Pi
-        if: matrix.pi-version == '1.6.1'
+        if: matrix.pi-version == '1.7.0'
         run: PI_RECAP_TEST_CLI="$PWD/node_modules/.bin/pi" node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/session-recap.tui.e2e.test.mjs
 
-      - name: Verify native remote browsing and attachment on Pi 1.6.1
-        if: matrix.pi-version == '1.6.1'
+      - name: Verify native remote browsing and attachment on Pi 1.7.0
+        if: matrix.pi-version == '1.7.0'
         run: PI12_NATIVE_CLI="$PWD/node_modules/.bin/pi" node --import tsx --test packages/pi-better-server/test/pi-1.2-bridge.native.test.ts
 
       - name: Test background lifecycle, navigator, and SSH compatibility

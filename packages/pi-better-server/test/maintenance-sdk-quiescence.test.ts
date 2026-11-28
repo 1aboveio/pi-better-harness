@@ -11,7 +11,7 @@ import { gate, makeEnv, waitFor } from "./helpers.ts";
 // The latter uses Node's type stripping (no tsx inherited declaration-path aliases).
 // Regression evidence: without full refresh tracking, all four cancel/replace
 // cases below accept idle while their decision/provider promise is still held.
-const sdkWithCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1";
+const sdkWithCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1" || VERSION === "1.7.0";
 const busy = (error: unknown) => error instanceof MaintenanceBusyError && error.reason === "work";
 function deferred() {
   let resolve!: () => void;
