@@ -43,7 +43,7 @@ The maintainer's existing direct settings editor remains an intentional settings
 
 ## The maintainer's prompt manager
 
-Open **Prompt manager** from `/harness-settings` in Pi, or launch the local Web interface with `pi-better-harness instructions web`. Both operate on the selected Pi agent directory. The Web manager can open without a running conversation. It serves the local maintainer on loopback and verifies that mutating requests come from its authorized local UI.
+Open **Prompt manager** from `/harness-settings` in Pi, or launch the local Web interface with `pi-better-harness instructions web`. Both operate on the selected Pi agent directory. The Web manager can open without a running conversation. It serves the local maintainer on loopback and verifies that mutating requests come from its authorized local UI. The shared local console links to this manager from Prompts. Its Server and Sessions pages use the daemon socket independently, so a stopped daemon still allows local prompt editing. [Local console decision](0023-unified-server-runtime.md#本地-web-管理页)
 
 | Local user action | Product behavior in both interfaces |
 | --- | --- |

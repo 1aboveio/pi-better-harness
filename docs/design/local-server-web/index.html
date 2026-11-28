@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi Better · Local console</title>
+<style>
+:root{color-scheme:light;--ink:#192820;--muted:#53665a;--line:#d5dfd6;--bg:#f6f8f4;--white:#fff;--green:#176044;--mint:#a7ebbf;--dark:#16372b;--gold:#815412;--sans:"Source Sans 3","Open Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,"DejaVu Sans Mono",monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.48 var(--sans)}
+button,select,input{font:inherit;color:inherit}button,a,select,summary{touch-action:manipulation}
+button{cursor:pointer}a{color:var(--green);text-decoration:none}
+:focus-visible{outline:3px solid #5c9ee4;outline-offset:3px}button:disabled{cursor:default;opacity:.7}
+.shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:100vh}
+.rail{background:#edf2eb;border-right:1px solid var(--line);padding:26px 17px 20px;display:flex;flex-direction:column;gap:28px}
+.brand{display:flex;align-items:center;gap:10px;margin:0 7px}.logo{display:grid;place-items:center;width:39px;height:39px;border-radius:11px;background:#162e27}.logo img{width:31px;height:31px;object-fit:contain}
+.brand b{display:block;font-size:16px;letter-spacing:-.6px}.brand small{display:block;color:var(--muted);font-size:11px}
+nav{display:grid;gap:5px}.navlink{color:#44564b;display:flex;align-items:center;gap:11px;padding:10px 12px;border:1px solid transparent;border-radius:7px;font-weight:600}
+.navlink:hover{background:#e3ebe1}.navlink[aria-current=page]{color:#154d35;background:#dbe9dc;border-color:#c3d7c7}
+.rail-foot{margin-top:auto;border-top:1px solid #ccd8cc;padding:17px 8px 0;color:var(--muted);font-size:12px}.rail-foot code{display:block;margin-top:5px;color:#293e30}
+.icon{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:middle}
+.topbar{min-height:61px;border-bottom:1px solid var(--line);padding:10px clamp(20px,3.4vw,55px);display:flex;align-items:center;justify-content:space-between;gap:15px;background:#fff}
+.crumb,.preview,.flex,.subtitle,.section-title,.meta-label,.rowtitle,.folder,.actions{display:flex;align-items:center;gap:8px}
+.crumb{font-size:12px;color:var(--muted)}.crumb b{color:var(--ink)}.slash{color:#98aa9c}
+.preview{font-size:11px;color:var(--muted);gap:8px}.preview select{background:#f7f9f5;border:1px solid var(--line);border-radius:5px;padding:4px 6px;font-size:12px}
+main{max-width:1440px;margin:auto;padding:30px clamp(20px,3.4vw,55px) 32px}
+.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:22px}
+h1{font-size:clamp(30px,3.1vw,44px);font-weight:650;line-height:1.1;letter-spacing:-2px;margin:0 0 8px}
+h2{font-size:21px;line-height:1.25;letter-spacing:-.7px;margin:0}h3{font-size:16px;margin:0;line-height:1.32}p{margin:0}
+.subtitle{color:var(--muted);font-size:13px;gap:6px}
+.btn,.textbtn,.filter{display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;border-radius:6px}
+.btn{border:1px solid #bccdbf;background:#fff;padding:7px 12px;font-size:12px;font-weight:650}.btn:hover{background:#eef4ee}.btn.primary{background:var(--green);border-color:var(--green);color:#fff}.btn.primary:hover{background:#144d38}
+.btn .icon,.textbtn .icon,.meta-label .icon{width:15px;height:15px}.textbtn{border:0;background:transparent;color:var(--green);font-size:12px;font-weight:650;padding:5px 0}.textbtn:hover{text-decoration:underline}
+code,.mono{font-family:var(--mono);font-size:.91em}
+.cards{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(250px,1fr);gap:16px;margin-bottom:26px}
+.card,.panel{border:1px solid var(--line);border-radius:13px;background:#fff;overflow:hidden}
+.runtime{color:#f8fcf7;background:var(--dark);border-color:#204a36;padding:20px 22px;position:relative;isolation:isolate}
+.runtime:after{content:"";position:absolute;right:0;top:0;width:46%;height:80%;z-index:-1;opacity:.32;background-image:radial-gradient(#719b79 .85px,transparent .85px);background-size:10px 10px;mask-image:linear-gradient(90deg,transparent,#000)}
+.runtime .meta-label{color:#bcdbbf}.meta-label{font-size:11px;font-weight:650;letter-spacing:.025em}
+.runtime-main{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:16px 0 20px}
+.signal{display:inline-flex;align-items:center;gap:10px;font-size:clamp(25px,2.2vw,34px);font-weight:600;letter-spacing:-1.3px;line-height:1.1}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}.signal .dot{width:11px;height:11px;background:var(--mint);box-shadow:0 0 0 5px #375b45}.signal.off .dot{background:#dfe9df;box-shadow:0 0 0 5px #496052}.signal.unknown .dot{background:#f2cd85;box-shadow:0 0 0 5px #595c3d}
+.rack{width:58px;height:45px;fill:none;stroke:#b2dfbb;stroke-width:1.35;opacity:.9}
+.specs{display:grid;grid-template-columns:1.2fr 1fr .75fr;border-top:1px solid #42634d;padding-top:13px;gap:9px}
+.specs small,.field small{display:block;font-size:11px;margin:0 0 4px}.specs small{color:#b9cfbe}.specs code{font-size:12px;color:#fff}
+.upgrade{padding:20px 22px;display:flex;flex-direction:column}.upgrade .meta-label{color:var(--muted)}.upgrade h3{font-size:24px;letter-spacing:-.7px;margin:14px 0 5px}.upgrade p{color:var(--muted);font-size:13px;max-width:44ch}
+.upgrade .textbtn,.upgrade .btn{align-self:flex-start;margin-top:auto}.tag,.pill{display:inline-flex;align-items:center;gap:6px;font-weight:600;border-radius:20px;white-space:nowrap}
+.pill{padding:3px 9px;font-size:11px}.pill .dot{width:6px;height:6px}.needs{background:#fcf1db;color:#855914}.running{background:#e6f1e7;color:#26623c}.idle{background:#edf1ed;color:#516257}.closed{background:#efefee;color:#566057}
+.panelbar,.panel-end{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 20px}.section-title{gap:10px}.count{font-size:12px;font-weight:600;border:1px solid var(--line);background:#f4f7f2;color:#536657;border-radius:5px;min-width:21px;padding:1px 5px;text-align:center}
+.filters{display:flex;gap:4px;flex-wrap:wrap;padding:0 20px 13px}.filter{background:transparent;border:1px solid transparent;padding:4px 9px;font-size:12px;color:#53645a}.filter:hover{background:#f0f4ee}.filter[aria-pressed=true]{border-color:#c4d6c9;background:#e9f1e8;color:#20533b;font-weight:650}
+table{border-collapse:collapse;width:100%;text-align:left}th{font-size:10px;font-weight:650;color:#596c5e;letter-spacing:.055em;text-transform:uppercase;background:#f3f6f1}th,td{padding:10px 12px 10px 0}th:first-child,td:first-child{padding-left:20px}td{border-bottom:1px solid #e4ebe4;font-size:13px}td:last-child{padding-right:18px}.sessionrow:hover{background:#f6faf5}.sessionrow:focus-within{background:#f0f6ef}
+.rowtitle{border:0;background:transparent;padding:2px 0;text-align:left;min-height:30px;font-weight:630;color:var(--ink)}.rowtitle:hover{color:var(--green);text-decoration:underline}.mini{display:grid;place-items:center;color:#4d6f55;width:27px;height:27px;border:1px solid #d1dfd2;background:#f4f8f2;border-radius:6px}.mini .icon{width:14px;height:14px}
+.folder,.updated{font-size:12px;color:var(--muted)}.folder code{overflow-wrap:anywhere}.folder .icon{width:14px;height:14px}.arrow-cell{width:26px;color:#809184}.arrow-cell button{border:0;background:transparent;padding:4px;color:inherit}.arrow-cell .icon{width:15px;height:15px}
+.panel-end{padding:10px 20px;color:var(--muted);font-size:11px}.panel-end .icon{width:13px;height:13px}
+.group td{background:#f3f6f1;color:#45644d;padding:7px 20px;font:11px var(--mono)}
+.empty{padding:25px 20px;color:var(--muted);border-top:1px solid var(--line)}.empty strong{color:var(--ink);display:block;margin-bottom:4px}
+dl{margin:0}.data-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.field{min-width:0}.field small{color:var(--muted)}.field code{overflow-wrap:anywhere}
+.runtime-info{margin-top:15px;padding:15px 20px}.runtime-info summary{cursor:pointer;color:#39543f;font-size:13px;font-weight:600}.runtime-info[open] summary{margin-bottom:12px}
+dialog{padding:0;border:1px solid var(--line);border-radius:12px;width:min(500px,calc(100vw - 28px));margin:auto;color:var(--ink);box-shadow:0 25px 110px #132c2740}dialog::backdrop{background:#14291f55}.dialog-head{display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}.dialog-body{padding:22px}.dialog-body h2{font-size:26px;margin:9px 0 17px}.dialog-body .data-grid{grid-template-columns:1fr 1fr;gap:16px}.dialog-head .btn{padding:4px}.question{background:#fbf5e7;border:1px solid #e8d9b6;border-radius:8px;margin-top:20px;padding:14px}.question p{margin:6px 0}.question small{color:#74562e}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(min-width:1520px){main{padding-top:40px}.shell{grid-template-columns:240px minmax(0,1fr)}}
+@media(max-width:1050px){.shell{grid-template-columns:174px minmax(0,1fr)}.rail{padding-left:10px;padding-right:10px}.folder-col{display:none}.cards{grid-template-columns:1.35fr 1fr}.runtime,.upgrade{padding:16px}.rack{width:42px}main{padding:24px 20px}}
+@media(max-width:760px){.shell{display:block}.rail{display:flex;flex-direction:row;align-items:center;gap:10px;padding:10px 14px;border-right:0;border-bottom:1px solid var(--line)}.brand{margin:0}.brand .logo{width:31px;height:31px;border-radius:7px}.brand .logo img{width:26px}.brand b{font-size:14px}.brand small,.rail-foot{display:none}nav{display:flex;gap:3px;margin-left:auto}.navlink{padding:6px 8px;font-size:12px;gap:4px}.navlink .icon{width:15px}.topbar{padding:7px 15px;min-height:42px}main{padding:21px 14px}.cards{margin-bottom:17px}.panelbar{padding:14px}.filters{padding-left:14px}.folder-col,.updated-col{display:none}th:first-child,td:first-child{padding-left:14px}td:last-child{padding-right:8px}}
+@media(max-width:550px){.cards{grid-template-columns:1fr;gap:10px}.runtime-main{margin:8px 0 10px}.rack{height:34px}.upgrade h3{margin:8px 0 3px;font-size:20px}.upgrade .textbtn,.upgrade .btn{margin-top:9px}.preview span{font-size:10px}.head{margin-bottom:15px}.subtitle{font-size:11px}.data-grid{grid-template-columns:1fr 1fr}.brand small,.navlink .icon,.rowtitle .mini,.crumb .icon{display:none}.rowtitle{font-size:12px}.pill{font-size:10px;padding:3px 6px}.arrow-cell{width:18px}.panel-end{padding:9px 14px}.group td{overflow-wrap:anywhere}.section-title h2{font-size:19px}}
+</style>
+</head>
+<body>
+<div class="shell">
+<aside class="rail"><div class="brand"><span class="logo"><img src="../../images/brand/logo.png" alt=""></span><div><b>Pi Better</b><small>Local console</small></div></div>
+<nav aria-label="Main navigation"></nav><div class="rail-foot">Agent directory<code>~/.pi/agent</code></div></aside>
+<div><header class="topbar"><div class="crumb"><span id="hostico"></span>Local <span class="slash">/</span> <b id="breadcrumb">Server</b></div>
+<label class="preview"><span>Prototype state</span><select id="scenario" aria-label="Prototype state"><option value="online">Connected</option><option value="stopped">Stopped</option><option value="unknown">Unknown</option><option value="incompatible">Incompatible</option></select></label></header>
+<main id="main"></main></div></div>
+<dialog id="detail"><div class="dialog-head"><span id="dialogtype">Session detail</span><button class="btn" id="close" aria-label="Close detail">Close</button></div><div class="dialog-body" id="dialogbody"></div></dialog>
+<div role="status" aria-live="polite" id="live" class="sr"></div>
+<script>
+'use strict';
+const paths={
+ server:'<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 7.5h.1M7 17.5h.1M11 7.5h6M11 17.5h6"/>',
+ sessions:'<rect x="3" y="4" width="14" height="12" rx="2"/><path d="M7 20h12a2 2 0 0 0 2-2V9"/>',
+ prompts:'<path d="M4 5h16M4 12h16M4 19h16"/><path d="M8 3v4m8 3v4m-6 3v4" stroke-width="4"/>',
+ terminal:'<rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m6 0h4"/>',
+ monitor:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+ refresh:'<path d="M20 10a8 8 0 1 0-.7 6M20 4v6h-6"/>',
+ upgrade:'<path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/>',
+ folder:'<path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+ arrow:'<path d="M5 12h14m-6-6 6 6-6 6"/>',chevron:'<path d="m9 5 7 7-7 7"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',close:'<path d="m6 6 12 12m-12 0L18 6"/>'
+};
+const icon=name=>'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">'+paths[name]+'</svg>';
+const $=id=>document.getElementById(id);
+const views={server:'Server',sessions:'Sessions',prompts:'Prompts'};
+const rows=[
+ {id:'d7cc20ab',name:'Review prompt changes',status:'Needs input',cwd:'pi-better-harness',branch:'feature/prompt-review',at:'20:12',question:'Which revision should be used as the baseline?',options:['Current active revision','Previous release']},
+ {id:'b69de108',name:'Verify runtime upgrade',status:'Running',cwd:'pi-better-harness',branch:'main',at:'20:11'},
+ {id:'93f27d80',name:'Check onboarding flow',status:'Running',cwd:'identity',branch:'feature/onboarding',at:'20:08'},
+ {id:'6dad70c1',name:'Summarize release notes',status:'Idle',cwd:'agent-toolbox',branch:'main',at:'19:56'}
+];
+const statusClass={'Needs input':'needs',Running:'running',Idle:'idle'};
+const stateLabels={online:'Connected',stopped:'Stopped',unknown:'Unknown',incompatible:'Incompatible',starting:'Starting…'};
+let state='online', filter='All', observed='20:14:06', timer;
+function activeView(){const route=location.hash.slice(1);return Object.hasOwn(views,route)?route:'server'}
+function pill(label,kind){return '<span class="pill '+kind+'"><i class="dot"></i>'+label+'</span>'}
+function field(label,value){return '<div class="field"><small>'+label+'</small><code>'+value+'</code></div>'}
+function announce(message){$('live').textContent=message}
+function nav(){document.querySelector('nav').innerHTML=Object.entries(views).map(([key,label])=>'<a class="navlink" href="#'+key+'" '+(key===activeView()?'aria-current="page"':'')+'>'+icon(key)+label+'</a>').join('')}
+function metadata(){return '<details class="runtime-info panel"><summary>Connection details</summary><div class="data-grid">'+field('Agent directory','~/.pi/agent')+field('Transport','Local Unix socket')+field('Daemon instance',state==='online'?'8f3a2c17':'Unavailable')+'</div></details>'}
+const rack='<svg class="rack" viewBox="0 0 64 48" aria-hidden="true"><g><rect x="4" y="4" width="55" height="11" rx="2"/><rect x="4" y="18" width="55" height="11" rx="2"/><rect x="4" y="32" width="55" height="11" rx="2"/><path d="M11 9h19m-19 14h19m-19 14h19"/><path d="M48 9h3m-3 14h3m-3 14h3" stroke-width="2.6"/></g></svg>';
+function cards(){
+ const online=state==='online';
+ const notices={online:['Waiting for idle','Activation is deferred while hosted work is active.','View sessions'],stopped:['Server is stopped','Start the local daemon to read upgrade status.','Start server'],unknown:['Observation timed out','The daemon may still be running. Retry the status check.','Retry observation'],incompatible:['Protocol mismatch','Daemon protocol v2 differs from this console’s supported v1.','Retry observation'],starting:['Starting server','Waiting for the managed runtime handshake.','']};
+ const [title,description,action]=notices[state];
+ const target=online?'sessions':state==='stopped'?'start':'refresh';
+ const specifications=[['Build',online?'7bc1e9d':'—'],['Pi SDK',online?'1.7.0':'—'],['Protocol',online?'v1':'—']];
+ return '<section class="cards" aria-label="Server and upgrade status"><div class="card runtime"><div class="meta-label">'+icon('server')+'Managed runtime</div><div class="runtime-main"><strong class="signal '+(state==='stopped'?'off':online?'':'unknown')+'"><i class="dot"></i>'+stateLabels[state]+'</strong>'+rack+'</div><div class="specs">'+specifications.map(([k,v])=>'<div><small>'+k+'</small><code>'+v+'</code></div>').join('')+'</div></div>'+
+ '<div class="card upgrade"><div class="meta-label">'+icon('upgrade')+(online?'Runtime upgrade':'Runtime observation')+'</div><h3>'+title+'</h3><p>'+description+'</p>'+(action?'<button class="'+(target==='start'?'btn primary':'textbtn')+'" data-action="'+target+'">'+action+icon('arrow')+'</button>':'')+'</div></section>';
+}
+function row(s){return '<tr class="sessionrow"><td><button class="rowtitle" data-session="'+s.id+'"><span class="mini">'+icon('terminal')+'</span>'+s.name+'</button></td><td class="folder-col"><span class="folder">'+icon('folder')+'<code>'+s.cwd+'</code></span></td><td>'+pill(s.status,statusClass[s.status])+'</td><td class="updated-col"><span class="updated mono">'+s.at+'</span></td><td class="arrow-cell"><button data-session="'+s.id+'" aria-label="View '+s.name+'">'+icon('chevron')+'</button></td></tr>'}
+function sessionPanel(full){
+ const online=state==='online';const list=rows.filter(s=>filter==='All'||s.status===filter);
+ let body='';
+ if(online){
+   let content='';
+   if(full){for(const dir of new Set(list.map(s=>s.cwd))){content+='<tr class="group"><td colspan="5">~/projects/'+dir+'</td></tr>'+list.filter(s=>s.cwd===dir).map(row).join('')}}
+   else content=list.map(row).join('');
+   body='<div class="filters" role="group" aria-label="Filter sessions">'+['All','Needs input','Running','Idle'].map(f=>'<button class="filter" data-filter="'+f+'" aria-pressed="'+(f===filter)+'">'+f+'</button>').join('')+'</div><table><thead><tr><th>Session</th><th class="folder-col">Workspace</th><th>Status</th><th class="updated-col">Updated</th><th><span class="sr">Details</span></th></tr></thead><tbody>'+content+'</tbody></table>';
+ }else{
+   const msg=state==='stopped'?'Start the daemon to inspect hosted sessions.':state==='starting'?'Sessions will appear after the daemon responds.':'Refresh after a compatible daemon responds.';
+   body='<div class="empty"><strong>Session list unavailable</strong>'+msg+'</div>';
+ }
+ return '<section class="panel" aria-label="Hosted sessions"><div class="panelbar"><div class="section-title"><h2>Hosted sessions</h2>'+(online?'<span class="count">'+rows.length+'</span>':'')+'</div>'+(!full?'<a class="textbtn" href="#sessions">View all '+icon('arrow')+'</a>':'')+'</div>'+body+'<div class="panel-end"><span class="flex">'+icon('clock')+'Last check <code>'+observed+'</code></span>'+(online?'<span>'+list.length+' of '+rows.length+' sessions</span>':'')+'</div></section>';
+}
+const modules=[['Bundled','communication','Enabled'],['Bundled','verification','Enabled'],['Bundled','collaboration','Disabled'],['User','release-notes','Enabled']];
+function promptPanel(){return '<section class="panel"><div class="panelbar"><h2>Prompt modules</h2><span class="pill running">Local catalog</span></div><table><thead><tr><th>Module</th><th>Origin</th><th>Selection</th></tr></thead><tbody>'+modules.map(([origin,name,selection])=>'<tr><td><code>'+name+'</code></td><td>'+origin+'</td><td>'+selection+'</td></tr>').join('')+'</tbody></table><div class="panel-end">Preview of the existing Prompt Manager entry point.</div></section>'}
+function render(){
+ const view=activeView();nav();$('breadcrumb').textContent=views[view];document.title=views[view]+' · Pi Better';
+ const title={server:'Server overview',sessions:'Sessions',prompts:'Prompt Manager'}[view];
+ const sub={server:'Local daemon and hosted sessions',sessions:'Hosted sessions grouped by working directory',prompts:'Bundled and user modules in this agent directory'}[view];
+ $('main').innerHTML='<div class="head"><div><h1>'+title+'</h1><p class="subtitle">'+sub+'</p></div>'+(view!=='prompts'?'<button class="btn" data-action="refresh">'+icon('refresh')+'Refresh</button>':'')+'</div>'+(view==='server'?cards()+sessionPanel(false)+metadata():view==='sessions'?sessionPanel(true):promptPanel());
+}
+function openDetail(id){
+ const s=rows.find(r=>r.id===id);if(!s||state!=='online')return;
+ $('dialogbody').innerHTML=pill(s.status,statusClass[s.status])+'<h2>'+s.name+'</h2><div class="data-grid">'+field('Working directory','~/projects/'+s.cwd)+field('Branch',s.branch)+field('Session ID',s.id)+field('Updated',s.at)+'</div>'+(s.question?'<div class="question"><small>Pending dialog · Select</small><p><strong>'+s.question+'</strong></p><small>Choices: '+s.options.join(' · ')+'</small></div>':'');
+ $('detail').showModal();
+}
+function setState(next){state=next;filter='All';if(next!=='starting')$('scenario').value=next;render();announce('Runtime '+stateLabels[next]);}
+function now(){return new Date().toLocaleTimeString('en-GB',{hour12:false})}
+$('hostico').innerHTML=icon('monitor');$('close').innerHTML=icon('close');
+$('close').onclick=()=>$('detail').close();
+$('detail').addEventListener('click',e=>{if(e.target===$('detail')){const r=$('detail').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('detail').close()}});
+$('scenario').addEventListener('change',e=>{clearTimeout(timer);observed=now();setState(e.target.value)});
+document.addEventListener('click',e=>{
+ const btn=e.target.closest('button');if(!btn)return;
+ if(btn.hasAttribute('data-filter')){filter=btn.dataset.filter;render();document.querySelector('.filter[aria-pressed="true"]')?.focus();return;}
+ if(btn.dataset.session){openDetail(btn.dataset.session);return}
+ if(btn.dataset.action==='sessions'){location.hash='sessions';return}
+ if(btn.dataset.action==='start'&&state==='stopped'){setState('starting');timer=setTimeout(()=>{observed=now();setState('online')},650);return}
+ if(btn.dataset.action==='refresh'){observed=now();render();announce('Observation refreshed. '+stateLabels[state]);document.querySelector('[data-action="refresh"]')?.focus()}
+});
+window.addEventListener('hashchange',()=>{filter='All';render();window.scrollTo(0,0)});
+render();
+</script>
+</body>
+</html>
