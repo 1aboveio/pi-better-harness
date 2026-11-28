@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import recapExtension from "../extensions/recap/index.ts";
 import { DEFAULT_PROMPT, ENTRY, latestAnswer, parseSummary, summarize } from "../extensions/recap/summary.ts";
@@ -99,7 +100,7 @@ function fixture(t) {
       for (const entry of sessionManager.getBranch()) {
         if (entry.type !== "custom" || entry.customType !== ENTRY) continue;
         const render = renderers.get(ENTRY);
-        const component = render(entry, { expanded }, { fg: (_, text) => text });
+        const component = render(entry, { expanded }, { fg: (_, text) => text, italic: text => text, bold: text => text });
         if (component) result.push(...component.render(width).map(line => line.trimEnd()));
       }
       return result;
@@ -154,8 +155,20 @@ test("settings edit, cancel and restore the auxiliary prompt without changing fo
   assert.ok(f.requests[1].context.systemPrompt.includes(DEFAULT_PROMPT));
   assert.notEqual(f.requests[1].options.sessionId, f.requests[0].options.sessionId);
   f.switchTo("Off");
-  assert.equal(f.rendered(false, 20).length, 2, "each saved recap occupies one transcript line");
-  assert.ok(f.rendered(true).some(line => line.includes(reply.next)));
+  assert.deepEqual(f.rendered(), Array(2).fill(["↳ Recap: " + reply.recap, "         Next: " + reply.next]).flat());
+  assert.deepEqual(f.rendered(true), f.rendered());
+});
+
+test("recap wraps Chinese text at terminal cell boundaries and omits an absent next step", t => {
+  const f = fixture(t);
+  const recap = "两项改动已合并，等待双设备测试。";
+  f.sessionManager.appendCustomEntry(ENTRY, { version: 2, recap });
+  for (const width of [12, 24, 80]) {
+    const lines = f.rendered(false, width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    assert.equal(lines.join("").replace(/\s+/gu, ""), "↳Recap:" + recap);
+    if (width === 24) assert.ok(lines.slice(1).every(line => line.startsWith("         ")));
+  }
 });
 
 test("late replies cannot write to an abandoned branch, a new run, or a disabled session", async (t) => {

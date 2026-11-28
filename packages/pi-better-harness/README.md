@@ -284,7 +284,7 @@ The first request with a newly compacted prefix can be cold. Later turns reuse t
 
 ### Session recap
 
-Enable **Session recap** in `/harness-settings` to add a one-line summary to the conversation transcript. The default is Off. Expand the entry with Pi’s expand-output shortcut to read the full text and any agreed next step. Saved recaps scroll with the conversation and reappear on their original branch.
+Enable **Session recap** in `/harness-settings` to show a summary below the corresponding answer. The default is Off. The summary wraps after `↳ Recap:`. An agreed next step appears on its own line under the summary, marked `Next:`. Saved recaps scroll with the conversation and reappear on their original branch.
 
 Recap waits for the foreground turn and queued messages to settle and for the session’s background workers to drain. If a Goal exists, it must be paused or complete. A later pause or worker completion can produce the recap without another turn. Work that resumes during generation cancels the pending summary.
 
