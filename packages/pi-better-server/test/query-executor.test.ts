@@ -22,6 +22,33 @@ async function ready(client: WorkClient) {
   });
 }
 
+test("blocked upgrade polls leave the subscription queue free of history inventories", async () => {
+  const f = await fixture();
+  const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+  const store = openStore({ path: join(f.root, "operation-coordinator.sqlite") });
+  const owner = { kind: "parent-session", sessionId: "parent", workspace: f.root };
+  try {
+    const run = join(f.root, "runs", "sa_history");
+    mkdirSync(run);
+    writeFileSync(join(run, "meta.json"), JSON.stringify({ id: "sa_history", cwd: f.root, status: "completed", startedAt: 1 }));
+    store.registerOperation({ operationId: "active", taskId: "task", launchToken: "token", owner,
+      observer: { kind: "background-tasks", version: "1" } });
+    const client = await f.client();
+    await ready(client);
+    await f.executor.livenessReasons();
+    const baseline = f.executor.metrics().inventories!;
+    for (let i = 0; i < 3; i++) {
+      const [blockers] = await Promise.all([f.executor.upgradeObligations(), client.subscribe({ cwd: f.root, sessionId: "parent" })]);
+      assert.ok(blockers.some(reason => reason.operationId === "active"));
+    }
+    assert.equal(f.executor.metrics().inventories, baseline);
+    store.recordTerminalOutcome({ operationId: "active", eventId: "done", owner, outcome: "succeeded",
+      evidence: [{ kind: "summary", ref: "result", summary: "Finished" }] });
+    assert.deepEqual(await f.executor.upgradeObligations(), []);
+    assert.ok(f.executor.metrics().inventories! > baseline, "activation still requires fresh writer coverage");
+  } finally { store.close(); await f.close(); }
+});
+
 async function postAndWaitForWorker(worker: Worker, command: object, receipt: string) {
   const messages = on(worker, "message", { close: ["exit"], signal: AbortSignal.timeout(5000) });
   try {

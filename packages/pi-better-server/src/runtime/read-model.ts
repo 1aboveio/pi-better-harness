@@ -381,6 +381,10 @@ export class WorkReadModel {
       ...this.background.livenessReasons(options),
     ];
   }
+  coordinatorUpgradeBlockers() {
+    if (!this.observationInitialized || this.db.isTransaction || this.reader.snapshotActive) return [];
+    return this.reader.upgradeObligations();
+  }
   upgradeObligations() {
     const historyOnly = this.state === "degraded" && this.imported && this.reason === String(archiveConflict)
       && this.sourceErrors.size > 0 && [...this.sourceErrors.values()].every(reason => reason === String(archiveConflict));

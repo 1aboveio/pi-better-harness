@@ -198,6 +198,14 @@ parentPort.on("message", async message => {
     if (!release) throw new Error("runtime-overloaded: shared source query budget exhausted");
     const command = message.command;
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
+      if (command.type === "runtime_get_upgrade_obligations") {
+        const blockers = model.coordinatorUpgradeBlockers();
+        if (blockers.length) {
+          // A durable blocker defers activation without renewing idle/liveness evidence.
+          parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(blockers), metrics: metrics() });
+          return;
+        }
+      }
       await model.reconcile();
       if (request.cancelled) return;
       observeExecution("request", () => {
