@@ -1,6 +1,6 @@
-# 本地 Server 管理页
+# Pi Better Harness 本地控制台
 
-用户从总览确认当前 agent 目录运行的 build、哪几个托管会话正在工作、升级为何尚未生效。三项信息来自同一目录下的 Server。界面沿用现有英文产品术语，以及 Pi Better 的标志、薄荷绿和炭色。对应决策见 [ADR 0023](../../adr/0023-unified-server-runtime.md#本地-web-管理页)。
+用户从总览确认当前 agent 目录运行的 build、哪几个托管会话正在工作、升级为何尚未生效。三项信息来自同一目录下的 Server。界面沿用现有英文产品术语，以及 Pi Better Harness 的标志、薄荷绿和炭色。对应决策见 [ADR 0023](../../adr/0023-unified-server-runtime.md#本地-web-管理页)。
 
 ![Server 总览示意；示例数据](overview.png)
 

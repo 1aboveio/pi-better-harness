@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pi Better · Local console</title>
+<title>Pi Better Harness · Local console</title>
 <style>
 :root{color-scheme:light;--ink:#192820;--muted:#53665a;--line:#d5dfd6;--bg:#f6f8f4;--white:#fff;--green:#176044;--mint:#a7ebbf;--dark:#16372b;--gold:#815412;--sans:"Source Sans 3","Open Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,"DejaVu Sans Mono",monospace}
 *{box-sizing:border-box}
@@ -66,7 +66,7 @@ dialog{padding:0;border:1px solid var(--line);border-radius:12px;width:min(500px
 </head>
 <body>
 <div class="shell">
-<aside class="rail"><div class="brand"><span class="logo"><img src="../../images/brand/logo.png" alt=""></span><div><b>Pi Better</b><small>Local console</small></div></div>
+<aside class="rail"><div class="brand"><span class="logo"><img src="../../images/brand/logo.png" alt=""></span><div><b>Pi Better Harness</b><small>Local console</small></div></div>
 <nav aria-label="Main navigation"></nav><div class="rail-foot">Agent directory<code>~/.pi/agent</code></div></aside>
 <div><header class="topbar"><div class="crumb"><span id="hostico"></span>Local <span class="slash">/</span> <b id="breadcrumb">Server</b></div>
 <label class="preview"><span>Prototype state</span><select id="scenario" aria-label="Prototype state"><option value="online">Connected</option><option value="stopped">Stopped</option><option value="unknown">Unknown</option><option value="incompatible">Incompatible</option></select></label></header>
@@ -133,7 +133,7 @@ function sessionPanel(full){
 const modules=[['Bundled','communication','Enabled'],['Bundled','verification','Enabled'],['Bundled','collaboration','Disabled'],['User','release-notes','Enabled']];
 function promptPanel(){return '<section class="panel"><div class="panelbar"><h2>Prompt modules</h2><span class="pill running">Local catalog</span></div><table><thead><tr><th>Module</th><th>Origin</th><th>Selection</th></tr></thead><tbody>'+modules.map(([origin,name,selection])=>'<tr><td><code>'+name+'</code></td><td>'+origin+'</td><td>'+selection+'</td></tr>').join('')+'</tbody></table><div class="panel-end">Preview of the existing Prompt Manager entry point.</div></section>'}
 function render(){
- const view=activeView();nav();$('breadcrumb').textContent=views[view];document.title=views[view]+' · Pi Better';
+ const view=activeView();nav();$('breadcrumb').textContent=views[view];document.title=views[view]+' · Pi Better Harness';
  const title={server:'Server overview',sessions:'Sessions',prompts:'Prompt Manager'}[view];
  const sub={server:'Local daemon and hosted sessions',sessions:'Hosted sessions grouped by working directory',prompts:'Bundled and user modules in this agent directory'}[view];
  $('main').innerHTML='<div class="head"><div><h1>'+title+'</h1><p class="subtitle">'+sub+'</p></div>'+(view!=='prompts'?'<button class="btn" data-action="refresh">'+icon('refresh')+'Refresh</button>':'')+'</div>'+(view==='server'?cards()+sessionPanel(false)+metadata():view==='sessions'?sessionPanel(true):promptPanel());
