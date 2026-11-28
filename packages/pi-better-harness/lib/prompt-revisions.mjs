@@ -54,7 +54,8 @@ const store = dir => join(dir, "harness-prompt-revisions");
 export const history = dir => read(join(store(dir), "history.json"), []);
 export const activeRevision = dir => {
   const selected = history(dir).at(-1);
-  return selected ? readRevision(dir, selected.to) : bundledRevision();
+  const id = selected?.to ?? read(join(store(dir), "initial-bundle.json"), null);
+  return id ? readRevision(dir, id) : bundledRevision();
 };
 
 function checkId(id) {
@@ -185,16 +186,23 @@ export function createCandidate(dir, active, base, module, text) {
   return { id:editModules(dir, base, rows), parent:base, module, before, after:text.trim() };
 }
 
-// Caller owns the APPEND_SYSTEM lock. Retain immutable pre-upgrade and rollback targets.
 function upgradedRows(rows, bundle) {
   const toggles = new Map(rows.map(r => [r.id, r.enabled]));
   return [...packageRows(bundle).map(r => ({ ...r, enabled:toggles.get(r.id) ?? true })), ...rows.filter(r => r.origin === "user")];
 }
 
+// Caller owns the APPEND_SYSTEM lock. Retain immutable pre-upgrade and rollback targets.
 export function upgradeComposition(dir, bundle = bundledRevision()) {
   const log = history(dir);
   const last = log.at(-1);
-  if (!last) return;
+  if (!last) {
+    const initial = read(join(store(dir), "initial-bundle.json"), null);
+    if (initial === bundle.id) return;
+    persist(dir, bundle);
+    if (!initial) write(store(dir), "initial-bundle.json", bundle.id);
+    else write(store(dir), "history.json", [{ action:"upgrade", from:initial, to:bundle.id, packageAtActivation:bundle.id }]);
+    return;
+  }
   const source = readRevision(dir, last.to);
   if ((last.packageAtActivation ?? source.composition?.bundle.id) === bundle.id) return;
   let root = source;

@@ -147,7 +147,9 @@ export default function registerPromptTools(pi) {
     const start = system.indexOf(begin + "\n");
     const finish = system.indexOf("\n" + end, start);
     const loaded = start >= 0 && finish > start ? system.slice(start + begin.length + 1, finish) : undefined;
-    return { source: promptSource(dir), active: current.id, modules: orderedModules(current), composition:attribution(current),
+    const modules = orderedModules(current);
+    return { source: promptSource(dir), active: current.id, modules, bundled:modules.filter(r => r.origin === "bundled"),
+      user:modules.filter(r => r.origin === "user"), composition:attribution(current),
       loadedDigest: loaded === undefined ? undefined : createHash("sha256").update(loaded).digest("hex"),
       activeLoaded: loaded === current.rendered,
       history: history(dir), captured: capture?.reference ? capture.id : undefined };

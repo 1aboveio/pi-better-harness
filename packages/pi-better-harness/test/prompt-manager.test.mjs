@@ -53,6 +53,11 @@ test("ownership, exact package validation, legacy provenance and upgrade choices
   await cp(new URL("../extensions/harness-instructions/",import.meta.url),bundleDir,{recursive:true});
   await writeFile(join(bundleDir,"modules","communication.md"),"New shipped guidance.");
   const upgraded = bundledRevision(bundleDir);
+  const untouched = join(dir,"untouched");
+  manageInstructions("enable",untouched);
+  upgradeComposition(untouched,upgraded);
+  assert.equal(activeRevision(untouched).id,upgraded.id);
+  assert.equal(readRevision(untouched,base.id).rendered,base.rendered);
   upgradeComposition(dir,upgraded);
   const after = activeRevision(dir);
   assert.ok(after.rendered.includes("New shipped guidance."));

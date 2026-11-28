@@ -32,6 +32,7 @@ function handle(fn) {
 function drawRows() {
   el("rows").replaceChildren(...rows.map((row, i) => {
     const section = node("div"); section.className = "module";
+    if (i === 0 || rows[i-1].origin !== row.origin) section.append(node("h3",row.origin === "bundled" ? "Bundled" : "User"));
     if (row.origin === "bundled") {
       const toggle = node("input"); toggle.type = "checkbox"; toggle.checked = row.enabled;
       toggle.onchange = () => { row.enabled = toggle.checked; };
