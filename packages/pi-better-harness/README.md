@@ -332,6 +332,26 @@ precedence over automatic discovery.
 
 ### Try a prompt edit
 
+Open **Prompt manager** from `/harness-settings`, or run
+`pi-better-harness instructions web` for the browser interface. Both use
+the current Pi agent directory (`PI_CODING_AGENT_DIR`). The CLI prints a
+private loopback URL and opens the browser. Set `BROWSER=none` to print
+the URL only. Stop the CLI to close the server.
+
+Select a revision, edit its ordered modules and save a candidate. Review
+the parent and active diffs before publishing. Manual publication and
+rollback appear in activation history. Reload Pi to load the installed
+revision. Off, saved-text and custom-file configurations retain their source.
+
+To compare a candidate, capture a response with `/prompt-capture` or load
+a reviewed suite with `/prompt-import`. The TUI can use its current session
+directly. For the browser, choose **Connect browser** in the TUI and select
+the named Pi session on the page. The connection lasts until disconnect,
+reload or session shutdown. Select a captured request or a suite and model
+in **Experiments**. Results and judgments stay in the agent directory and
+can be reopened from either interface. Promotion requires a reviewed result
+for the displayed baseline and candidate.
+
 Enable the modular instructions and reload Pi. For existing overrides, remove
 `instructionsPrompt` and `instructionsFile` from the global Harness settings
 before syncing. Use a streaming `openai-completions` model for response replay.

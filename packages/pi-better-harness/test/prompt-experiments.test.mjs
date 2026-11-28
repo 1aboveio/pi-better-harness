@@ -9,6 +9,7 @@ import register from "../lib/prompt-tools.mjs";
 import { manageInstructions, currentInstructions } from "../lib/instructions.mjs";
 import { activeRevision, begin, end } from "../lib/prompt-revisions.mjs";
 import { replayTurn } from "../lib/prompt-turn.mjs";
+import { startPromptWeb } from "../lib/prompt-web.mjs";
 
 const text = content => ({ role: "assistant", content });
 const user = content => ({ role: "user", content });
@@ -131,6 +132,67 @@ test("cancellation preserves the partial tool trace", async () => {
     dispatch: () => { control.abort(); return { content: "recorded result" }; } });
   assert.equal(result.status, "cancelled");
   assert.equal(result.trace.at(-1).content, "recorded result");
+});
+
+test("browser replays a named session capture and TUI evaluates the selected revision; evidence survives restart", async t => {
+  const f = await fixture(t, body => body.messages[0].content.includes(edited) ? "Passed." : "Passed. Deployment pending.");
+  const web = await startPromptWeb(f.dir);
+  t.after(() => web.close());
+  const url = new URL(web.url);
+  const api = async args => {
+    const res = await fetch(url.origin + "/api", { method:"POST", headers:{ origin:url.origin, "content-type":"application/json",
+      authorization:"Bearer " + url.hash.slice(1) }, body:JSON.stringify(args) });
+    const response = await res.json();
+    if (!res.ok) throw Error(response.error);
+    return response.result;
+  };
+  const notifications = [];
+  const displays = [];
+  let queue = [];
+  f.ctx.ui.notify = (msg, level) => { if (level === "error") notifications.push(msg); };
+  f.ctx.ui.select = async (title, choices) => {
+    const next = queue.shift();
+    if (next === "candidate") return choices.find(v => v.includes(f.candidate.slice(0,10)));
+    if (next === "first") return choices[0];
+    return next;
+  };
+  f.ctx.ui.input = async () => "1";
+  f.ctx.ui.editor = async (_, value) => { displays.push(value); };
+  queue = ["Connect browser", "Close"];
+  await f.command("manager");
+  const session = (await api({ action:"state" })).connections[0].id;
+  const pair = {session,base:f.active,candidate:f.candidate};
+  await assert.rejects(api({action:"replay", ...pair}), /Missing pre-answer/);
+  await f.command("capture");
+  f.request([user("Did tests pass?")]);
+  f.reference(); f.event("agent_end",{});
+  const connected = await api({action:"state", ...pair});
+  assert.equal(connected.session.name, f.cwd);
+  const [{id:caseId,label}] = connected.session.captures;
+  assert.equal(label,"Did tests pass?");
+  const replay = await api({action:"replay", ...pair, caseId});
+  assert.equal(replay.active,f.active); assert.equal(replay.candidate,f.candidate);
+  assert.notEqual(replay.baselineOutput.text,replay.candidateOutput.text);
+  await api({action:"judge", ...pair, evidence:replay.evidenceId, judgment:"Direct answer."});
+  queue = ["Choose revision","candidate","Evaluate a case suite","first","first","Close"];
+  await f.command("manager");
+  assert.deepEqual(notifications,[]);
+  assert.ok(displays.at(-1).includes("Samples per case: 1"));
+  const suite = (await api({action:"state", ...pair})).evidence.find(e => e.results);
+  assert.equal(suite.results.length,3); assert.equal(suite.model,"fixture/local");
+  assert.equal(suite.active,f.active); assert.equal(suite.candidate,f.candidate);
+  f.event("session_shutdown",{}); f.open();
+  await assert.rejects(api({action:"replay", ...pair, caseId}), /disconnected/);
+  const state = await api({action:"state", ...pair});
+  assert.equal(state.active,f.active); assert.match(state.problem,/disconnected/);
+  assert.ok(state.evidence.some(e => e.judgment === "Direct answer."));
+  queue = ["Choose revision","candidate","Evidence","first",undefined,"Close"];
+  await f.command("manager");
+  assert.ok(displays.at(-1).includes(f.candidate));
+  f.ctx.model.api = "unsupported";
+  queue = ["Choose revision","candidate","Evaluate a case suite","Close"];
+  await f.command("manager");
+  assert.match(notifications.at(-1),/No supported/);
 });
 
 test("reviewed case export, portable evaluation, repeated failures and explicit proposal promotion", async t => {

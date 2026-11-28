@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,10 +80,50 @@ export function createCandidate(dir, active, base, module, text) {
   while (ancestor.id !== active && ancestor.parent) ancestor = readRevision(dir, ancestor.parent);
   if (ancestor.id !== active) throw Error("Stale base. Read the active revision before editing.");
   if (!Object.hasOwn(source.modules, module)) throw Error("Unknown module. Use prompt_list.");
-  const next = revision(base, source.template, { ...source.modules, [module]: text.trim() });
-  if (source.rendered === next.rendered) throw Error("Edit leaves the module unchanged");
-  for (const item of [source, next]) write(store(dir), item.id + ".json", item);
+  const next = saveRevision(dir, source, source.template, { ...source.modules, [module]: text.trim() });
   return { id: next.id, parent: base, module, before: source.modules[module], after: next.modules[module] };
+}
+
+function saveRevision(dir, source, template, modules) {
+  const next = revision(source.id, template, modules);
+  if (source.template === template && JSON.stringify(source.modules) === JSON.stringify(modules)) throw Error("Edit leaves the module unchanged");
+  for (const item of [source, next]) write(store(dir), item.id + ".json", item);
+  return next;
+}
+
+export function orderedModules(record) {
+  return [...record.template.matchAll(/^\{\{([a-z][a-z0-9-]*)\}\}\r?$/gm)].map(([, id]) => ({ id, text: record.modules[id] }));
+}
+
+export function editModules(dir, base, rows, preview = false) {
+  const source = readRevision(dir, base);
+  if (!Array.isArray(rows) || !rows.length || rows.some(r => typeof r?.id !== "string" || !/^[a-z][a-z0-9-]*$/.test(r.id) || typeof r.text !== "string") ||
+      new Set(rows.map(r => r.id)).size !== rows.length) throw Error("Use distinct lowercase module names and nonempty Markdown.");
+  const modules = Object.fromEntries(rows.map(r => [r.id, r.text.trim()]));
+  const slots = /^\{\{[a-z][a-z0-9-]*\}\}\r?$/;
+  const lines = source.template.split("\n");
+  let i = 0;
+  const last = lines.findLastIndex(line => slots.test(line));
+  const template = lines.flatMap((line, index) => {
+    if (!slots.test(line)) return [line];
+    const replacements = rows.slice(i, index === last ? rows.length : i + 1);
+    i += replacements.length;
+    return replacements.map(row => "{{" + row.id + "}}");
+  }).join("\n");
+  return preview ? render({ template, modules }) : saveRevision(dir, source, template, modules).id;
+}
+
+export function catalog(dir) {
+  let files;
+  try { files = readdirSync(store(dir)); } catch (e) { if (e.code !== "ENOENT") throw e; files = []; }
+  const records = files.filter(f => /^[a-f0-9]{64}\.json$/.test(f)).map(f => readRevision(dir, f.slice(0, -5)));
+  const active = activeRevision(dir);
+  if (!records.some(r => r.id === active.id)) records.unshift(active);
+  const evidence = files.filter(f => /^evaluation-[a-f0-9]{64}\.json$/.test(f)).map(f => {
+    const id = f.slice(11, -5);
+    return { ...evaluation(dir, id), evidenceId: id };
+  });
+  return { active: active.id, records, history: history(dir), evidence };
 }
 
 export function recordEvaluation(dir, result) {
@@ -109,8 +149,14 @@ export function selectRevision(dir, transition) {
   readRevision(dir, to);
   if (action === "promote") {
     const result = evaluation(dir, evidence);
-    if (result.active !== from || result.candidate !== to || !result.judgment?.trim() || result.requiresTurnReplay)
+    if (result.active !== from || result.candidate !== to || !result.judgment?.trim() || result.requiresTurnReplay ||
+        result.results?.some(row => row.status !== "scored" || row.samples.some(s => [s.baseline, s.candidate].some(a => a.status === "inconclusive"))))
       throw Error("Promotion requires a completed comparison for these revisions");
+  } else if (action === "manual") {
+    let candidate = readRevision(dir, to);
+    if (candidate.id === from) throw Error("Revision already active");
+    while (candidate.parent && candidate.parent !== from) candidate = readRevision(dir, candidate.parent);
+    if (candidate.parent !== from) throw Error("Stale candidate. The active base has changed; the candidate is preserved.");
   } else if (action !== "rollback" || !log.some(item => item.from === to)) throw Error("Choose a previously active revision");
   write(store(dir), "history.json", [...log, transition]);
 }
