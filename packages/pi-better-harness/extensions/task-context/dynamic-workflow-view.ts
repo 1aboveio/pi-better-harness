@@ -10,6 +10,14 @@ const status = { ready: "pending", working: "in_progress", waiting: "pending", f
 const colors = { ready: "accent", working: "accent", waiting: "muted", failed: "error", complete: "success", standby: "dim" } as const;
 
 function diagramNodes(run: WorkflowRun, selected?: string): WorkflowNode[] {
+  const sequential = run.steps.every((step, index) => {
+    if (step.review) return false;
+    const parents = step.dependsOn ?? [];
+    if (index === 0) return parents.length === 0;
+    return parents.length === 1 && parents[0] === run.steps[index - 1]!.id;
+  });
+  if (sequential) return [];
+
   const groups = new Map<string, Step[]>();
   const fixes = new Set(run.steps.map(s => s.review?.revision));
   for (const s of run.steps) {
@@ -25,7 +33,9 @@ function diagramNodes(run: WorkflowRun, selected?: string): WorkflowNode[] {
     const first = members[0]!;
     const states = members.map(s => phase(run, s));
     const order = ["failed", "working", "ready", "waiting", "complete", "standby"] as const;
-    const name = planText(first.stage ?? first.title);
+    const title = planText(first.title);
+    const fallback = title.trim().split(/\s+/u).length <= 2 ? title : first.id;
+    const name = planText(members.length > 1 ? first.stage! : first.diagramLabel ?? first.stage ?? fallback);
     const selectedGroup = members.some(s => s.id === selected);
     const state = states[0]!;
     const label = members.length === 1

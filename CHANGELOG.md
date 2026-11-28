@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.60.0] - 2026-11-28
+
+### Changed
+
+- Mark Dynamic Workflow, Harness Instructions and Supervisor Mode as beta in Harness settings. Automatic dynamic workflows now use On and Off. Existing Adaptive preferences map to On.
+- Sequential dynamic workflows use the full Todo width. Branches and review loops keep their diagram and support short node labels.
+- Session recaps show the summary and optional next step together in the transcript. Running background children use a single `>` in Work Navigator.
+- Include the modular Harness instructions and prompt replay tools from the main branch.
+
+## [pi-better-server@0.9.0] - 2026-11-28
+
+### Changed
+
+- Run managed Pi sessions with Pi 1.7.0.
+
+## [pi-better-background-tasks@0.21.7] - 2026-11-28
+
+### Changed
+
+- Show running child tasks with a single `>` aligned with completed tasks.
+
+## [pi-better-subagents@0.40.3] - 2026-11-28
+
+### Changed
+
+- Use a single `>` for running background children in the shared Work Navigator.
+
 ## [pi-better-harness@0.59.3] - 2026-11-28
 
 ### Fixed

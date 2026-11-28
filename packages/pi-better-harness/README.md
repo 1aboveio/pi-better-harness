@@ -56,13 +56,16 @@ revision checks continue to govern workflow-owned plans. See the [usage guide](d
 ### Dynamic workflows
 
 Run `/dynamic-workflow` to plan the current task once. In `/harness-settings`,
-**Automatic dynamic workflows** defaults to **off**. **On** lets the planning agent
-start a workflow. **Adaptive** lets it handle simple requests directly and use a
-workflow for dependencies, role handoffs or repeated review. The command works
-in every mode and keeps your saved preference.
+**Automatic dynamic workflows (Beta)** defaults to **Off**. With **On**, Pi handles
+simple requests directly and can plan a workflow for dependencies, role handoffs
+or repeated review. Existing **Adaptive** settings are treated as **On**.
+The command works with either setting and keeps your saved preference.
 
 The agent records an objective, acceptance criteria, required outputs and task
-dependencies. The diagram shows dependencies and review loops.
+dependencies. When the steps form a single chain in list order, the task list
+uses the full width. Parallel branches, joins and review loops keep their
+diagram as work progresses. The list uses full task titles. The diagram uses
+short step or stage labels such as `Code review` and `UX review`.
 Task icons distinguish ready (○), working (●), waiting (·), optional standby (–),
 failed (×), and completed (✓) steps. In mouse-enabled Pi, click a task to highlight
 its stage and inspect its latest result. Use `/todo expand` to show every task.
@@ -281,7 +284,7 @@ The first request with a newly compacted prefix can be cold. Later turns reuse t
 
 ### Session recap
 
-Enable **Session recap** in `/harness-settings` to add a one-line summary to the conversation transcript. The default is Off. Expand the entry with Pi’s expand-output shortcut to read the full text and any agreed next step. Saved recaps scroll with the conversation and reappear on their original branch.
+Enable **Session recap** in `/harness-settings` to show a summary below the corresponding answer. The default is Off. The summary wraps after `↳ Recap:`. An agreed next step appears on its own line under the summary, marked `Next:`. Saved recaps scroll with the conversation and reappear on their original branch.
 
 Recap waits for the foreground turn and queued messages to settle and for the session’s background workers to drain. If a Goal exists, it must be paused or complete. A later pause or worker completion can produce the recap without another turn. Work that resumes during generation cancels the pending summary.
 

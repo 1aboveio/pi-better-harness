@@ -170,14 +170,14 @@ describe("shared background work navigator", () => {
       const lines = renderWidget(widget, 100);
       const mainTask = lines.findIndex(line => line.includes(title));
       assert.ok(mainTask >= 0, "the short running status leaves room for the full child title");
-      assert.match(lines[mainTask]!, /└─ >_ Verify.*running +1s$/);
+      assert.match(lines[mainTask]!, /└─ >  Verify.*running +1s$/);
       assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
       assert.match(lines[mainTask + 2]!, /leaf-b/);
       assert.match(lines[mainTask + 3]!, /with-task/);
       assert.match(lines[mainTask + 4]!, /└.*with-task-task/);
       assert.match(lines[mainTask + 5]!, /missing-owner.*not running/);
       assert.match(lines[mainTask + 6]!, /└.*missing-owner-task/);
-      const taskAt = (width: number) => renderWidget(widget, width).find(line => line.includes("└─ >_ Verify"))!;
+      const taskAt = (width: number) => renderWidget(widget, width).find(line => line.includes("└─ >  Verify"))!;
       diagnostic = "suspected stall; no observed progress for six minutes";
       refreshBackgroundWorkNavigator(ctx);
       const crowded = taskAt(120);

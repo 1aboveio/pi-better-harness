@@ -24,7 +24,7 @@ type GuardState = { managers: WeakMap<object, Admission>; installed: WeakSet<obj
 const key = Symbol.for("pi-better-server.maintenance.sdk-guards.v1");
 const globals = globalThis as typeof globalThis & { [key]?: GuardState };
 const guards = globals[key] ??= { managers: new WeakMap(), installed: new WeakSet(), supported: new WeakSet(), tools: new WeakSet() };
-const hasGuardedCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1";
+const hasGuardedCacheWarmer = /^1\.2\./.test(VERSION) || VERSION === "1.6.1" || VERSION === "1.7.0";
 const warmers = guards.warmers ??= new WeakMap<object, WarmGuard>();
 const closedError = () => new Error("Session runtime is closed; close and reopen the session. History is preserved.");
 

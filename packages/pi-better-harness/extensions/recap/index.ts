@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { sessionIdleEvent, type SessionIdleInspection } from "pi-better-goal/src/types.ts";
-import { Text, TruncatedText } from "@earendil-works/pi-tui";
+import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import {
   DEFAULT_PROMPT,
@@ -39,13 +39,23 @@ export default function recapExtension(pi: ExtensionAPI): void {
     run = undefined;
   }
 
-  pi.registerEntryRenderer?.<{ version: number }>(ENTRY, (entry, { expanded }, theme) => {
+  pi.registerEntryRenderer?.<{ version: number }>(ENTRY, (entry, _options, theme) => {
     if (entry.data?.version !== 2) return;
     const summary = parseSummary(entry.data);
     if (!summary) return;
-    const line = theme.fg("muted", "Recap") + "  " + summary.recap;
-    if (!expanded) return new TruncatedText(line, 0, 0);
-    return new Text(line + (summary.next ? "\n" + theme.fg("muted", "Next") + "   " + summary.next : ""), 0, 0);
+    const prefix = theme.fg("muted", "↳ " + theme.italic(theme.bold("Recap:")) + " ");
+    const prefixWidth = visibleWidth(prefix);
+    const next = summary.next ? "\n" + theme.italic(theme.bold(theme.fg("accent", "Next:"))) + " " + theme.fg("muted", summary.next) : "";
+    const body = new Text(theme.fg("muted", summary.recap) + next, 0, 0);
+    const stacked = new Text(prefix.trimEnd(), 0, 0);
+    return {
+      render(width) {
+        if (width < prefixWidth * 2) return [...stacked.render(width), ...body.render(width)];
+        const indent = " ".repeat(prefixWidth);
+        return body.render(width - prefixWidth).map((line, i) => (i === 0 ? prefix : indent) + line);
+      },
+      invalidate() { body.invalidate(); stacked.invalidate(); },
+    };
   });
 
   function save(update: Preferences) {

@@ -38,7 +38,7 @@ test("the Supervisor switch and scenario picker are independent and preserve con
       notify: assert.fail, custom: (build: Function) => new Promise(resolve => { pagesOpened++; page = build({}, theme, {}, resolve); }),
     } });
     focus("Supervisor scenarios");
-    assert.match(screen(), /Supervisor mode\s+Off/);
+    assert.match(screen(), /Supervisor mode \(Beta\)\s+Off/);
     await press("\r");
     assert.match(screen(), /^Supervisor scenarios\n/);
     assert.equal(readHarnessSetting("supervisorMode"), undefined, "opening scenarios does not write");
@@ -50,13 +50,13 @@ test("the Supervisor switch and scenario picker are independent and preserve con
     assert.deepEqual(readSupervisorSettings().scenarios, ["other", "stall-diagnosis"]);
     await press("\x1b");
     assert.match(screen(), /> Supervisor scenarios\s+›/);
-    focus("Supervisor mode");
+    focus("Supervisor mode (Beta)");
     const beforeToggle = pagesOpened;
     await press(" ");
-    assert.match(screen(), /> Supervisor mode\s+On/);
+    assert.match(screen(), /> Supervisor mode \(Beta\)\s+On/);
     assert.deepEqual(enabledScenarios(), ["other", "stall-diagnosis"]);
     await press("\r");
-    assert.match(screen(), /> Supervisor mode\s+Off/);
+    assert.match(screen(), /> Supervisor mode \(Beta\)\s+Off/);
     assert.deepEqual(enabledScenarios(), []);
     assert.equal(pagesOpened, beforeToggle, "toggling the switch updates its own row in place");
     assert.ok(readSupervisorSettings().revision);
