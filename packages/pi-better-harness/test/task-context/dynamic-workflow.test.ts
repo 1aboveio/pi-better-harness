@@ -10,6 +10,7 @@ import { requestTaskContext } from "pi-better-goal/src/task-context.ts";
 import { captureLaunchContext } from "pi-better-subagents/launch-context.ts";
 import { launchWorkflowAssignment } from "pi-better-subagents/workflow-assignment.ts";
 import extension from "../../extensions/task-context/index.js";
+import { updateHarnessSetting } from "../../extensions/shared-harness-settings.ts";
 import { advanceWorkflow, defineWorkflow, phase, type Definition, type DynamicInput, type WorkflowRun } from "../../extensions/task-context/dynamic-workflow.js";
 import { renderDynamic, renderDynamicFrame } from "../../extensions/task-context/dynamic-workflow-view.js";
 import { createPlanWidget } from "../../extensions/task-context/plan-widget.js";
@@ -178,14 +179,19 @@ test("one-off activation, branch restore, dedicated owner and automatic modes sh
   const h = await harness(t);
   const control = h.settings.get("dynamic-workflow");
   assert.equal(control.get(), "off");
+  assert.deepEqual(control.values, ["off", "on"]);
+  assert.match(control.label, /\(Beta\)/);
   await assert.rejects(h.run({ action: "define", definition: report }), /off/);
-  for (const mode of ["off", "on", "adaptive"]) {
+  updateHarnessSetting("dynamicWorkflow", () => "adaptive");
+  await h.hooks.get("session_start")({}, h.ctx);
+  assert.equal(control.get(), "on");
+  for (const mode of ["off", "on"]) {
     control.change(mode);
     const fork = h.entries.length;
     if (mode !== "off") {
       const options = { sections: {} as Record<string, string> };
       h.hooks.get("before_agent_start")({ systemPrompt: "", systemPromptOptions: options }, h.ctx);
-      assert.match(options.sections.dynamic_workflow!, mode === "adaptive" ? /single-action/ : /objective/);
+      assert.match(options.sections.dynamic_workflow!, /single-action/);
       assert.equal((await h.run({ action: "define", definition: report })).objective, report.objective);
       h.entries.length = fork;
       await h.hooks.get("session_tree")({}, h.ctx);

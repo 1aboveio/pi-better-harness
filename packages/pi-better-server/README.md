@@ -107,7 +107,7 @@ A client that skips `hello` is still served.
 ## Native remote client (`/remote`, experimental)
 
 The native client provides an experimental VS Code Remote-style workflow:
-start ordinary local Pi **1.6.1** with this package loaded at startup, then run
+start ordinary local Pi **1.7.0** with this package loaded at startup, then run
 `/remote connect r5`, or `/remote connect localhost` for the daemon on this machine.
 The terminal keeps Pi's native local UI while the daemon owns
 the model, tools, workspace and session state. Your local conversation stays separate
@@ -288,10 +288,10 @@ dependency lock. Supported remote targets are Linux and macOS on x64 and arm64.
 
 The server runs from an immutable release under
 `~/.pi-better-server/managed/releases/<build-id>`, outside `node_modules`. Each
-release contains private Node **24.14.1** and SDK **1.6.1** dependencies installed
+release contains private Node **24.14.1** and SDK **1.7.0** dependencies installed
 on the target. Node checksums and locked dependency integrity are verified. If
 target downloads fail, the client downloads and uploads verified archives instead.
-Automatic server setup targets Pi 1.6.1. Clients on another Pi minor version, including 1.2 and 1.4, can select a matching server through `PI_SERVER_COMMAND`.
+Automatic server setup targets Pi 1.7.0. Clients on another Pi minor version, including 1.2 and 1.4, can select a matching server through `PI_SERVER_COMMAND`.
 Concurrent connectors share the same release only after integrity validation.
 Published releases are not overwritten to repair corruption.
 
@@ -631,7 +631,7 @@ use native Pi on the host in tmux for those screens. The local native `/remote`
 client above also cannot transport arbitrary custom screens. Project workspaces
 belong outside the runtime installation, for example under `~/workspaces/`.
 
-The bootstrap script defaults to Pi 1.6.1. Set `PI_VERSION` to select another version.
+The bootstrap script defaults to Pi 1.7.0. Set `PI_VERSION` to select another version.
 The daemon works on Pi 0.82 and 1.x, and `hello` reports the installed one. On Pi 1.x the
 `prompt`, `steer` and `follow_up` responses carry Pi's `data.disposition`
 (`started`, `handled` or `queued`); on 0.82 they carry no data.

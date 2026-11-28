@@ -360,9 +360,9 @@ test("Harness instructions start Off, allow editing while On, and keep the draft
   const edits = [undefined, customPrompt];
   const pages = [
     page => {
-      assert.match(page.render(80).join("\n"), /Harness instructions\s+Off/);
+      assert.match(page.render(80).join("\n"), /Harness instructions \(Beta\)\s+Off/);
       assert.doesNotMatch(page.render(80).join("\n"), /Instructions prompt/);
-      selectRow(page, "Harness instructions");
+      selectRow(page, "Harness instructions (Beta)");
     },
     page => selectRow(page, "Instructions prompt"),
     page => {
@@ -371,15 +371,15 @@ test("Harness instructions start Off, allow editing while On, and keep the draft
     },
     page => {
       assert.ok(readFileSync(path, "utf8").includes(customPrompt));
-      selectRow(page, "Harness instructions");
+      selectRow(page, "Harness instructions (Beta)");
     },
     page => {
       assert.equal(readFileSync(path, "utf8"), original);
-      selectRow(page, "Harness instructions");
+      selectRow(page, "Harness instructions (Beta)");
     },
     page => {
       assert.ok(readFileSync(path, "utf8").includes(customPrompt));
-      assert.match(page.render(80).join("\n"), /Harness instructions\s+On/);
+      assert.match(page.render(80).join("\n"), /Harness instructions \(Beta\)\s+On/);
       page.handleInput("\x1b");
     },
   ];

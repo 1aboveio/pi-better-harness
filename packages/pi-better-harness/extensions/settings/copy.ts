@@ -19,7 +19,8 @@ export const controlCopy = new Map<string, SettingCopy>([
     description: "Blocks recognized shell waits, such as watching CI or following logs. Pi gets a prompt to run them in the background so the session stays responsive.",
   }],
   ["dynamic-workflow", {
-    description: "Choose when Pi can plan a workflow automatically. Adaptive uses workflows for dependencies, handoffs or review. /dynamic-workflow starts one run in every mode.",
+    description: "Let Pi plan a workflow for tasks with dependencies, handoffs or review. Use /dynamic-workflow to start one manually.",
+    values: { on: "On", off: "Off" },
   }],
   ["outcome-todo", {
     label: "Goal and Todo tools",

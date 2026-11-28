@@ -56,10 +56,10 @@ revision checks continue to govern workflow-owned plans. See the [usage guide](d
 ### Dynamic workflows
 
 Run `/dynamic-workflow` to plan the current task once. In `/harness-settings`,
-**Automatic dynamic workflows** defaults to **off**. **On** lets the planning agent
-start a workflow. **Adaptive** lets it handle simple requests directly and use a
-workflow for dependencies, role handoffs or repeated review. The command works
-in every mode and keeps your saved preference.
+**Automatic dynamic workflows (Beta)** defaults to **Off**. With **On**, Pi handles
+simple requests directly and can plan a workflow for dependencies, role handoffs
+or repeated review. Existing **Adaptive** settings are treated as **On**.
+The command works with either setting and keeps your saved preference.
 
 The agent records an objective, acceptance criteria, required outputs and task
 dependencies. The diagram shows dependencies and review loops.
