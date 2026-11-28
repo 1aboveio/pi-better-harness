@@ -99,13 +99,15 @@ export class WorkClient {
             this.lastSubscriptionTrace = trace;
         const id = trace?.id ?? `work-${++this.sequence}`;
         return new Promise((resolve, reject) => {
-            const rejectPending = type === "runtime_launch_subagent" ? error => reject(unknownLaunchReceipt(error)) : reject;
+            // The host rechecks the caller's grant between workers and replies after batch admission.
+            const launch = type === "runtime_launch_subagent";
+            const rejectPending = launch ? error => reject(unknownLaunchReceipt(error)) : reject;
             const timer = setTimeout(() => {
                 this.pending.delete(id);
                 if (trace)
                     trace.timedOutAt = Date.now();
                 rejectPending(new Error(`runtime-unhealthy: ${type} timed out${trace ? ` (${trace.id})` : ""}`));
-            }, 5000);
+            }, launch ? 120_000 : 5000);
             this.pending.set(id, { resolve: value => {
                     if (trace)
                         trace.receivedAt = Date.now();
