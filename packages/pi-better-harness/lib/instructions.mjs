@@ -1,24 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { activeRevision, begin, end, readRevision, selectRevision } from "./prompt-revisions.mjs";
 import { acquire, defaultAgentDir, writeDestination } from "./install-settings.mjs";
 
-const begin = "<!-- pi-better-harness:instructions:begin -->";
-const end = "<!-- pi-better-harness:instructions:end -->";
-const bundled = fileURLToPath(new URL("../extensions/harness-instructions/AGENTS.md", import.meta.url));
-
-function sourceText(agentDir, target) {
+function sourceSettings(agentDir) {
   const settingsPath = join(agentDir, "settings.json");
   const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
-  const source = settings.piBetterHarness?.instructionsFile;
+  return settings.piBetterHarness ?? {};
+}
+
+function sourceText(agentDir, target) {
+  const { instructionsPrompt: prompt, instructionsFile: source } = sourceSettings(agentDir);
   if (source === false) return null;
-  const prompt = settings.piBetterHarness?.instructionsPrompt;
   if (typeof prompt === "string") return validateInstructionsPrompt(prompt);
   if (source !== undefined && (typeof source !== "string" || !source.trim())) {
     throw new Error("piBetterHarness.instructionsFile must be a file path or false.");
   }
-  const path = source === undefined ? bundled : resolve(agentDir, source);
+  if (source === undefined) return activeRevision(agentDir).rendered;
+  const path = resolve(agentDir, source);
   if (resolve(path) === resolve(target) || realpathSync(path) === target) {
     throw new Error("The instructions source must be separate from APPEND_SYSTEM.md.");
   }
@@ -74,8 +74,25 @@ export function currentInstructions(agentDir) {
   return blockPrompt(text, range);
 }
 
-// The marker pair is the opt-in. Only enable may create it.
-// Reread under the lock before editing so concurrent changes are preserved.
+export function promptSource(agentDir) {
+  const { instructionsPrompt, instructionsFile } = sourceSettings(agentDir);
+  if (instructionsFile === false || currentInstructions(agentDir) === undefined) return "off";
+  if (typeof instructionsPrompt === "string") return "saved prompt";
+  return instructionsFile === undefined ? "modular" : "custom file";
+}
+
+export function activatePrompt(agentDir, transition) {
+  const previous = currentInstructions(agentDir);
+  const from = readRevision(agentDir, transition.from);
+  const to = readRevision(agentDir, transition.to);
+  if (previous !== from.rendered && previous !== to.rendered) throw Error("Installed block changed. Inspect before activation.");
+  return manageInstructions("sync", agentDir, { previous, saveSource() {
+    if (promptSource(agentDir) !== "modular") throw Error("Activation requires enabled modular instructions");
+    selectRevision(agentDir, transition);
+  } });
+}
+
+// Only enable may create the marker pair. Reread under the lock before editing.
 export function manageInstructions(action, agentDir = defaultAgentDir(), edit) {
   const path = join(agentDir, "APPEND_SYSTEM.md");
   if (action === "enable") mkdirSync(agentDir, { recursive: true });

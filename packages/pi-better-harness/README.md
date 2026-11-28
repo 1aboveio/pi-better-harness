@@ -302,7 +302,8 @@ The CLI manages the same switch. To enable it from the command line:
 npx pi-better-harness instructions enable
 ```
 
-By default, Harness copies its bundled `AGENTS.md` into a marked block in
+By default, Harness renders the ordered Markdown modules in
+`extensions/harness-instructions/AGENTS.md` into a marked block in
 `<agent-dir>/APPEND_SYSTEM.md`. It preserves text outside the markers,
 including blocks owned by other extensions. To use your own Markdown, set
 `piBetterHarness.instructionsFile` in the global Pi `settings.json` to an
@@ -312,6 +313,7 @@ over this file. Remove `instructionsPrompt` and sync to use the file again.
 
 | Command | Effect |
 | --- | --- |
+| `npx pi-better-harness instructions preview` | Print the selected modular prompt. |
 | `npx pi-better-harness instructions enable` | Create or refresh the block. |
 | `npx pi-better-harness instructions sync` | Refresh an existing block after editing the source or changing its path. |
 | `npx pi-better-harness instructions disable` | Remove the block and preserve the surrounding file. |
@@ -327,6 +329,83 @@ retain the loaded text. A new Pi process or an explicit `/reload` reads the
 current file. Pi gives a trusted project's `.pi/APPEND_SYSTEM.md` precedence
 over the global file. Explicit `--append-system-prompt` sources also take
 precedence over automatic discovery.
+
+### Try a prompt edit
+
+Enable the modular instructions and reload Pi. For existing overrides, remove
+`instructionsPrompt` and `instructionsFile` from the global Harness settings
+before syncing. Use a streaming `openai-completions` model for response replay.
+
+1. Run `/prompt-capture`, then send the writing request you want to evaluate,
+   for example "Unit checks passed and deployment verification is pending. Can we close delivery?"
+2. Ask the agent to list modules, read `verification`, and use `prompt_edit` to
+   create a candidate requiring the pending check in the first sentence.
+3. Ask it to run `prompt_replay` with the case and candidate IDs, inspect
+   both new responses, and use `prompt_compare` to record the rubric and judgment.
+4. Request `prompt_promote` for those revisions and the evaluation ID. Confirm
+   the change in Pi. Use `/reload` to adopt it in the working session.
+5. Request `prompt_rollback` with the current and former active IDs. Confirm
+   and reload to use the previous rendering.
+
+Capture holds one pre-answer provider payload in session memory until another
+capture or reload. Replay sends two requests to the captured model endpoint.
+A capture uses Pi's `before_provider_request` hook. Load the experiment extension
+after any extension that rewrites the request body so capture sees those edits.
+A requested tool ends that arm and is reported for turn replay. Comparisons
+and revision history are saved under `<agent-dir>/harness-prompt-revisions`.
+The offline walkthrough runs with `node --test packages/pi-better-harness/test/harness-instructions.test.mjs` from the repository root.
+
+### Replay a turn or task
+
+After `/prompt-capture`, let the original turn finish. Ask for
+`prompt_turn_replay` with the case ID, candidate ID and generation budget
+(1 through 64 per arm). Each requested tool must match the next recorded
+name and arguments. The result includes the assistant actions, returned tool
+data and the first divergence, cancellation or budget stop.
+
+For a multi-turn file task, run `/prompt-task-capture task.json` from the Git
+repository root before sending the first task input. For example:
+
+```json
+{
+  "turns": 2,
+  "required": ["notes.txt"],
+  "omit": ["node_modules"],
+  "checks": [{ "path": "notes.txt", "equals": "Ready for review.\n" }]
+}
+```
+
+Capture records the starting commit and working files, including untracked
+and uncommitted inputs. Use `omit` for paths outside the task. Send the
+declared number of user turns and request `prompt_task_replay` with the same
+arguments as turn replay. Each arm restores a private checkout, shares its
+budget across the turns and reports its diff and file-equality checks.
+The fixture supports whole-file `read` and `write` on restored regular files.
+Other actions, including shell commands and external writes, stop that arm
+with a trace. Reload or start another capture to release the saved checkpoint.
+
+### Evaluate cases and propose edits
+
+Run `prompt_evaluate` with a sample count (1 through 16) and an optional
+candidate ID. The default suite pairs narrow status questions with a delivery
+question that needs a qualification. Each case has expected behavior, a
+counterexample and a case-insensitive required/forbidden phrase rubric.
+The report includes every response and its score or reason it could not be scored.
+
+After a response replay, `/prompt-export path.json` opens its captured input
+for review and redaction. Add the rubric and examples before saving the new
+file. In another session, `/prompt-import path.json` loads the reviewed suite.
+An empty import argument restores the bundled cases.
+
+To use evaluated cases for an edit, enable `/prompt-learning on`. Ask the
+agent to select two distinct baseline failures with the same failure category
+and one passing counterexample. With `prompt_propose`, it supplies those IDs
+and a replacement module. Inspect the before/after samples, then use
+`prompt_judge_proposal` and `prompt_promote` or clear the pending proposal
+with `/prompt-learning discard`. Learning is disabled in a fresh session.
+
+Run `node --test packages/pi-better-harness/test/prompt-experiments.test.mjs`
+from the repository root for the offline turn, task and historical-case fixtures.
 
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in

@@ -15,6 +15,7 @@ const PLAN_PACKAGE = "pi-better-plan";
 export const harnessExtensionFilters = [
   "extensions/task-context/index.ts",
   "extensions/settings/index.ts",
+  "extensions/harness-instructions/index.ts",
   "extensions/minimal-output/index.ts",
 ];
 
