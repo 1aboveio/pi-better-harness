@@ -358,6 +358,27 @@ describe("session bundle", { concurrency: false }, () => {
     assert.deepEqual(manifest.excluded.filter((e) => e.reason === "credential").length, 8);
   });
 
+  it("restores edits to a tracked .env.example and leaves service-account downloads behind", () => {
+    const env = makeEnv();
+    const repo = makeRepo(env.root);
+    const template = join(repo, ".env.example");
+    writeFileSync(template, "REGION=example\n");
+    git(repo, "add", "-f", ".env.example");
+    git(repo, "commit", "-qm", "track example configuration");
+    writeFileSync(template, "REGION=updated-example\n");
+    const credentials = ["service-account2.json", "service_account (1).json"];
+    for (const name of credentials) writeFileSync(join(repo, name), "fixture credential\n");
+
+    const archive = join(env.root, "bundle.tar");
+    const manifest = bundleOf(repo, archive);
+    const restored = materializeWorkspace(verifyBundle(archive, join(env.root, "verified")), join(env.root, "dest"));
+    assert.equal(readFileSync(join(restored.cwd, ".env.example"), "utf8"), "REGION=updated-example\n");
+    for (const name of credentials) {
+      assert.ok(manifest.excluded.some(entry => entry.path === name && entry.reason === "credential"));
+      assert.equal(existsSync(join(restored.cwd, name)), false);
+    }
+  });
+
   it("verifyBundle rejects a member that changed after the manifest was written", () => {
     const env = makeEnv();
     const repo = makeRepo(env.root);
