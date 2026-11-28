@@ -12,7 +12,8 @@ const definitionSchema = Type.Object({
   steps: Type.Array(Type.Object({
     id, title: text, output: text,
     dependsOn: Type.Optional(Type.Array(id)),
-    stage: Type.Optional(text),
+    diagramLabel: Type.Optional(Type.String({ ...text, description: "A distinct one- or two-word diagram label in the task's language, e.g. Code review or UX review. Keep the full task in title." })),
+    stage: Type.Optional(Type.String({ ...text, description: "Shared one- or two-word diagram label for a group of parallel steps." })),
     catalog: Type.Optional(Type.String({ description: "Canonical inspected role.* or agent.* id. Omit for foreground work." })),
     review: Type.Optional(Type.Object({ artifact: id, revision: id }, { description: "Review the artifact step's output. On findings, open the revision step, then review the new version. Delivery depends on this review." })),
   }), { minItems: 1, maxItems: 50 }),

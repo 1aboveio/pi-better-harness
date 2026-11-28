@@ -66,6 +66,40 @@ test("two independent tasks join, then versioned review either ships directly or
   assert.throws(() => defineWorkflow({ ...report, steps: report.steps.map(s => s.id === "fix" ? { ...s, dependsOn: ["ship"] } : s) }, []), /revision step/);
 });
 
+test("a sequential run uses the full list width throughout execution", () => {
+  const initial = defineWorkflow({ ...report, steps: [
+    { id: "audit", title: "Audit issue acceptance criteria", output: "Findings" },
+    { id: "save", title: "Save and verify criteria", dependsOn: ["audit"], output: "Receipt" },
+  ] }, []);
+  const audited = submit(initial, "audit");
+  for (const run of [initial, audited, submit(audited, "save")]) {
+    for (const width of [34, 36, 100]) {
+      const frame = renderDynamicFrame(run, width, { fg: (_, text) => text }, false, {});
+      const body = frame.lines.slice(-2);
+      assert.ok(body[0]!.endsWith(run.steps[0]!.title));
+      assert.ok(body[1]!.endsWith(run.steps[1]!.title));
+      const y = frame.lines.length - 1;
+      assert.equal(frame.stepAt(width - 1, y), "save");
+      assert.equal(frame.resizeAt(Math.floor(width / 2), y), undefined);
+    }
+  }
+});
+
+test("parallel steps keep distinct short labels at their join as each step finishes", () => {
+  const initial = defineWorkflow({ ...report, steps: [
+    { id: "code", title: "Review the code for correctness", diagramLabel: "Code review", output: "Findings" },
+    { id: "ux", title: "Review the interface for usability", diagramLabel: "UX review", output: "Findings" },
+    { id: "publish", title: "Publish the review findings", dependsOn: ["code", "ux"], output: "Report" },
+  ] }, []);
+  const reviewed = submit(initial, "code");
+  for (const run of [initial, reviewed, submit(reviewed, "ux")]) {
+    const lines = renderDynamic(run, 150, { fg: (_, text) => text }, true, {});
+    const columns = lines.filter(line => line.includes(" │ ")).map(line => line.split(" │ "));
+    assert.deepEqual(columns.map(([list]) => list!.trimEnd().slice(2)), run.steps.map(step => step.title));
+    assert.match(columns.map(([, graph]) => graph).join("\n"), /Code review \+ UX review → [·○] publish/);
+  }
+});
+
 test("independent stages retain their individual edges at a join", () => {
   const steps = report.steps.slice(0, 3).map(s => ({ ...s, stage: undefined }));
   const run = defineWorkflow({ ...report, steps }, []);

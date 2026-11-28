@@ -62,7 +62,10 @@ or repeated review. Existing **Adaptive** settings are treated as **On**.
 The command works with either setting and keeps your saved preference.
 
 The agent records an objective, acceptance criteria, required outputs and task
-dependencies. The diagram shows dependencies and review loops.
+dependencies. When the steps form a single chain in list order, the task list
+uses the full width. Parallel branches, joins and review loops keep their
+diagram as work progresses. The list uses full task titles. The diagram uses
+short step or stage labels such as `Code review` and `UX review`.
 Task icons distinguish ready (○), working (●), waiting (·), optional standby (–),
 failed (×), and completed (✓) steps. In mouse-enabled Pi, click a task to highlight
 its stage and inspect its latest result. Use `/todo expand` to show every task.
