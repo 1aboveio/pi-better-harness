@@ -62,6 +62,19 @@ After the manager can ship independently, add **Replay a response** and **Evalua
 
 Return to the same candidate with the paired responses, case-level outcomes, rubric and judgment. Save the evidence against the exact two effective revisions, including bundled content versions, enabled bundled IDs and ordered user-module versions. It can be reopened in either interface and used for a later promotion of that pair. Display upstream validation separately from the result of replaying this user's selection. A changed toggle or user edit yields a different comparison target. Running an experiment never activates a revision. Response replay and suite evaluation are the first two product journeys. Turn and task replay retain the capture and isolation contracts below.
 
+## Web workspace for a selected revision
+
+Follow-up design to [#958](https://github.com/1aboveio/pi-better-harness/issues/958), [#959](https://github.com/1aboveio/pi-better-harness/issues/959) and their implementation in [#962](https://github.com/1aboveio/pi-better-harness/pull/962). The local Web console presents four views within Prompts. The active baseline, working draft or saved candidate, and observed session-loaded revision stay visible when the user changes views. A saved candidate has an immutable ID. Edits to it begin another draft. Keep its parent and the currently active baseline distinguishable when they diverge. Existing Pi TUI and CLI users share the revision and evidence stores. [Screen designs and state transitions](../design/local-server-web/prompt-manager.md)
+
+| View | Decision |
+| --- | --- |
+| Edit | Show an ordered module index beside a single Markdown reading or editing pane. Bundled modules expose their source, scoped package evidence and per-module inclusion switch. User modules support create, edit, reorder and remove. A rendered preview and explicit Save candidate are available offline. Switching views with unsaved text preserves the draft or asks before discarding. |
+| Review | Group bundled selection, user text and user order changes. Offer the full rendered result, comparison with the parent or active base and activation history. Manual publication and rollback require a separate confirmation naming the affected revisions. Show the reload boundary and keep a conflicting draft available. |
+| Replay | From a saved candidate choose the owning Pi session and a readable captured request. Show the input once, place the two generated responses alongside each other and identify the reference answer separately when present. Keep the exact revision pair, model, rubric, outcome and maintainer judgment with the result. Explain missing captures, shadowing and unsupported transports where the action would run. |
+| Evaluate | Choose a reviewed suite, supported model and sample count. Present a case list and an inspector with paired responses, rubric and recorded judgment. Report regressed, improved and tied cases separately from unsupported or incomplete cases. Show the scored denominator. An evaluated promotion checks the precise pair and current active base. |
+
+A successful save makes the candidate available to both interfaces. Running an experiment stores evidence and returns to the same candidate. A new save creates a new comparison target. Prior evidence stays with its original pair. The browser reads through the existing manager and provider operations. Local authoring and manual publication remain available without a provider or capture. At small widths the module list and comparison arms stack in reading order while keeping revision labels visible. The Web views described here do not prescribe a new TUI layout.
+
 ## What each replay reconstructs
 
 | Level | Starting point | Evidence and isolation |
