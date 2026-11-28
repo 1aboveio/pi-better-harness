@@ -37,14 +37,24 @@ export async function openPromptManager(dir, ui, session, toggleShare, isShared)
             const id = await ui.input("Module name");
             if (!id) continue;
             const text = await ui.editor(id, "");
-            if (text?.trim()) rows.push({ id, text });
+            if (text?.trim()) rows.push({ id:"user:" + id, origin:"user", text });
             continue;
           }
           const i = rows.findIndex(r => r.id === item);
+          if (rows[i].origin === "bundled") {
+            const bundle = state.attribution.bundled.find(r => r.id === item);
+            const op = await ui.select(`${item} / ${rows[i].enabled ? "On" : "Off"} / ${bundle.version}`,
+              ["Read shipped text", rows[i].enabled ? "Turn off" : "Turn on", "Package validation"]);
+            if (op === "Turn off" || op === "Turn on") rows[i].enabled = op === "Turn on";
+            if (op === "Read shipped text") await ui.editor(item + " (read-only)", rows[i].text);
+            if (op === "Package validation") await ui.editor("Package validation", state.attribution.packageEvidence
+              ? state.attribution.packageEvidence.scope + "\n" + state.attribution.packageEvidence.url : "No matching upstream evidence.");
+            continue;
+          }
           const op = await ui.select(item, ["Edit text", "Move up", "Move down", "Remove"]);
           if (op === "Edit text") rows[i].text = await ui.editor(item, rows[i].text) ?? rows[i].text;
           if (op === "Remove") rows.splice(i, 1);
-          if (op === "Move up" && i > 0) rows.splice(i - 1, 0, rows.splice(i, 1)[0]);
+          if (op === "Move up" && rows[i-1]?.origin === "user") rows.splice(i - 1, 0, rows.splice(i, 1)[0]);
           if (op === "Move down" && i < rows.length - 1) rows.splice(i + 1, 0, rows.splice(i, 1)[0]);
         }
       } else if (action === "Preview") {

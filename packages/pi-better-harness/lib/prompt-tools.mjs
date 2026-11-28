@@ -11,7 +11,7 @@ import { defaultAgentDir } from "./install-settings.mjs";
 import { activatePrompt, promptSource } from "./instructions.mjs";
 import { recordedDispatch, recordedTools, replayTurn } from "./prompt-turn.mjs";
 import { checkpoint, taskArm } from "./prompt-task.mjs";
-import { activeRevision, begin, createCandidate, end, history, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
+import { activeRevision, attribution, begin, createCandidate, end, history, orderedModules, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
 
 function difference(before, after) {
   const a = before.split("\n");
@@ -147,17 +147,18 @@ export default function registerPromptTools(pi) {
     const start = system.indexOf(begin + "\n");
     const finish = system.indexOf("\n" + end, start);
     const loaded = start >= 0 && finish > start ? system.slice(start + begin.length + 1, finish) : undefined;
-    return { source: promptSource(dir), active: current.id, modules: Object.keys(current.modules),
+    return { source: promptSource(dir), active: current.id, modules: orderedModules(current), composition:attribution(current),
       loadedDigest: loaded === undefined ? undefined : createHash("sha256").update(loaded).digest("hex"),
       activeLoaded: loaded === current.rendered,
       history: history(dir), captured: capture?.reference ? capture.id : undefined };
   });
   tool("prompt_read", "Read a module at a specific revision.", { revision: string, module: string }, args => {
     const source = readRevision(dir, args.revision);
-    if (!Object.hasOwn(source.modules, args.module)) throw Error("Unknown module. Use prompt_list.");
-    return { revision: source.id, text: source.modules[args.module] };
+    const row = orderedModules(source).find(r => r.id === args.module || r.id === "bundled:" + args.module);
+    if (!row) throw Error("Unknown module. Use prompt_list.");
+    return { revision: source.id, ...row };
   });
-  tool("prompt_edit", "Create a candidate by replacing one module.", { base: string, module: string, text: string },
+  tool("prompt_edit", "Create or edit a user:name module in a candidate. Bundled text is read-only.", { base: string, module: string, text: string },
     args => createCandidate(dir, active().id, args.base, args.module, args.text));
 
   pi.registerCommand("prompt-capture", { description: "Keep the next response input in memory for paired replay.",

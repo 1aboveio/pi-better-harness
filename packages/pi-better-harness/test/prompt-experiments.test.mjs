@@ -58,7 +58,7 @@ async function fixture(t, respond) {
   const event = (name, data) => events.get(name)(data, ctx);
   const request = messages => event("before_provider_request", { payload: { stream: true, model: "local", messages: [system, ...messages] } });
   const reference = () => event("message_end", { message: { ...text([{ type: "text", text: "Original answer" }]), stopReason: "stop" } });
-  const { id: candidate } = await call("edit", { base: active, module: "communication", text: edited });
+  const { id: candidate } = await call("edit", { base: active, module: "user:communication", text: edited });
   return { dir, cwd, calls, ctx, active, candidate, open, event, call, command, request, reference };
 }
 
@@ -170,9 +170,21 @@ test("browser replays a named session capture and TUI evaluates the selected rev
   assert.equal(connected.session.name, f.cwd);
   const [{id:caseId,label}] = connected.session.captures;
   assert.equal(label,"Did tests pass?");
+  const baseState = await api({action:"state",session,candidate:f.active});
+  const rows = baseState.modules.map(r => r.id === "bundled:communication" ? {...r,enabled:false} : r);
+  const off = await api({action:"save",session,candidate:f.active,modules:rows});
+  const toggle = await api({action:"replay",...pair,candidate:off,caseId});
+  assert.equal(toggle.compositions.baseline.bundled.find(r => r.id === "bundled:communication").enabled,true);
+  assert.equal(toggle.compositions.candidate.bundled.find(r => r.id === "bundled:communication").enabled,false);
+  assert.deepEqual(toggle.compositions.baseline.bundled.map(r => r.version),toggle.compositions.candidate.bundled.map(r => r.version));
+  const toggledEvidence = await api({action:"judge",...pair,candidate:off,evidence:toggle.evidenceId,judgment:"Reviewed toggle."});
   const replay = await api({action:"replay", ...pair, caseId});
   assert.equal(replay.active,f.active); assert.equal(replay.candidate,f.candidate);
   assert.notEqual(replay.baselineOutput.text,replay.candidateOutput.text);
+  assert.deepEqual(replay.compositions.baseline.bundled,replay.compositions.candidate.bundled);
+  assert.equal(replay.compositions.candidate.users[0].id,"user:communication");
+  assert.deepEqual(toggle.compositions.candidate.packageEvidence,replay.compositions.candidate.packageEvidence);
+  await assert.rejects(api({action:"promote",...pair,evidence:toggledEvidence,confirmed:true}),/completed comparison/);
   await api({action:"judge", ...pair, evidence:replay.evidenceId, judgment:"Direct answer."});
   queue = ["Choose revision","candidate","Evaluate a case suite","first","first","Close"];
   await f.command("manager");
@@ -228,9 +240,10 @@ test("reviewed case export, portable evaluation, repeated failures and explicit 
   assert.deepEqual((await f.call("evaluate", { samples: 1 })).results.map(c => c.status), ["scored", "missing_input", "unsupported"]);
   await f.command("import");
   await f.call("evaluate", { samples: 1 });
-  const propose = { failures: ["unit-status", "format-status"], counterexample: "delivery-status", module: "communication", text: edited };
+  const propose = { failures: ["unit-status", "format-status"], counterexample: "delivery-status", module: "user:communication", text: edited };
   await assert.rejects(f.call("propose", propose), /Enable/);
   await f.command("learning", "on");
+  await assert.rejects(f.call("propose",{...propose,module:"bundled:communication"}),/read-only/);
   const regressing = await f.call("propose", { ...propose, text: edited + " Drop every qualification." });
   assert.deepEqual(regressing.after.results.map(r => r.samples[0].candidate.status), ["pass", "pass", "fail"]);
   const proposal = await f.call("propose", propose);

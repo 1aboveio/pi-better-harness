@@ -32,13 +32,21 @@ function handle(fn) {
 function drawRows() {
   el("rows").replaceChildren(...rows.map((row, i) => {
     const section = node("div"); section.className = "module";
+    if (row.origin === "bundled") {
+      const toggle = node("input"); toggle.type = "checkbox"; toggle.checked = row.enabled;
+      toggle.onchange = () => { row.enabled = toggle.checked; };
+      const label = node("label"); label.append(toggle, " " + row.id);
+      const entry = state.attribution.bundled.find(m => m.id === row.id);
+      const meta = node("details"); meta.append(node("summary","Shipped text and version"), node("pre",row.text + "\n\n" + entry.version));
+      section.append(label, meta); return section;
+    }
     const bar = node("div"); bar.className = "toolbar";
-    const name = node("input"); name.value = row.id; name.setAttribute("aria-label", "Module name");
-    name.oninput = () => { row.id = name.value; };
+    const name = node("input"); name.value = row.id.slice(5); name.setAttribute("aria-label", "User module name");
+    name.oninput = () => { row.id = "user:" + name.value; };
     bar.append(name);
     for (const [symbol, title, offset] of [["↑","Move up",-1],["↓","Move down",1],["×","Remove",0]]) {
       const b = node("button", symbol); b.title = title; b.setAttribute("aria-label", title + " " + row.id);
-      b.disabled = i + offset < 0 || i + offset >= rows.length;
+      b.disabled = rows[i + offset]?.origin !== "user";
       b.onclick = () => { rows.splice(i, 1); if (offset) rows.splice(i + offset, 0, row); drawRows(); };
       bar.append(b);
     }
@@ -62,6 +70,9 @@ async function refresh(preferredEvidence) {
   el("status").replaceChildren(...Object.entries(fields).flatMap(([k,v]) => [node("dt",k),node("dd",v)]));
   el("notice").textContent = state.problem ?? state.loadNotice;
   drawRows(); el("draft").textContent = "";
+  const proof = state.attribution.packageEvidence;
+  el("packageProof").replaceChildren(node("strong","Package validation"), node("p",proof?.scope ?? "No matching upstream evidence."));
+  if (proof) { const a = node("a","Upstream fixture"); a.href = proof.url; a.target="_blank"; a.rel="noreferrer"; el("packageProof").append(a); }
   for (const key of ["diff","parentDiff","rendered","installed"]) el(key).textContent = state[key] ?? "Off";
   el("publish").disabled = selected === state.active || state.source !== "modular";
   el("history").replaceChildren(...state.history.toReversed().map(h => {
@@ -84,7 +95,7 @@ for (const b of document.querySelectorAll("[data-view]")) b.onclick = () => tab(
 el("revisions").onchange = handle(async () => { selected = el("revisions").value; await refresh(); });
 el("session").onchange = handle(async () => { connection = el("session").value; await refresh(); });
 el("refresh").onclick = handle(refresh);
-el("add").onclick = () => { rows.push({ id:"",text:"" }); drawRows(); el("rows").lastChild.querySelector("input").focus(); };
+el("add").onclick = () => { rows.push({ id:"user:",origin:"user",text:"" }); drawRows(); el("rows").lastChild.querySelector("input").focus(); };
 el("preview").onclick = handle(async () => { el("draft").textContent = await api("preview", { modules:rows }); });
 el("save").onclick = handle(async () => { selected = await api("save", { modules:rows }); await refresh(); tab("review"); });
 el("publish").onclick = handle(async () => { if (confirm("Publish the reviewed changes?\n" + state.diff)) { await api("publish", { confirmed:true }); await refresh(); } });

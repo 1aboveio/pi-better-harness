@@ -64,7 +64,27 @@ export function readRevision(dir, id) {
   checkId(id);
   const record = read(join(store(dir), id + ".json"), null);
   if (record) {
-    const verified = revision(record.parent, record.template, record.modules);
+    let verified;
+    if (record.composition) {
+      const {bundle} = record.composition;
+      const checked = revision(null, bundle.template, bundle.modules);
+      if (checked.id !== bundle.id) throw Error("Corrupt bundled snapshot");
+      verified = compose(record.parent, checked, orderedModules(record, checked));
+    } else {
+      verified = revision(record.parent, record.template, record.modules);
+      let root = verified;
+      const seen = new Set();
+      while (root.parent) {
+        checkId(root.parent);
+        if (seen.has(root.parent)) throw Error("Cyclic legacy prompt history");
+        seen.add(root.parent);
+        const parent = read(join(store(dir), root.parent + ".json"), null);
+        if (!parent || parent.id !== root.parent) break;
+        root = parent;
+      }
+      if (!root.parent && root.id === packageProof.bundle && revision(null, root.template, root.modules).id === root.id)
+        Object.defineProperty(verified, "legacyBundle", { value:revision(null, root.template, root.modules) });
+    }
     if (verified.id !== id || verified.digest !== record.digest || verified.rendered !== record.rendered)
       throw Error(`Corrupt prompt revision ${id}`);
     return verified;
@@ -74,43 +94,117 @@ export function readRevision(dir, id) {
   throw Error("Unknown prompt revision. Use prompt_list.");
 }
 
+const qualified = /^[a-z][a-z0-9-]*$/;
+const packageProof = {
+  bundle: "fccd08066c6b092b8250e0ea46f0820452614d069e96283745696bcbd2c94900",
+  scope: "Default composition: captured writing-request fidelity and reload in the fixed-provider fixture",
+  url: "https://github.com/1aboveio/pi-better-harness/blob/087b03d2/packages/pi-better-harness/test/harness-instructions.test.mjs",
+};
+
+function packageRows(bundle) {
+  return [...bundle.template.matchAll(/^\{\{([a-z][a-z0-9-]*)\}\}\r?$/gm)].map(([, name]) =>
+    ({ id: "bundled:" + name, origin: "bundled", text: bundle.modules[name], enabled: true }));
+}
+
+function compose(parent, bundle, rows) {
+  const expected = packageRows(bundle);
+  if (!Array.isArray(rows) || rows.length < expected.length) throw Error("Bundled modules must stay in package order.");
+  const modules = Object.create(null);
+  const enabled = [], users = [];
+  for (const [index, row] of rows.entries()) {
+    if (index < expected.length) {
+      const shipped = expected[index];
+      if (row.id !== shipped.id || row.origin !== shipped.origin || row.text !== shipped.text || typeof row.enabled !== "boolean")
+        throw Error("Bundled text, order and origin are read-only. Toggle the module or create a user module.");
+      if (row.enabled) { enabled.push(row.id); modules[row.id] = row.text; }
+    } else {
+      if (row.origin !== "user" || !row.id.startsWith("user:") || !qualified.test(row.id.slice(5)) || Object.hasOwn(modules, row.id))
+        throw Error("Use unique user module identities (user:name).");
+      const text = row.text?.trim();
+      if (!text || text.includes(begin) || text.includes(end)) throw Error("Empty user module or reserved markers.");
+      users.push({ id:row.id, origin:"user", text }); modules[row.id] = text;
+    }
+  }
+  const template = bundle.template.trim().split(/\r?\n/).flatMap(line => {
+    const slot = /^\{\{([a-z][a-z0-9-]*)\}\}$/.exec(line);
+    return slot ? (enabled.includes("bundled:" + slot[1]) ? ["{{bundled:" + slot[1] + "}}"] : []) : [line];
+  }).concat(users.map(row => "{{" + row.id + "}}")).join("\n").trim();
+  const rendered = template.split("\n").map(line => modules[/^\{\{((?:bundled|user):[a-z][a-z0-9-]*)\}\}$/.exec(line)?.[1]] ?? line).join("\n");
+  const composition = { bundle, enabled, users };
+  return { id:digest(JSON.stringify([parent, bundle.id, enabled, users])), parent, template, modules, rendered, digest:digest(rendered), composition };
+}
+
+export function orderedModules(record, current = record.legacyBundle ?? bundledRevision()) {
+  if (record.composition) {
+    const {bundle, enabled, users} = record.composition;
+    return [...packageRows(bundle).map(row => ({ ...row, enabled:enabled.includes(row.id) })), ...users.map(row => ({...row}))];
+  }
+  // Legacy revisions have no ownership metadata. Attribute only exact known package text.
+  const bundled = packageRows(current).map(row => ({ ...row, enabled: record.modules[row.id.slice(8)] === row.text }));
+  const users = [...record.template.matchAll(/^\{\{([a-z][a-z0-9-]*)\}\}\r?$/gm)].flatMap(([, name]) =>
+    current.modules[name] === record.modules[name] ? [] : [{ id:"user:" + name, origin:"user", text:record.modules[name] }]);
+  return [...bundled, ...users];
+}
+
+export function attribution(record, shipped = record.legacyBundle ?? bundledRevision()) {
+  const bundle = record.composition?.bundle ?? shipped;
+  const rows = orderedModules(record, shipped);
+  return { revision:record.id, renderedDigest:record.digest, bundle:bundle.id,
+    packageEvidence:bundle.id === packageProof.bundle ? packageProof : null,
+    bundled:rows.filter(r => r.origin === "bundled").map(r => ({id:r.id, version:digest(r.text), enabled:r.enabled})),
+    users:rows.filter(r => r.origin === "user").map(r => ({id:r.id, version:digest(r.text)})) };
+}
+
+function persist(dir, record) { write(store(dir), record.id + ".json", record); }
+
+export function editModules(dir, base, rows, preview = false) {
+  const source = readRevision(dir, base);
+  const shipped = bundledRevision();
+  const bundle = source.composition?.bundle ?? source.legacyBundle ?? shipped;
+  let next = compose(base, bundle, rows);
+  if (bundle.id !== shipped.id) next = compose(base, shipped, upgradedRows(rows, shipped));
+  if (preview) return next.rendered;
+  if (source.composition && source.composition.bundle.id === shipped.id &&
+      JSON.stringify(orderedModules(next)) === JSON.stringify(orderedModules(source))) throw Error("Edit leaves the module unchanged");
+  persist(dir, source); persist(dir, next);
+  return next.id;
+}
+
 export function createCandidate(dir, active, base, module, text) {
   const source = readRevision(dir, base);
   let ancestor = source;
   while (ancestor.id !== active && ancestor.parent) ancestor = readRevision(dir, ancestor.parent);
   if (ancestor.id !== active) throw Error("Stale base. Read the active revision before editing.");
-  if (!Object.hasOwn(source.modules, module)) throw Error("Unknown module. Use prompt_list.");
-  const next = saveRevision(dir, source, source.template, { ...source.modules, [module]: text.trim() });
-  return { id: next.id, parent: base, module, before: source.modules[module], after: next.modules[module] };
+  const rows = orderedModules(source);
+  const row = rows.find(r => r.id === module || r.id === "bundled:" + module);
+  if (row?.origin === "bundled") throw Error("Bundled text is read-only. Create a user:name module.");
+  if (!module.startsWith("user:") || !qualified.test(module.slice(5))) throw Error("Unknown module. Use user:name for local content.");
+  const before = row?.text;
+  if (row) row.text = text;
+  else rows.push({ id:module, origin:"user", text });
+  return { id:editModules(dir, base, rows), parent:base, module, before, after:text.trim() };
 }
 
-function saveRevision(dir, source, template, modules) {
-  const next = revision(source.id, template, modules);
-  if (source.template === template && JSON.stringify(source.modules) === JSON.stringify(modules)) throw Error("Edit leaves the module unchanged");
-  for (const item of [source, next]) write(store(dir), item.id + ".json", item);
-  return next;
+// Caller owns the APPEND_SYSTEM lock. Retain immutable pre-upgrade and rollback targets.
+function upgradedRows(rows, bundle) {
+  const toggles = new Map(rows.map(r => [r.id, r.enabled]));
+  return [...packageRows(bundle).map(r => ({ ...r, enabled:toggles.get(r.id) ?? true })), ...rows.filter(r => r.origin === "user")];
 }
 
-export function orderedModules(record) {
-  return [...record.template.matchAll(/^\{\{([a-z][a-z0-9-]*)\}\}\r?$/gm)].map(([, id]) => ({ id, text: record.modules[id] }));
-}
-
-export function editModules(dir, base, rows, preview = false) {
-  const source = readRevision(dir, base);
-  if (!Array.isArray(rows) || !rows.length || rows.some(r => typeof r?.id !== "string" || !/^[a-z][a-z0-9-]*$/.test(r.id) || typeof r.text !== "string") ||
-      new Set(rows.map(r => r.id)).size !== rows.length) throw Error("Use distinct lowercase module names and nonempty Markdown.");
-  const modules = Object.fromEntries(rows.map(r => [r.id, r.text.trim()]));
-  const slots = /^\{\{[a-z][a-z0-9-]*\}\}\r?$/;
-  const lines = source.template.split("\n");
-  let i = 0;
-  const last = lines.findLastIndex(line => slots.test(line));
-  const template = lines.flatMap((line, index) => {
-    if (!slots.test(line)) return [line];
-    const replacements = rows.slice(i, index === last ? rows.length : i + 1);
-    i += replacements.length;
-    return replacements.map(row => "{{" + row.id + "}}");
-  }).join("\n");
-  return preview ? render({ template, modules }) : saveRevision(dir, source, template, modules).id;
+export function upgradeComposition(dir, bundle = bundledRevision()) {
+  const log = history(dir);
+  const last = log.at(-1);
+  if (!last) return;
+  const source = readRevision(dir, last.to);
+  if ((last.packageAtActivation ?? source.composition?.bundle.id) === bundle.id) return;
+  let root = source;
+  while (root.parent && !root.composition) root = readRevision(dir, root.parent);
+  const oldBundle = source.composition?.bundle ?? (root.id === packageProof.bundle ? root : bundle);
+  if (!source.composition && oldBundle.id === bundle.id) return;
+  const rows = orderedModules(source, oldBundle);
+  const next = compose(source.id, bundle, upgradedRows(rows, bundle));
+  persist(dir, next);
+  write(store(dir), "history.json", [...log, { action:"upgrade", from:source.id, to:next.id, packageAtActivation:bundle.id }]);
 }
 
 export function catalog(dir) {
@@ -127,6 +221,8 @@ export function catalog(dir) {
 }
 
 export function recordEvaluation(dir, result) {
+  if (!result.compositions) result = { ...result, compositions: {
+    baseline: attribution(readRevision(dir, result.active)), candidate: attribution(readRevision(dir, result.candidate)) } };
   const id = digest(JSON.stringify(result));
   write(store(dir), "evaluation-" + id + ".json", result);
   return id;
@@ -146,7 +242,10 @@ export function selectRevision(dir, transition) {
   if (last && Object.keys(transition).every(key => last[key] === transition[key])) return;
   if (activeRevision(dir).id !== transition.from) throw Error("Active revision changed. Refresh prompt_list.");
   const { from, to, evidence, action } = transition;
-  readRevision(dir, to);
+  const target = readRevision(dir, to);
+  const shipped = bundledRevision();
+  if (action !== "rollback" && target.composition?.bundle.id !== shipped.id)
+    throw Error("Review and save the candidate against the installed package before publication.");
   if (action === "promote") {
     const result = evaluation(dir, evidence);
     if (result.active !== from || result.candidate !== to || !result.judgment?.trim() || result.requiresTurnReplay ||
@@ -158,5 +257,5 @@ export function selectRevision(dir, transition) {
     while (candidate.parent && candidate.parent !== from) candidate = readRevision(dir, candidate.parent);
     if (candidate.parent !== from) throw Error("Stale candidate. The active base has changed; the candidate is preserved.");
   } else if (action !== "rollback" || !log.some(item => item.from === to)) throw Error("Choose a previously active revision");
-  write(store(dir), "history.json", [...log, transition]);
+  write(store(dir), "history.json", [...log, { ...transition, packageAtActivation:shipped.id }]);
 }

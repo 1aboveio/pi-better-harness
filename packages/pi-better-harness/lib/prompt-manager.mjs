@@ -1,5 +1,5 @@
 import { activatePrompt, currentInstructions, promptSource } from "./instructions.mjs";
-import { activeRevision, begin, catalog, editModules, end, evaluation, orderedModules, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
+import { activeRevision, attribution, begin, catalog, editModules, end, evaluation, orderedModules, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
 
 export function loadedBlock(ctx) {
   const system = ctx.getSystemPrompt().replaceAll("\r\n", "\n");
@@ -11,12 +11,15 @@ export function loadedBlock(ctx) {
 function changes(from, to) {
   const before = orderedModules(from), after = orderedModules(to);
   const names = new Set([...before, ...after].map(m => m.id));
-  const entries = [...names].filter(k => from.modules[k] !== to.modules[k]);
+  const old = Object.fromEntries(before.map(r => [r.id,r]));
+  const next = Object.fromEntries(after.map(r => [r.id,r]));
+  const entries = [...names].filter(k => old[k]?.text !== next[k]?.text);
   const order = rows => rows.map(r => r.id).join(" > ");
   return [
     ...(order(before) === order(after) ? [] : ["Order", "- " + order(before), "+ " + order(after)]),
-    ...entries.flatMap(k => [k, ...(from.modules[k]?.split("\n").map(line => "- " + line) ?? []),
-      ...(to.modules[k]?.split("\n").map(line => "+ " + line) ?? [])]),
+    ...after.filter(r => r.origin === "bundled" && r.enabled !== old[r.id]?.enabled).map(r => r.id + (r.enabled ? " On" : " Off")),
+    ...entries.flatMap(k => [k, ...(old[k]?.text.split("\n").map(line => "- " + line) ?? []),
+      ...(next[k]?.text.split("\n").map(line => "+ " + line) ?? [])]),
   ].join("\n");
 }
 
@@ -38,7 +41,7 @@ export async function managerAction(dir, args, session) {
       return { id: r.id, label: label + " / " + r.id.slice(0, 10) };
     });
     return { active: data.active, records: summaries, selected: selected.id, parent: selected.parent,
-      modules: orderedModules(selected), rendered: selected.rendered, diff: changes(byId.get(data.active), selected),
+      modules: orderedModules(selected), attribution:attribution(selected), rendered: selected.rendered, diff: changes(byId.get(data.active), selected),
       parentDiff: selected.parent ? changes(byId.get(selected.parent), selected) : "",
       source: promptSource(dir), installed, installedRevision: identify(installed), session: description,
       loadedRevision: description ? identify(description.loaded) : null,
@@ -66,7 +69,8 @@ export async function managerAction(dir, args, session) {
     if (activeRevision(dir).id !== base) throw Error("The baseline changed. Refresh and review the pair.");
     const result = await session.run(args);
     if (result.active !== base || result.candidate !== candidate) throw Error("The selected revision pair changed.");
-    return { ...result, evidenceId: recordEvaluation(dir, result) };
+    const id = recordEvaluation(dir, result);
+    return { ...evaluation(dir, id), evidenceId:id };
   }
   throw Error("Unknown prompt manager action");
 }

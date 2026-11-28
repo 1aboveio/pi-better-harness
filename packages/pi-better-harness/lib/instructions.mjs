@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { activeRevision, begin, end, readRevision, selectRevision } from "./prompt-revisions.mjs";
+import { activeRevision, begin, end, readRevision, selectRevision, upgradeComposition } from "./prompt-revisions.mjs";
 import { acquire, defaultAgentDir, writeDestination } from "./install-settings.mjs";
 
 function sourceSettings(agentDir) {
@@ -10,14 +10,17 @@ function sourceSettings(agentDir) {
   return settings.piBetterHarness ?? {};
 }
 
-function sourceText(agentDir, target) {
+function sourceText(agentDir, target, upgrade) {
   const { instructionsPrompt: prompt, instructionsFile: source } = sourceSettings(agentDir);
   if (source === false) return null;
   if (typeof prompt === "string") return validateInstructionsPrompt(prompt);
   if (source !== undefined && (typeof source !== "string" || !source.trim())) {
     throw new Error("piBetterHarness.instructionsFile must be a file path or false.");
   }
-  if (source === undefined) return activeRevision(agentDir).rendered;
+  if (source === undefined) {
+    if (upgrade) upgradeComposition(agentDir);
+    return activeRevision(agentDir).rendered;
+  }
   const path = resolve(agentDir, source);
   if (resolve(path) === resolve(target) || realpathSync(path) === target) {
     throw new Error("The instructions source must be separate from APPEND_SYSTEM.md.");
@@ -118,7 +121,7 @@ export function manageInstructions(action, agentDir = defaultAgentDir(), edit) {
       edit.saveSource();
     }
     if (!range && action !== "enable") return false;
-    const content = action === "disable" ? null : sourceText(agentDir, target);
+    const content = action === "disable" ? null : sourceText(agentDir, target, !edit);
     if (content === null && action === "enable") throw new Error("Set instructionsFile to a path or remove the false setting before enabling.");
     const eol = text.match(/\r?\n/)?.[0] ?? "\n";
     const block = content === null ? "" : [begin, content.replace(/\r?\n/g, eol), end, ""].join(eol);

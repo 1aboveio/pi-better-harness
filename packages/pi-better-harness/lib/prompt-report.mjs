@@ -1,5 +1,13 @@
 export function comparisonReport(record) {
   const lines = ["Baseline " + record.active, "Candidate " + record.candidate];
+  if (record.compositions) {
+    for (const [arm, comp] of Object.entries(record.compositions)) {
+      lines.push("", arm + " package " + comp.bundle, ...comp.bundled.map(r => r.id + " " + (r.enabled ? "On " : "Off ") + r.version),
+        "Ordered user modules", ...comp.users.map(r => r.id + " " + r.version), "Upstream scope: " + (comp.packageEvidence?.scope ?? "No matching evidence."));
+      if (comp.packageEvidence) lines.push(comp.packageEvidence.url);
+    }
+    lines.push("", "Local composition comparison");
+  }
   if (record.results) {
     lines.push(record.suite ?? "Case suite", "Samples per case: " + record.sampleCount);
     for (const row of record.results) {

@@ -117,7 +117,7 @@ test("concurrent promotions accept one expected revision and interruption can be
   manageInstructions("enable", agentDir);
   const base = activeRevision(agentDir);
   const change = text => {
-    const to = createCandidate(agentDir, base.id, base.id, "communication", text).id;
+    const to = createCandidate(agentDir, base.id, base.id, "user:communication", text).id;
     const evidence = recordEvaluation(agentDir, { active: base.id, candidate: to, judgment: "Clearer." });
     return { from: base.id, to, evidence, action: "promote" };
   };
@@ -159,6 +159,10 @@ test("Pi replays a captured writing request, promotes the edit on reload and rol
   await writeFile(join(agentDir, "AGENTS.md"), "NATIVE_INSTRUCTIONS");
   assert.equal(manageInstructions("enable", agentDir), true);
   const originalFile = await readFile(join(agentDir, "APPEND_SYSTEM.md"));
+  const initial = activeRevision(agentDir);
+  const seed = createCandidate(agentDir, initial.id, initial.id, "user:verification", "Report the pending verification.").id;
+  activatePrompt(agentDir, {from:initial.id,to:seed,action:"manual"});
+  const seededFile = await readFile(join(agentDir,"APPEND_SYSTEM.md"));
   const originalPrompt = currentInstructions(agentDir);
   const replacement = "Name the outstanding check in the first sentence.";
   const requests = [];
@@ -211,12 +215,13 @@ test("Pi replays a captured writing request, promotes the edit on reload and rol
   const selected = structuredClone(requests.at(-1));
   await session.prompt("Later, unrelated message.");
   const { active, captured } = await call("list", {});
-  const { text } = await call("read", { revision: active, module: "verification" });
+  const { text } = await call("read", { revision: active, module: "user:verification" });
   await assert.rejects(call("edit", { base: active, module: "../settings", text: replacement }), /Unknown module/);
-  await assert.rejects(call("edit", { base: active, module: "verification", text: " " }), /Empty/);
-  const edit = await call("edit", { base: active, module: "verification", text: replacement });
-  assert.equal((await call("read", { revision: edit.id, module: "verification" })).text, replacement);
-  const second = await call("edit", { base: edit.id, module: "verification", text: replacement + " Be concise." });
+  await assert.rejects(call("edit", { base: active, module: "verification", text: replacement }), /read-only/);
+  await assert.rejects(call("edit", { base: active, module: "user:verification", text: " " }), /Empty/);
+  const edit = await call("edit", { base: active, module: "user:verification", text: replacement });
+  assert.equal((await call("read", { revision: edit.id, module: "user:verification" })).text, replacement);
+  const second = await call("edit", { base: edit.id, module: "user:verification", text: replacement + " Be concise." });
   assert.equal(second.parent, edit.id);
   await assert.rejects(call("replay", { caseId: "absent", candidate: edit.id }), /Missing pre-answer input/);
   assert.equal(currentInstructions(agentDir), originalPrompt);
@@ -258,5 +263,7 @@ test("Pi replays a captured writing request, promotes the edit on reload and rol
   await session.prompt("after reload");
   checkSystem(requests.at(-1), replacement, text);
   await call("rollback", { from: edit.id, to: active });
+  assert.deepEqual(await readFile(join(agentDir, "APPEND_SYSTEM.md")), seededFile);
+  await call("rollback", {from:active,to:initial.id});
   assert.deepEqual(await readFile(join(agentDir, "APPEND_SYSTEM.md")), originalFile);
 });
