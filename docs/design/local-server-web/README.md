@@ -17,9 +17,9 @@
 | Agent Catalog | Roles、Named agents、来源及宿主作用域 | 搜索并筛选；打开 Settings、Instructions、Files，查看有效值是角色默认还是 agent override |
 | MCP | 宿主报告的 MCP server、配置来源、连接状态 | 搜索和查看脱敏元数据。已配置和已连接分别显示 |
 | Skills | 可发现的技能名称、说明、来源路径与作用域 | 搜索，按 Personal / Trusted project 筛选，查看发现状态。只有会话另有证据时才显示已读取 |
-| Tools | 当前会话注册的工具，与其中 active 的子集 | 搜索、按 Active / Registered only 筛选、查看提供方和说明 |
+| Tools | 当前会话注册的工具，与其中 active 的子集 | 在 Tree / Flat 间切换，搜索和筛选 Active / Registered only，查看来源和说明 |
 
-总览的首屏保留状态卡和会话列表。列表优先展示待答、运行和空闲的会话；同组按最近活动排序。Sessions 使用完整目录分组，以便区分同名项目。较窄的窗口将导航移至顶部、状态卡纵向排列，保留名称和状态，路径与时间可在详情中查看。所有状态都有文字，键盘可以操作导航、筛选、启动及详情。
+主导航七个入口复用相同的行高、内边距、圆角、图标槽和交互状态，Agent Catalog 与相邻菜单对齐。总览的首屏保留状态卡和会话列表。列表优先展示待答、运行和空闲的会话；同组按最近活动排序。Sessions 使用完整目录分组，以便区分同名项目。较窄的窗口将导航移至顶部、状态卡纵向排列，保留名称和状态，路径与时间可在详情中查看。所有状态都有文字，键盘可以操作导航、筛选、启动及详情。
 
 ## 会话详情与 TUI
 
@@ -35,7 +35,13 @@
 
 ![Agent Catalog](agent-catalog.webp)
 
-[MCP 页面](mcp.webp)、[Skills 页面](skills.webp)、[Tools 页面](tools.webp) 复用相同的只读列表与详情布局，各自使用宿主快照。MCP 的连接状态需要 MCP 提供方证据；Skills 的发现不能证明技能正文已读；工具注册、会话启用与执行授权是三个不同事实。图中数据为示例。产品中适配器能力缺失或授权被撤销时清空该作用域的内容并显示“不可用”。这些页面只有查询和本地筛选；接口不提供配置、安装、连接或调用动作。[技能暴露约定](../../../packages/pi-better-subagents/docs/adr/0005-catalog-skill-exposure.md)
+[MCP 页面](mcp.webp)、[Skills 页面](skills.webp) 和 Tools 共用只读检查与详情布局，各自使用宿主快照。MCP 的连接状态需要 MCP 提供方证据；Skills 的发现不能证明技能正文已读；工具注册、会话启用与执行授权是三个不同事实。图中数据为示例。产品中适配器能力缺失或授权被撤销时清空该作用域的内容并显示“不可用”。这些页面只有查询和本地筛选；接口不提供配置、安装、连接或调用动作。[技能暴露约定](../../../packages/pi-better-subagents/docs/adr/0005-catalog-skill-exposure.md)
+
+### Tools 的两种视图
+
+**Tree** 默认按来源折叠或展开。顶层是 Built-in、具体包名或具名 MCP 提供方；第二层直接列工具。来源标识缺失时单列为 Source unavailable。**Flat** 用表格平铺同一批注册记录，列出 Tool、Source、Session status、Description。搜索支持工具名与来源。切换视图时保留当前宿主、搜索、状态筛选和选中工具，两种视图都可打开只读详情。
+
+[Tree 设计稿](tools.webp) · [Flat 设计稿](tools-flat.webp)
 
 ## 连接与升级的显示规则
 
