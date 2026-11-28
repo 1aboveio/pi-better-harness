@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted design, 2026-11-28. [Epic #945](https://github.com/1aboveio/pi-better-harness/issues/945) tracks delivery. The first milestone ends with a maintainer editing one module, replaying a response, comparing the results, promoting the candidate and rolling it back.
+Accepted 2026-11-28. [Epic #945](https://github.com/1aboveio/pi-better-harness/issues/945) and [PR #956](https://github.com/1aboveio/pi-better-harness/pull/956) delivered the initial module, revision and replay operations. The product amendment below sets the order for the maintainer interfaces. First ship prompt management in both the Pi TUI and a local browser. Then add replay and evaluation to those same interfaces.
 
 ## Why this belongs in Harness
 
@@ -26,6 +26,27 @@ Skills remain a fast way to try uncertain wording, and continue to own domain kn
 
 The maintainer's existing direct settings editor remains an intentional settings action. The candidate and evidence requirements govern the new agent-driven path. Store revision history separately from global preferences. [Settings ownership and persistence](0014-global-harness-defaults.md)
 
+## The maintainer's prompt manager
+
+Open **Prompt manager** from `/harness-settings` in Pi, or launch the local Web interface with `pi-better-harness instructions web`. Both operate on the selected Pi agent directory. The Web manager can open without a running conversation. It serves the local maintainer on loopback and verifies that mutating requests come from its authorized local UI.
+
+| Maintainer action | Product behavior in both interfaces |
+| --- | --- |
+| Inspect the prompt | Show the selected global source (Off, modular, saved text or custom file), the active revision, ordered modules and rendered preview. Report what a named Pi session actually loaded when available. A standalone browser shows that session state is unavailable until one is connected. |
+| Prepare a change | Start from the active revision or a saved candidate. Add, edit, order or remove a module in the candidate, then preview the complete prompt. Save an immutable revision with its parent. A draft saved in either interface, or by the agent, can be found and continued in the other after restart. |
+| Review and publish | Select a candidate from the list. Show the base and candidate, changed module text and order before the maintainer confirms publication. Record the explicit human review and the actual revision transition in history. Opening, editing and publishing here require zero model requests. |
+| Recover | Show past activations and allow an explicit rollback. A stale editor keeps its candidate and identifies the newer active base. Preserve the installed block under Off or an override. Show when a session needs a reload to adopt a published revision. |
+
+Use one catalog and one implementation of version checks, installation and history across the TUI, Web and agent tools. Existing revisions and activation records remain readable. Discover older agent-created candidates from the existing store. Keep selection stable when the user moves between interfaces. Read or refresh on open, an explicit refresh or a relevant change, within the performance rules in [ADR 0032](0032-runtime-performance-design.md).
+
+Human publication is an explicit maintainer operation, like saving in the existing settings editor. It records a manual review of the selected diff. Model-driven promotion still requires evaluation evidence for the exact revision pair and maintainer confirmation. History identifies which action occurred. Neither path silently enables the block or converts an existing override.
+
+## Replay and evaluation from a selected revision
+
+After the manager can ship independently, add **Replay a response** and **Evaluate a case suite** to the selected candidate in both interfaces. Carry the displayed baseline and candidate IDs into the existing replay and evaluation operations. Let the maintainer select an available capture and its owning session for replay, or a reviewed suite and supported model for evaluation. The standalone Web interface needs a session connection for an in-memory capture. Explain a missing capture, disconnected session, shadowed prompt or unsupported provider at the action that needs it. The catalog and editor remain usable.
+
+Return to the same candidate with the paired responses, case-level outcomes, rubric and judgment. Save the evidence against both revisions so it can be reopened in either interface and used for a later promotion of that pair. Running an experiment never activates a revision. Response replay and suite evaluation are the first two product journeys. Turn and task replay retain the capture and isolation contracts below.
+
 ## What each replay reconstructs
 
 | Level | Starting point | Evidence and isolation |
@@ -38,8 +59,15 @@ Across all levels, vary just the selected prompt content in a paired comparison.
 
 ## Delivery and verification
 
+The original implementation milestones were as follows.
+
 - P0 delivers the template, first principles, revision lifecycle, agent edits and response comparison. Prove the entire loop with one writing case. Use the existing Pi request fixture to verify exact-once presence across compaction and adoption after reload.
 - P1 adds a tool-using turn and portable, sanitized historical cases. Report both improvements and regressions against paired examples, with settings and sample counts.
 - P2 adds task replay and opt-in learning from selected cases. Learning may propose and evaluate candidates. Activation uses the same explicit promotion path.
+
+Verify the product amendment with two independent journeys.
+
+1. With no provider configured, edit a module in the TUI, reopen that candidate in Web, inspect the diff and explicitly publish it. After a Pi reload, verify the selected revision was loaded. Roll back from the other interface and recover the prior rendered bytes.
+2. From a selected candidate, run a captured response replay and a reviewed case suite on a supported provider fixture. Reopen the resulting evidence in the other interface and verify the exact revision pair. Record a judgment and explicitly choose whether to promote.
 
 Template rendering runs when its sources or selection change. Replays and evaluations run on demand. Ordinary turns and compaction incur no extra history scan, provider request or template rewrite. [Runtime performance principles](0032-runtime-performance-design.md)
