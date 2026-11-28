@@ -110,6 +110,7 @@ for (const heldType of ['hello', 'runtime_register_catalog']) {
 
 for (const reason of ['abort', 'timeout', 'disconnect']) {
     test(`a post-dispatch ${reason} leaves the batch receipt unknown`, { timeout: 10000 }, async t => {
+        if (reason === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
         const { request, socket, controller, launch, requests, directory } = await holdManagedLaunch(t, 'runtime_launch_subagent');
         const grant = join(directory, request.authority.id + '.json');
         assert.ok(existsSync(grant), 'the server received a usable grant');
@@ -118,6 +119,12 @@ for (const reason of ['abort', 'timeout', 'disconnect']) {
             assert.equal(existsSync(grant), false, 'abort immediately revokes further admissions');
         }
         if (reason === 'disconnect') socket.destroy();
+        if (reason === 'timeout') {
+            t.mock.timers.tick(119_999);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.ok(existsSync(grant), 'grant remains valid throughout the launch window');
+            t.mock.timers.tick(1);
+        }
         const receipt = await launch;
         assert.equal(receipt.details.status, 'outcome_unknown');
         assert.match(receipt.content[0].text, /subagent_list/);
