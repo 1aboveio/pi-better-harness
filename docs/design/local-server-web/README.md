@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | Server 总览 | 当前目录、daemon 状态及运行中的 build、Pi SDK 和协议；升级卡显示观测到的延期原因 | 刷新观测，查看会话，展开连接详情；确认已停止时可显式启动 |
 | Sessions | 按完整工作目录分组的托管会话，显示名字、活动状态和更新时间 | 用 Needs input 筛选，打开独立详情页，直接看到 TUI 与当前问题。返回后恢复列表和筛选。 |
-| Prompts | 同一 agent 目录的 Bundled 与 User 模块 | 打开候选工作区，编辑 User 模块、编辑或重置 Bundled 模块的本地覆盖、单独切换启用状态，在编辑器内查看差异并保存，随后可对已保存版本运行单条回放或用例集评估。参见[工作流程](prompt-manager.md) |
+| Prompts | 同一 agent 目录的 Bundled 与 User 模块 | 打开候选工作区，编辑 User 模块、编辑或重置 Bundled 模块的本地覆盖、单独切换启用状态，在编辑器内查看差异并保存，随后可直接运行推荐的会话分叉，或评估有明确预期结果的一组完整会话。参见[工作流程](prompt-manager.md) |
 | 会话详情 | 中央终端屏幕；右侧为名称、工作目录、分支、session ID 和待答问题 | 打开即查看，支持扩大终端；返回列表释放观察，不取得输入控制权 |
 | Agent Catalog | Roles、Named agents、来源及宿主作用域 | 搜索并筛选；打开 Settings、Instructions、Files，查看有效值是角色默认还是 agent override |
 | MCP | 宿主报告的 MCP server、配置来源、连接状态 | 搜索和查看脱敏元数据。已配置和已连接分别显示 |
