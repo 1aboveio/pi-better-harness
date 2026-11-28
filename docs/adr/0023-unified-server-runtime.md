@@ -16,6 +16,20 @@ server 内的 Catalog 管理模块统一读取、校验、解析和持久修改 
 
 server 按需启动；无客户端、托管保留或可推进后台工作时自动退出。轻量恢复守护器只负责 server 故障恢复，遵守同样的退出与重启预算，不扫描历史，不成为永久系统服务。仅有已完成历史、未读结果或证据 pin 不保活。所有恢复进程都被强杀后，等待下次显式 ensure，不承诺无进程情况下自动复活。
 
+## 本地 Web 管理页
+
+本地控制台的产品名为 **Pi Better Harness**。用户通过同一个 Web 入口查看 Server、托管会话、Prompts、Agent Catalog、MCP、Skills 和 Tools。七个一级入口复用同一种菜单项样式及选中、悬停、键盘焦点状态。Web 进程独立于所管理的 daemon，绑定到本机回环地址。从终端运行 `pi-better-harness web` 打开 Server 总览，选择 **Prompts** 进入 **Edit**。已有命令 `pi-better-harness instructions web` 直接打开 **Prompts → Edit**。在 Pi 内通过 `/harness-settings → Prompt manager → Open in browser` 打开相同页面。三个入口使用同一 Pi agent 目录。打开页面不会启动托管 daemon 或授予会话 capture 的访问权。[入口验收 #970](https://github.com/1aboveio/pi-better-harness/issues/970)。页面及原型见[本地控制台设计](../design/local-server-web/README.md)。
+
+- **读取。** Web 后端通过现有本地 socket 客户端，在握手后读取构建、协议、会话和升级状态。打开页面、刷新或查看详情均为被动观测。浏览器保留上次观测时间；超时和身份不明显示“状态未知”，握手不兼容显示具体原因。单独一次连接失败不足以判定 daemon 已停止。
+- **启动。** 只有本机启动逻辑能确认该目录的 daemon 已停止时，页面才提供启动操作。用户显式点击后，Web 后端调用已有的 managed `ensure`，显示等待结果，并重新握手确认目标实例。并发点击或执行中断遵循既有单实例所有权与恢复约定。普通浏览及空闲标签页遵循 daemon 原有退出策略。
+- **会话和升级。** Server 给出托管会话、活动、待答问题及升级记录。首版可查看问题，不领取 controller lease。升级延期直接呈现返回的原因；仅在服务端给出可关联身份时才指向具体阻塞会话。浏览器操作限定于约定的管理动作，写操作由已授权的本机页面发起。
+- **会话 TUI。** 从总览或 Sessions 点击会话后，直接打开该 session ID 的独立详情页并订阅只读终端画面。TUI 占主区域，工作目录、分支及待答问题在侧栏。生产验收要求新输出、光标移动及行重绘在浏览器中可见。连接中、断线或缺少终端能力时显示对应状态。观察路径只接受屏幕输出，离开仅释放观察资源。现有 `pi-remote attach` 的 companion 启动会取得 controller lease；浏览器需要按会话授权的观察能力。对无现成终端的托管会话，该能力应能基于该会话建立只读 TUI 投影。接管输入、回答问题和发送命令属于后续独立授权的操作。
+- **Agent Catalog。** 网页复用现有 Server 目录服务及宿主验证过的作用域，只读查看 Role、Named Agent、继承关系、有效模型和 effort、Skills、指令与来源。项目和分支数据随对应宿主授权的撤销而失效。打开详情不启动 Agent。[目录操作约定](../../packages/pi-better-subagents/docs/agent-catalog-operations.md)
+- **MCP、Skills、Tools。** 各有独立的只读清单和详情。MCP 展示提供方报告的配置和连接状态；Skills 展示当前作用域可发现的技能及来源；Tools 在同一只读快照上提供 Tree 和 Flat。Tree 的第一层是具体注册来源（Built-in、包名或宿主报告的 MCP 提供方），第二层是该来源的工具。缺少来源时显示“来源未知”。Flat 每行展示一个工具的名称、来源、会话状态和说明。切换视图沿用当前上下文、搜索、状态筛选和仍在结果中的选中项。由相应宿主适配器提供可用字段。没有此能力、未获授权或观测失败时显示不可用，成功读取的空清单才显示零项。只展示已授权的元数据，不传递凭据或环境变量值。浏览这些页面不会连接 MCP、读取技能以改变模型上下文、切换工具或调用工具。
+- **Prompt Manager。** 本地 prompt 目录和版本继续由 ADR 0033 的管理路径读写，daemon 停止时仍可使用。回放按原约定显式连接持有 capture 的 Pi 会话。出现在托管会话列表中并不授予访问 capture 的权限。[Prompt 管理与回放](0033-modular-prompts-and-replay.md)
+
+验收分别覆盖确认已停止后的显式启动、观测超时后的重试、会话 TUI 的只读直达与重连、目录作用域隔离、三个能力清单的只读查询，以及 daemon 离线时进入 Prompts。控制台页面和 Prompt Manager 各自验收；汇合点是共同导航与 agent 目录选择。真实运行时验收使用临时 agent 目录和本机 daemon；设计原型使用示例数据。
+
 ## 系统唤醒后的读取线程监测
 
 系统睡眠会同时暂停 server 主线程上的 watchdog 和读取线程（read worker）。2026-11-20 的一次合盖睡眠持续了 218 秒，watchdog 在唤醒后记录到约 216 秒的心跳空档。当时没有正在执行或排队的读取请求。仅凭睡眠前的心跳时间，无法判断读取线程在唤醒后能否响应。
