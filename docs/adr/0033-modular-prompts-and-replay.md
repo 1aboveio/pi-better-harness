@@ -10,7 +10,7 @@ A writing skill is easy to edit and try. To tell whether an edit helped, a maint
 
 ## Authoring and loading
 
-Keep an ordered template and independently editable Markdown modules. Give each module a stable identifier. The same sources and order produce identical rendered text. Render the active revision into the existing Harness-owned block in global `<agent-dir>/APPEND_SYSTEM.md`. Harness instructions remains opt-in. Use the existing CLI, settings and block writer. Preserve user text outside the markers and the effective precedence of saved prompt text, custom source files and the bundled default. A user can explicitly adopt the modular default from an existing override.
+Keep an ordered template of Markdown modules. The package owns bundled module content and ordering. The local user owns their own modules and chooses which bundled modules participate. Give each module a stable identifier. The same sources and order produce identical rendered text. Render the active revision into the existing Harness-owned block in global `<agent-dir>/APPEND_SYSTEM.md`. Harness instructions remains opt-in. Use the existing CLI, settings and block writer. Preserve user text outside the markers and the effective precedence of saved prompt text, custom source files and the bundled default. A user can explicitly adopt the modular default from an existing override.
 
 Pi selects the effective addendum. A trusted project's `.pi/APPEND_SYSTEM.md` or an explicit `--append-system-prompt` can supersede global discovery. Inspection and replay must identify the source actually loaded. Ordinary turns, compaction and model switches retain the loaded global text. A fresh process or explicit resource reload picks up the installed revision. All models share one module set. Keep revision IDs, timestamps and experiment state in the revision store and replay results. [Startup and cache contract](0021-prompt-prefix-stays-cached.md)
 
@@ -18,9 +18,24 @@ Seed the modules with concise, previously validated principles for communication
 
 Skills remain a fast way to try uncertain wording, and continue to own domain knowledge and multi-step workflows. Project-specific conventions stay in project instructions such as `WRITING.md` or `CONTRIBUTING.md`. Once a rule shows value across projects, promote its stable core into one module. Skills may then reference that core and keep their procedures and examples. Replay makes a separate experimental writing skill optional. [Subagent skill exposure](../../packages/pi-better-subagents/docs/adr/0005-catalog-skill-exposure.md)
 
+## Bundled and user prompts
+
+Ownership follows where a module is authored. Show **Bundled** and **User** separately in the TUI, Web UI and agent catalog. A person operating the local manager has the same authority in either interface, even when that person also maintains the package.
+
+| Origin | What a local user can do | Who changes the text |
+| --- | --- | --- |
+| Bundled | Read the shipped text, inspect its version and validation evidence, and enable or disable each module independently | A Harness package maintainer changes the source through a reviewed repository change. Ship new or changed bundled text with replay or evaluation evidence identifying the exact content and scope tested. |
+| User | Create, edit, order and remove their own modules, then review and publish their local selection | The user, or an agent acting on the user's editable candidate |
+
+The global Harness instructions switch still controls the entire block. Each bundled toggle records a separate selection in the user revision. Re-enabling a module restores its shipped text. Render enabled bundled modules in package order, followed by user modules in user order. Use origin-qualified identities so a user module called `communication` can coexist with the bundled one. To replace a bundled rule locally, disable it and create a user module. The new text has user provenance.
+
+Apply ownership checks in the shared mutation path, including `prompt_edit`, `prompt_propose`, and publication. A caller cannot relabel a user module as bundled, submit replacement bundled text or change bundled order. Manual publication changes only the local composition. The whole-text settings editor writes a user override.
+
+Preserve package provenance and local history independently. On upgrade, carry forward per-module choices by stable bundled ID and retain user content. Snapshots keep enough data to reproduce the earlier rendering and identify its bundled versions. Preserve legacy revisions with edited or unidentifiable bundled text as user-owned historical content, keeping previously active bytes and rollback targets readable. Show an evidence link only for the packaged content or composition it actually covers. Older shipped content with no recorded evidence is labeled accordingly.
+
 ## Candidate, active and loaded revisions
 
-1. An agent uses `prompt_list` and `prompt_read` to inspect the effective source and its modules. `prompt_edit` targets one module at an expected revision and returns an immutable candidate ID, parent and diff. Further edits can branch from that candidate. The active revision is the one selected for installation. A session records the revision or digest it actually loaded.
+1. An agent uses `prompt_list` and `prompt_read` to inspect the effective source and its modules. `prompt_edit` targets one user module at an expected revision and returns an immutable candidate ID, parent and diff. Further edits can branch from that candidate. The active revision is the one selected for installation. A session records the revision or digest it actually loaded.
 2. `prompt_replay` runs the selected original input with the baseline and candidate. `prompt_compare` connects both outputs, the comparison rubric and the judgment to those exact revisions. Record the effective context, provider, model, settings and run identity needed to interpret the result. Missing inputs, changed settings and inconclusive evidence are visible outcomes.
 3. `prompt_promote` requires explicit authority for the evaluated revision and checks its expected active base. `prompt_rollback` explicitly restores a known prior rendering. Apply the revision selection and block update so a stale editor cannot overwrite a newer choice and an interrupted operation can be retried. An experiment cannot enable a disabled block or silently replace a custom prompt. A running session adopts an activated change at the resource boundary above.
 
@@ -30,22 +45,22 @@ The maintainer's existing direct settings editor remains an intentional settings
 
 Open **Prompt manager** from `/harness-settings` in Pi, or launch the local Web interface with `pi-better-harness instructions web`. Both operate on the selected Pi agent directory. The Web manager can open without a running conversation. It serves the local maintainer on loopback and verifies that mutating requests come from its authorized local UI.
 
-| Maintainer action | Product behavior in both interfaces |
+| Local user action | Product behavior in both interfaces |
 | --- | --- |
-| Inspect the prompt | Show the selected global source (Off, modular, saved text or custom file), the active revision, ordered modules and rendered preview. Report what a named Pi session actually loaded when available. A standalone browser shows that session state is unavailable until one is connected. |
-| Prepare a change | Start from the active revision or a saved candidate. Add, edit, order or remove a module in the candidate, then preview the complete prompt. Save an immutable revision with its parent. A draft saved in either interface, or by the agent, can be found and continued in the other after restart. |
-| Review and publish | Select a candidate from the list. Show the base and candidate, changed module text and order before the maintainer confirms publication. Record the explicit human review and the actual revision transition in history. Opening, editing and publishing here require zero model requests. |
+| Inspect the prompt | Show the selected global source (Off, modular, saved text or custom file), the active revision, each module’s origin and enabled state, and the rendered preview. Report what a named Pi session actually loaded when available. A standalone browser shows that session state is unavailable until one is connected. |
+| Prepare a change | Start from the active revision or a saved candidate. Toggle bundled modules or add, edit, order or remove user modules in the candidate, then preview the complete prompt. Save an immutable revision with its parent. A draft saved in either interface, or by the agent, can be found and continued in the other after restart. |
+| Review and publish | Select a candidate from the list. Show the base and candidate, bundled selection changes and user-module text or order changes before the user confirms local publication. Record the explicit human review and the actual revision transition in history. Opening, editing and publishing here require zero model requests. |
 | Recover | Show past activations and allow an explicit rollback. A stale editor keeps its candidate and identifies the newer active base. Preserve the installed block under Off or an override. Show when a session needs a reload to adopt a published revision. |
 
 Use one catalog and one implementation of version checks, installation and history across the TUI, Web and agent tools. Existing revisions and activation records remain readable. Discover older agent-created candidates from the existing store. Keep selection stable when the user moves between interfaces. Read or refresh on open, an explicit refresh or a relevant change, within the performance rules in [ADR 0032](0032-runtime-performance-design.md).
 
-Human publication is an explicit maintainer operation, like saving in the existing settings editor. It records a manual review of the selected diff. Model-driven promotion still requires evaluation evidence for the exact revision pair and maintainer confirmation. History identifies which action occurred. Neither path silently enables the block or converts an existing override.
+Human publication is an explicit local user operation, like saving in the existing settings editor. It records a manual review of the selected diff. Model-driven promotion still requires evaluation evidence for the exact revision pair and maintainer confirmation. History identifies which action occurred. Neither path silently enables the block or converts an existing override.
 
 ## Replay and evaluation from a selected revision
 
 After the manager can ship independently, add **Replay a response** and **Evaluate a case suite** to the selected candidate in both interfaces. Carry the displayed baseline and candidate IDs into the existing replay and evaluation operations. Let the maintainer select an available capture and its owning session for replay, or a reviewed suite and supported model for evaluation. The standalone Web interface needs a session connection for an in-memory capture. Explain a missing capture, disconnected session, shadowed prompt or unsupported provider at the action that needs it. The catalog and editor remain usable.
 
-Return to the same candidate with the paired responses, case-level outcomes, rubric and judgment. Save the evidence against both revisions so it can be reopened in either interface and used for a later promotion of that pair. Running an experiment never activates a revision. Response replay and suite evaluation are the first two product journeys. Turn and task replay retain the capture and isolation contracts below.
+Return to the same candidate with the paired responses, case-level outcomes, rubric and judgment. Save the evidence against the exact two effective revisions, including bundled content versions, enabled bundled IDs and ordered user-module versions. It can be reopened in either interface and used for a later promotion of that pair. Display upstream validation separately from the result of replaying this user's selection. A changed toggle or user edit yields a different comparison target. Running an experiment never activates a revision. Response replay and suite evaluation are the first two product journeys. Turn and task replay retain the capture and isolation contracts below.
 
 ## What each replay reconstructs
 
@@ -67,7 +82,7 @@ The original implementation milestones were as follows.
 
 Verify the product amendment with two independent journeys.
 
-1. With no provider configured, edit a module in the TUI, reopen that candidate in Web, inspect the diff and explicitly publish it. After a Pi reload, verify the selected revision was loaded. Roll back from the other interface and recover the prior rendered bytes.
+1. With no provider configured, turn off one bundled module and edit a user module in the TUI. Reopen that candidate in Web, inspect the selection and text changes and explicitly publish it. After a Pi reload, verify the selected revision was loaded. Roll back from the other interface and recover the prior rendered bytes.
 2. From a selected candidate, run a captured response replay and a reviewed case suite on a supported provider fixture. Reopen the resulting evidence in the other interface and verify the exact revision pair. Record a judgment and explicitly choose whether to promote.
 
 Template rendering runs when its sources or selection change. Replays and evaluations run on demand. Ordinary turns and compaction incur no extra history scan, provider request or template rewrite. [Runtime performance principles](0032-runtime-performance-design.md)
