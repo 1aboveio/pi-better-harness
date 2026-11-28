@@ -16,6 +16,25 @@ async function fixture(t: TestContext, handler: (socket: Socket, message: any) =
  return {root,path,listen:()=>new Promise<void>(r=>server.listen(path,r))};
 }
 const reply=(s: Socket,m: any)=>s.write(JSON.stringify({id:m.id,success:true,data:{capabilities:[]}})+'\n');
+test('a pending launch keeps its receipt while an ordinary read times out', async t => {
+ const f = await fixture(t, (socket, message) => {
+   if (message.type === 'hello') reply(socket, message);
+   if (message.type === 'runtime_launch_subagent') {
+     setTimeout(() => socket.write(JSON.stringify({id: message.id, success: true, data: {status: 'partial'}}) + '\n'), 5500);
+   }
+ });
+ await f.listen();
+ const client = new transport.WorkClient(f.path, f.root);
+ try {
+   await client.ready;
+   const [receipt] = await Promise.all([
+     client.request('runtime_launch_subagent'),
+     assert.rejects(client.request('runtime_get_snapshot'), /timed out/),
+   ]);
+   assert.deepEqual(receipt, {status: 'partial'});
+ } finally { client.close(); }
+});
+
 test('concurrent connects survive missing socket with one recovery and no command replay',async t=>{
  let recoveries=0,commands=0;
  const f=await fixture(t,(s,m)=>{if(m.type==='hello')reply(s,m);else{commands++;s.destroy();}});

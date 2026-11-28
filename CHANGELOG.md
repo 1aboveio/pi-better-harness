@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.59.3] - 2026-11-28
+
+### Fixed
+
+- Bundled Subagents now waits up to two minutes for a managed launch receipt, so a batch that takes longer than five seconds can report which workers started.
+
+## [pi-better-subagents@0.40.2] - 2026-11-28
+
+### Fixed
+
+- Keep the launch grant available while waiting up to two minutes for a batch receipt. Previously, a five-second timeout could revoke the grant between workers.
+
+## [pi-better-background-tasks@0.21.6] - 2026-11-28
+
+### Changed
+
+- Update the bundled shared client with the managed subagent launch timeout. Background task reads retain their five-second timeout.
+
+## [pi-better-server@0.8.6] - 2026-11-28
+
+### Fixed
+
+- Allow two minutes for a managed subagent launch receipt. Ordinary runtime requests keep their five-second timeout.
+
 ## [pi-better-harness@0.59.2] - 2026-11-28
 
 ### Fixed
