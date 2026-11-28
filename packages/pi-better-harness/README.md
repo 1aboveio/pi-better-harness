@@ -355,6 +355,58 @@ A requested tool ends that arm and is reported for turn replay. Comparisons
 and revision history are saved under `<agent-dir>/harness-prompt-revisions`.
 The offline walkthrough runs with `node --test packages/pi-better-harness/test/harness-instructions.test.mjs` from the repository root.
 
+### Replay a turn or task
+
+After `/prompt-capture`, let the original turn finish. Ask for
+`prompt_turn_replay` with the case ID, candidate ID and generation budget
+(1 through 64 per arm). Each requested tool must match the next recorded
+name and arguments. The result includes the assistant actions, returned tool
+data and the first divergence, cancellation or budget stop.
+
+For a multi-turn file task, run `/prompt-task-capture task.json` from the Git
+repository root before sending the first task input. For example:
+
+```json
+{
+  "turns": 2,
+  "required": ["notes.txt"],
+  "omit": ["node_modules"],
+  "checks": [{ "path": "notes.txt", "equals": "Ready for review.\n" }]
+}
+```
+
+Capture records the starting commit and working files, including untracked
+and uncommitted inputs. Use `omit` for paths outside the task. Send the
+declared number of user turns and request `prompt_task_replay` with the same
+arguments as turn replay. Each arm restores a private checkout, shares its
+budget across the turns and reports its diff and file-equality checks.
+The fixture supports whole-file `read` and `write` on restored regular files.
+Other actions, including shell commands and external writes, stop that arm
+with a trace. Reload or start another capture to release the saved checkpoint.
+
+### Evaluate cases and propose edits
+
+Run `prompt_evaluate` with a sample count (1 through 16) and an optional
+candidate ID. The default suite pairs narrow status questions with a delivery
+question that needs a qualification. Each case has expected behavior, a
+counterexample and a case-insensitive required/forbidden phrase rubric.
+The report includes every response and its score or reason it could not be scored.
+
+After a response replay, `/prompt-export path.json` opens its captured input
+for review and redaction. Add the rubric and examples before saving the new
+file. In another session, `/prompt-import path.json` loads the reviewed suite.
+An empty import argument restores the bundled cases.
+
+To use evaluated cases for an edit, enable `/prompt-learning on`. Ask the
+agent to select two distinct baseline failures with the same failure category
+and one passing counterexample. With `prompt_propose`, it supplies those IDs
+and a replacement module. Inspect the before/after samples, then use
+`prompt_judge_proposal` and `prompt_promote` or clear the pending proposal
+with `/prompt-learning discard`. Learning is disabled in a fresh session.
+
+Run `node --test packages/pi-better-harness/test/prompt-experiments.test.mjs`
+from the repository root for the offline turn, task and historical-case fixtures.
+
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in
 this version, and makes no auxiliary model requests. The integration blocker is

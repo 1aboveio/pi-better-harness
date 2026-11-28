@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "@sinclair/typebox";
+import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { evaluateCases, inspectSuite, moduleSlot, proposalCases, writingCases } from "./prompt-cases.mjs";
 import { defaultAgentDir } from "./install-settings.mjs";
 import { activatePrompt, promptSource } from "./instructions.mjs";
+import { recordedDispatch, recordedTools, replayTurn } from "./prompt-turn.mjs";
+import { checkpoint, taskArm } from "./prompt-task.mjs";
 import { activeRevision, begin, createCandidate, end, history, readRevision, recordEvaluation } from "./prompt-revisions.mjs";
 
 function difference(before, after) {
@@ -36,17 +42,24 @@ async function generate(payload, model, ctx, signal) {
     defaultHeaders: { ...model.headers, ...auth.headers }, maxRetries: 0 });
   const stream = await client.chat.completions.create(payload, { signal });
   let text = "";
+  const calls = [];
   let requiresTurnReplay = false;
   let finish;
   for await (const chunk of stream) {
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     text += choice.delta.content ?? "";
+    for (const part of choice.delta.tool_calls ?? []) {
+      const call = calls[part.index] ??= { id: "", type: "function", function: { name: "", arguments: "" } };
+      call.id += part.id ?? "";
+      call.function.name += part.function?.name ?? "";
+      call.function.arguments += part.function?.arguments ?? "";
+    }
     requiresTurnReplay ||= !!(choice.delta.tool_calls?.length || choice.delta.function_call);
     finish = choice.finish_reason ?? finish;
   }
   if (!finish) throw Error("Incomplete response replay");
-  return { text, finish, requiresTurnReplay: requiresTurnReplay || ["tool_calls", "function_call"].includes(finish) };
+  return { text, calls, finish, requiresTurnReplay: requiresTurnReplay || ["tool_calls", "function_call"].includes(finish) };
 }
 
 export default function registerPromptTools(pi) {
@@ -54,6 +67,11 @@ export default function registerPromptTools(pi) {
   if (promptSource(dir) !== "modular") return;
   let capture;
   let run;
+  let cases = writingCases;
+  let comparison;
+  let learning = false;
+  let proposal;
+  let task;
   const string = Type.String({ minLength: 1 });
   const tool = (name, description, fields, execute) => pi.registerTool({
     name, label: name, description, parameters: Type.Object(fields),
@@ -89,15 +107,49 @@ export default function registerPromptTools(pi) {
     handler: async (_, ctx) => {
       if (ctx.model?.api !== "openai-completions") throw Error("Response capture supports openai-completions models.");
       active();
-      capture = { id: randomUUID() };
+      task?.snapshot.dispose();
+      task = undefined;
+      capture = { id: randomUUID(), recording: true, records: [] };
       run = undefined;
       ctx.ui.notify(`Capturing the next response for case ${capture.id}.`, "info");
     } });
+  pi.registerCommand("prompt-task-capture", { description: "Checkpoint the current workspace before a task and capture its user turns.",
+    handler: async (path, ctx) => {
+      if (ctx.model?.api !== "openai-completions" || !path.trim()) throw Error("Choose an openai-completions model and a task manifest.");
+      const spec = JSON.parse(await readFile(resolve(ctx.cwd, path.trim()), "utf8"));
+      const snapshot = await checkpoint(ctx.cwd, spec);
+      task?.snapshot.dispose();
+      task = { snapshot, inputs: [], next: true };
+      capture = { id: randomUUID(), recording: true, records: [] };
+      run = undefined;
+      ctx.ui.notify(`Checkpointed ${snapshot.head} for ${spec.turns} user turns.`, "info");
+    } });
   pi.on("before_provider_request", (event, ctx) => {
-    if (!capture || capture.reference || !Array.isArray(event.payload?.messages)) return;
+    if (task && task.inputs.length < task.snapshot.spec.turns) {
+      const { messages, ...settings } = event.payload ?? {};
+      if (!Array.isArray(messages)) { task.problem = "Missing task request messages"; return; }
+      if (task.next) {
+        const input = messages.at(-1);
+        if (input?.role !== "user") task.problem = "Missing original user input";
+        else task.inputs.push(structuredClone(input));
+        if (task.previous && (messages.length !== task.previous.length + 2 || messages.at(-2).role !== "assistant" ||
+          !isDeepStrictEqual(messages.slice(0, -2), task.previous))) task.problem = "Task history changed between user turns";
+        task.next = false;
+      }
+      if (task.settings && (!isDeepStrictEqual(settings, task.settings) || ctx.model?.provider !== capture?.model?.provider))
+        task.problem = "Task model, provider options or tool definitions changed";
+      task.settings = structuredClone(settings);
+      task.previous = structuredClone(messages);
+    }
+    if (!capture?.recording || !Array.isArray(event.payload?.messages)) return;
+    if (capture.reference) {
+      capture.records = recordedTools(event.payload.messages, capture.payload.messages.length);
+      return;
+    }
     capture.payload = structuredClone(event.payload);
     capture.model = structuredClone(ctx.model);
   });
+  pi.on("agent_end", () => { if (capture) capture.recording = false; if (task) task.next = true; });
   pi.on("message_end", event => {
     if (capture?.payload && !capture.reference && event.message.role === "assistant") {
       if (["error", "aborted"].includes(event.message.stopReason)) {
@@ -107,7 +159,93 @@ export default function registerPromptTools(pi) {
       capture.reference = structuredClone(event.message.content.filter(part => part.type !== "thinking"));
     }
   });
-  pi.on("session_shutdown", () => { capture = undefined; run = undefined; });
+  pi.on("session_shutdown", () => {
+    task?.snapshot.dispose();
+    task = undefined;
+    capture = undefined;
+    run = undefined;
+    cases = writingCases;
+    comparison = undefined;
+    learning = false;
+    proposal = undefined;
+  });
+  tool("prompt_task_replay", "Restore a captured workspace independently for two bounded multi-turn task runs.",
+    { caseId: string, candidate: string, budget: Type.Integer({ minimum: 1, maximum: 64 }) }, async (args, ctx, signal) => {
+      if (!task || !capture?.reference || args.caseId !== capture.id || task.inputs.length !== task.snapshot.spec.turns)
+        throw Error("Missing task checkpoint or original task inputs.");
+      if (task.problem) throw Error(task.problem);
+      const baseline = active();
+      const candidate = readRevision(dir, args.candidate);
+      const { snapshot, inputs } = task;
+      const { payload, model } = capture;
+      const arm = revision => taskArm(snapshot, swapModule(payload, baseline, revision), inputs.slice(1),
+        body => generate(body, model, ctx, signal), args.budget, signal);
+      return { caseId: args.caseId, active: baseline.id, candidate: candidate.id, restored: { head: snapshot.head, entries: snapshot.entries },
+        inputs, baselineOutput: await arm(baseline), candidateOutput: await arm(candidate) };
+    });
+  pi.registerCommand("prompt-export", { description: "Review and export the last replay case to a new JSON file.",
+    handler: async (path, ctx) => {
+      if (!ctx.hasUI || !path.trim() || !capture || !run || run.caseId !== capture.id)
+        throw Error("Replay the captured input first, then use /prompt-export <new-file.json> in the UI.");
+      const payload = swapModule(capture.payload, readRevision(dir, run.active), { rendered: moduleSlot });
+      const draft = { version: 1, cases: [{ id: capture.id, level: "response", provider: run.provider, model: run.model, payload,
+        expected: "", counterexample: "", failure: "", rubric: { required: [], forbidden: [] } }] };
+      const reviewed = await ctx.ui.editor("Review and redact captured input. Add expected behavior, counterexample and rubric.", JSON.stringify(draft, null, 2));
+      if (!reviewed) return;
+      inspectSuite(JSON.parse(reviewed));
+      await writeFile(resolve(ctx.cwd, path.trim()), reviewed + "\n", { flag: "wx", mode: 0o600 });
+    } });
+  pi.registerCommand("prompt-import", { description: "Load a reviewed case suite, or use the bundled writing cases with no argument.",
+    handler: async (path, ctx) => {
+      cases = path.trim() ? inspectSuite(JSON.parse(await readFile(resolve(ctx.cwd, path.trim()), "utf8"))) : writingCases;
+      comparison = undefined;
+      ctx.ui.notify(`Loaded ${cases.length} prompt cases.`, "info");
+    } });
+  const evaluate = (selected, candidate, count, ctx, signal) => evaluateCases(selected, active(), candidate, count,
+    c => c.model ? ctx.modelRegistry.find(c.provider, c.model) : ctx.model,
+    (body, model) => generate(body, model, ctx, signal), signal);
+  tool("prompt_evaluate", "Compare revisions on the imported suite or bundled writing cases.",
+    { candidate: Type.Optional(string), samples: Type.Integer({ minimum: 1, maximum: 16 }) }, async (args, ctx, signal) => {
+      comparison = await evaluate(cases, args.candidate ? readRevision(dir, args.candidate) : active(), args.samples, ctx, signal);
+      return comparison;
+    });
+  pi.registerCommand("prompt-learning", { description: "Enable case-based proposals for this session (on/off), or discard the pending proposal.",
+    handler: async (args, ctx) => {
+      if (!["on", "off", "discard"].includes(args.trim())) throw Error("Use /prompt-learning on, off or discard.");
+      if (args.trim() !== "discard") learning = args.trim() === "on";
+      proposal = undefined;
+      ctx.ui.notify(`Case-based proposals ${learning ? "enabled" : "disabled"}. Pending proposal cleared.`, "info");
+    } });
+  tool("prompt_propose", "Propose one module edit for repeated observed failures and rerun those cases and a counterexample.",
+    { module: string, text: string, failures: Type.Array(string, { minItems: 2 }), counterexample: string },
+    async (args, ctx, signal) => {
+      if (!learning || !comparison || comparison.active !== active().id)
+        throw Error("Enable /prompt-learning on and evaluate the current active revision.");
+      const selected = proposalCases(comparison, args.failures, args.counterexample, cases);
+      const before = comparison.results.filter(row => selected.some(c => c.id === row.id));
+      const edit = createCandidate(dir, comparison.active, comparison.active, args.module, args.text);
+      const after = await evaluate(selected, readRevision(dir, edit.id), comparison.sampleCount, ctx, signal);
+      proposal = { id: edit.id, edit, before, after, cases: selected, counterexample: args.counterexample };
+      return proposal;
+    });
+  tool("prompt_judge_proposal", "Record a judgment for the pending proposal and produce evidence for explicit promotion.",
+    { candidate: string, judgment: string }, args => {
+      if (!learning || !proposal || proposal.id !== args.candidate) throw Error("Unknown or discarded proposal.");
+      const result = { ...proposal.after, proposal, judgment: args.judgment };
+      if (result.results.some(row => row.status !== "scored" || row.samples.some(s => [s.baseline, s.candidate].some(a => a.status === "inconclusive"))))
+        throw Error("Incomplete comparisons cannot authorize promotion. Inspect the proposal results.");
+      return { evaluation: recordEvaluation(dir, result), judgment: args.judgment };
+    });
+  tool("prompt_turn_replay", "Replay a captured user turn using its recorded tool results.",
+    { caseId: string, candidate: string, budget: Type.Integer({ minimum: 1, maximum: 64 }) }, async (args, ctx, signal) => {
+      if (!capture?.reference || capture.id !== args.caseId) throw Error("Missing captured turn.");
+      const baseline = active();
+      const candidate = readRevision(dir, args.candidate);
+      const { payload, records, model } = capture;
+      const arm = revision => replayTurn(swapModule(payload, baseline, revision), {
+        generate: body => generate(body, model, ctx, signal), dispatch: recordedDispatch(records), budget: args.budget, signal });
+      return { caseId: args.caseId, active: baseline.id, candidate: candidate.id, baselineOutput: await arm(baseline), candidateOutput: await arm(candidate) };
+    });
   tool("prompt_replay", "Generate both arms from a captured writing input. No requested tools are executed.",
     { caseId: string, candidate: string }, async (args, ctx, signal) => {
       const selected = capture;
