@@ -18,7 +18,7 @@ server 按需启动；无客户端、托管保留或可推进后台工作时自�
 
 ## 本地 Web 管理页
 
-本地控制台的产品名为 **Pi Better Harness**。用户通过同一个 Web 入口查看 Server、托管会话、Prompts、Agent Catalog、MCP、Skills 和 Tools。七个一级入口复用同一种菜单项样式及选中、悬停、键盘焦点状态。Web 进程独立于所管理的 daemon，绑定到本机回环地址。建议从 `pi-better-harness web` 打开 Server 总览；ADR 0033 的 `pi-better-harness instructions web` 继续直达 Prompts。两种入口选择同一个 Pi agent 目录。页面及原型见[本地控制台设计](../design/local-server-web/README.md)。
+本地控制台的产品名为 **Pi Better Harness**。用户通过同一个 Web 入口查看 Server、托管会话、Prompts、Agent Catalog、MCP、Skills 和 Tools。七个一级入口复用同一种菜单项样式及选中、悬停、键盘焦点状态。Web 进程独立于所管理的 daemon，绑定到本机回环地址。从终端运行 `pi-better-harness web` 打开 Server 总览，选择 **Prompts** 进入 **Edit**。已有命令 `pi-better-harness instructions web` 直接打开 **Prompts → Edit**。在 Pi 内通过 `/harness-settings → Prompt manager → Open in browser` 打开相同页面。三个入口使用同一 Pi agent 目录。打开页面不会启动托管 daemon 或授予会话 capture 的访问权。[入口验收 #970](https://github.com/1aboveio/pi-better-harness/issues/970)。页面及原型见[本地控制台设计](../design/local-server-web/README.md)。
 
 - **读取。** Web 后端通过现有本地 socket 客户端，在握手后读取构建、协议、会话和升级状态。打开页面、刷新或查看详情均为被动观测。浏览器保留上次观测时间；超时和身份不明显示“状态未知”，握手不兼容显示具体原因。单独一次连接失败不足以判定 daemon 已停止。
 - **启动。** 只有本机启动逻辑能确认该目录的 daemon 已停止时，页面才提供启动操作。用户显式点击后，Web 后端调用已有的 managed `ensure`，显示等待结果，并重新握手确认目标实例。并发点击或执行中断遵循既有单实例所有权与恢复约定。普通浏览及空闲标签页遵循 daemon 原有退出策略。

@@ -45,7 +45,15 @@ The maintainer's existing direct settings editor remains an intentional settings
 
 ## The maintainer's prompt manager
 
-Open **Prompt manager** from `/harness-settings` in Pi, or launch the local Web interface with `pi-better-harness instructions web`. Both operate on the selected Pi agent directory. The Web manager can open without a running conversation. It serves the local maintainer on loopback and verifies that mutating requests come from its authorized local UI. The shared local console links to this manager from Prompts. Its Server and Sessions pages use the daemon socket independently, so a stopped daemon still allows local prompt editing. [Local console decision](0023-unified-server-runtime.md#本地-web-管理页)
+The local Web console and Pi TUI use the same selected agent directory (`PI_CODING_AGENT_DIR`). A maintainer can edit and save with no active conversation, managed daemon or model provider. The browser serves the local maintainer on loopback and verifies that mutations come from its authorized UI. [Local console decision](0023-unified-server-runtime.md#本地-web-管理页) · [Launcher implementation #970](https://github.com/1aboveio/pi-better-harness/issues/970)
+
+| Starting point | Action | Landing |
+| --- | --- | --- |
+| Terminal, working on prompts | `pi-better-harness instructions web` | Opens **Prompts → Edit** in the default browser. The CLI prints a private local URL. Set `BROWSER=none` to open that URL manually. Keep the CLI running while using the page. |
+| Terminal, managing the server | `pi-better-harness web` | Opens **Server** in the same console. Select **Prompts** to reach **Edit**. |
+| Active Pi TUI | `/harness-settings → Prompt manager → Open in browser` | Opens **Prompts → Edit** using the TUI’s agent directory. The existing TUI manager remains accessible from the same menu. |
+
+Opening the page is independent of granting access to session captures. For single-response Replay, the maintainer chooses **Connect browser** in the owning Pi session and selects that session and request in the browser. Entering a view never starts a model request. The prompt workflow is **Edit → Save → optional Replay**, with only **Edit** and **Replay** in the workspace navigation.
 
 | Local user action | Product behavior in both interfaces |
 | --- | --- |
