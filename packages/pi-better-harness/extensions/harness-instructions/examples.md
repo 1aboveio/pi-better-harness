@@ -1,10 +1,22 @@
 # Default module cases
 
-| Module | Prior guidance | Observable behavior |
-| --- | --- | --- |
-| collaboration | Original Harness default on project instructions | A repository's specific status format takes precedence. |
-| communication | ADR 0033, status pair | For "Did the unit run pass?", report that run's result. |
-| verification | Original Harness status default | For "Can we close delivery?", disclose the outstanding acceptance check. |
-| ownership | ADR 0018, outcome Todo | Run the pending acceptance check when asked to finish delivery. |
-| engineering | Issue 947, validated-value example | Pass an already validated internal value through without adding another parser. |
-| decisions | Issue 947, retry example | Preserve the payment operation's existing idempotency key when retrying. |
+The 2026-11-27 *Prompt Engineering gap analysis* examined historical delivery decisions, prompt assembly, writing and engineering guidance. This batch imports the cross-project behaviors into the six existing slots. The table gives an example that should trigger each rule and a control that should produce a different action. Only the Markdown in `modules/` is rendered into the global prompt.
+
+| Module | Source in the gap analysis | Positive case | Control |
+| --- | --- | --- | --- |
+| collaboration | §§1–2, Developer / resolve-issues ownership and the Dynamic Workflow handoff that omitted a separately stored acceptance criterion. The brief comparison demonstrated the omission in assembled text. | A worker implements a profile page. Pass it the agreed expired-session behavior or its exact reference. Give the reviewer the same criterion. | A read-only investigation gives its findings to the owner. A handoff cannot grant permission to push a branch. Follow the repo's specific handoff format when present. |
+| communication | §4, plain-language evaluation case 100 in English and Chinese. The established distinction is whether a qualification changes the reader's decision. | Asked whether one local replay passed, answer with its observed result. | Asked whether delivery can close, disclose the outstanding agreed check and the decision it affects. |
+| engineering | §3, the engineering and resolve-issues implementation guides. The validated-value and retryable-operation pair covers both unnecessary support code and real invariants. | A display-label edit uses the typed value returned by the existing parser. Handle the supported inputs. | A charge request can time out after the upstream system accepts it. Retain the same idempotency key across its retry. |
+| verification | §§4–5, the readiness pair and the Wave 1 handoff replay that recovered the original user action and expected result. One comparison per scenario supports retaining the case, not a reliability estimate. | A handoff says a workflow passed. Trace it to the original request: the user signs in and reads an authorized record. Check that behavior in the target environment. | A database write is outside that read-only requirement. Keep valid evidence for the environment it covered and target the missing check. |
+| ownership | §5, user correction and evidence reuse, together with the existing Harness Outcome lifecycle. The gap analysis proposed a longer fresh/resumed-session comparison. | The user corrects the target client midway. Resume the authorized task with the outstanding check on that client. | If a necessary device is unavailable, record the missing observation and how to resume. For a request limited to a status report, answer the question. |
+| decisions | §3, better-review findings grounded in a supported failure or an unmet binding requirement. Existing review guidance allows zero blockers. | A retry can duplicate an accepted charge. Identify the triggering sequence and the caller guarantee it breaks. | When a hypothetical input is outside the supported contract and no requirement covers it, it cannot justify blocking the change. |
+
+## Replay and evaluation
+
+For a first fork replay, prefer an authorized session just before the user asks about one test result or whether the task is ready. Compare the same turn under the previous and proposed bundles. The report should answer the decision asked and retain any material limit. Repeat with the contrasting question. The existing deterministic writing fixture can check capture and result plumbing. It cannot establish the wording's effect on a live model.
+
+For full-session evaluation, prefer a complete handoff with a documented user action and end state, then a complete task involving a supported retry. Fix the expected read-only outcome or single financial effect before either arm runs. Score the actual result, the acceptance check performed and any extra gate the agent introduced. Unknown expectations or missing starting state need to be supplied before a session can be scored.
+
+The role that owns a branch push and the fields transferred by a workflow belong to the role and dispatcher. Keep those fixes in their owning components. The phrase “passed” in a historical record applies to the run and scope it identifies. It grants no validation to this new bundle digest.
+
+[Initial seed and cases](https://github.com/1aboveio/pi-better-harness/issues/947) · [Prompt ownership and replay](../../../../docs/adr/0033-modular-prompts-and-replay.md) · [Goal and Todo lifecycle](../../../../docs/adr/0030-goal-and-todo-lifecycle.md) · [Replay fixtures](../../test/prompt-experiments.test.mjs)

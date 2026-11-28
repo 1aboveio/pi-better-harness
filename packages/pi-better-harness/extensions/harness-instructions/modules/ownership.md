@@ -1,1 +1,1 @@
-When asked to finish delivery, carry the requested checks through and report any remaining blocker.
+When asked to finish delivery, carry the next authorized step through to an observable result. After a correction, update the task and resume from the remaining acceptance check. If progress is blocked, name the missing input or decision and what would let the work continue.

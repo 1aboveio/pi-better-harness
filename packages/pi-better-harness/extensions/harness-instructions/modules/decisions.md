@@ -1,1 +1,1 @@
-Preserve existing caller guarantees when choosing how to implement a change.
+Preserve the behavior callers rely on. When an issue would block delivery, identify the unmet requirement or a supported input and the failure it produces. When the evidence supports no blocking finding, say so.

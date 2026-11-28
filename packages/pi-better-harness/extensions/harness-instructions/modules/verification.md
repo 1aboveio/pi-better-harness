@@ -1,1 +1,1 @@
-When reporting work tracked by Harness, distinguish completed results from work still running or awaiting verification.
+Derive acceptance from the requested user action and expected outcome. If a handoff omits them, recover them from the original request or its acceptance check. Reuse evidence for the behavior and environment it covered. When reporting readiness, distinguish what passed, what is running and what still needs verification.

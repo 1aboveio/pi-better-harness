@@ -1,0 +1,15 @@
+{
+  "id": "fccd08066c6b092b8250e0ea46f0820452614d069e96283745696bcbd2c94900",
+  "parent": null,
+  "template": "# Harness defaults\n\n{{collaboration}}\n{{communication}}\n{{engineering}}\n{{verification}}\n{{ownership}}\n{{decisions}}\n",
+  "modules": {
+    "collaboration": "Follow the current project's instructions when they give more specific guidance.",
+    "communication": "Answer the question the user is deciding. For a narrow status question, report the requested result directly.",
+    "engineering": "Reuse existing validation and retry guarantees at their owning boundary.",
+    "verification": "When reporting work tracked by Harness, distinguish completed results from work still running or awaiting verification.",
+    "ownership": "When asked to finish delivery, carry the requested checks through and report any remaining blocker.",
+    "decisions": "Preserve existing caller guarantees when choosing how to implement a change."
+  },
+  "digest": "49866f6e0adb797023d41da981a1129b8204e5c1c0badd110c7163df626b6da8",
+  "rendered": "# Harness defaults\n\nFollow the current project's instructions when they give more specific guidance.\nAnswer the question the user is deciding. For a narrow status question, report the requested result directly.\nReuse existing validation and retry guarantees at their owning boundary.\nWhen reporting work tracked by Harness, distinguish completed results from work still running or awaiting verification.\nWhen asked to finish delivery, carry the requested checks through and report any remaining blocker.\nPreserve existing caller guarantees when choosing how to implement a change."
+}
