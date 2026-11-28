@@ -29,7 +29,8 @@
       "extensions/tool-call-guard/index.ts",
       "extensions/recap/index.ts",
       "extensions/supervisor/index.ts",
-      "extensions/settings/index.ts"
+      "extensions/settings/index.ts",
+      "extensions/harness-instructions/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
   },
@@ -52,8 +53,9 @@
     "bin/*.mjs",
     "lib/*.mjs",
     "lib/instructions.d.mts",
+    "lib/prompt-tools.d.mts",
     "extensions/**/*.ts",
-    "extensions/harness-instructions/AGENTS.md"
+    "extensions/harness-instructions/**/*.md"
   ],
   "scripts": {
     "prepack": "node ../../scripts/generate-harness-changelog.mjs && node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/stage-harness-dependencies.mjs",

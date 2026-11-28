@@ -2,7 +2,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configureHarnessResources, preflightHarnessInstall } from "./install-settings.mjs";
+import { configureHarnessResources, defaultAgentDir, preflightHarnessInstall } from "./install-settings.mjs";
+import { activeRevision } from "./prompt-revisions.mjs";
 import { manageInstructions } from "./instructions.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,7 +22,7 @@ export const componentPackages = [
 ];
 
 const usage = `Usage: pi-better-harness <install|uninstall> [--local]
-       pi-better-harness instructions <enable|sync|disable>
+       pi-better-harness instructions <preview|enable|sync|disable>
 
 Commands:
   instructions  Manage the Harness block in the global APPEND_SYSTEM.md
@@ -58,8 +59,12 @@ export function run(argv, options = {}) {
   const local = argv.includes("--local") || argv.includes("-l");
   const positional = argv.filter((arg) => !["--local", "-l"].includes(arg));
   const command = positional[0];
-  if (command === "instructions" && !local && positional.length === 2 && ["enable", "sync", "disable"].includes(positional[1])) {
+  if (command === "instructions" && !local && positional.length === 2 && ["preview", "enable", "sync", "disable"].includes(positional[1])) {
     try {
+      if (positional[1] === "preview") {
+        stdout.write(activeRevision(options.agentDir ?? defaultAgentDir()).rendered + "\n");
+        return 0;
+      }
       const changed = manageInstructions(positional[1], options.agentDir);
       stdout.write(changed ? "Updated the Harness block in APPEND_SYSTEM.md.\n" : "No change to APPEND_SYSTEM.md.\n");
       return 0;

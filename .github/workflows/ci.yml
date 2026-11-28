@@ -522,6 +522,14 @@ jobs:
             node_modules/pi-better-subagents/supervisor-client.mjs \
             extensions/recap/summary.ts \
             extensions/settings/index.ts \
+            extensions/harness-instructions/index.ts \
+            extensions/harness-instructions/AGENTS.md \
+            extensions/harness-instructions/modules/communication.md \
+            extensions/harness-instructions/modules/decisions.md \
+            extensions/harness-instructions/modules/engineering.md \
+            extensions/harness-instructions/modules/ownership.md \
+            extensions/harness-instructions/modules/verification.md \
+            extensions/harness-instructions/modules/collaboration.md \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-sandbox/shared-sandbox-diagnostics.ts \
